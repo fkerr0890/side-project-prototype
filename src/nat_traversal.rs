@@ -32,7 +32,7 @@ pub async fn stun() -> Result<(), Error> {
 
     let (handler_tx, mut handler_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let conn = UdpSocket::bind("0.0.0.0:0").await?;
+    let conn = UdpSocket::bind("0.0.0.0:8080").await?;
     println!("Local address: {}", conn.local_addr()?);
 
     println!("Connecting to: {server}");
@@ -50,7 +50,6 @@ pub async fn stun() -> Result<(), Error> {
         let mut xor_addr = xoraddr::XorMappedAddress::default();
         xor_addr.get_from(&msg)?;
         println!("Got response: {xor_addr}");
-        println!("Message: {:?}", msg.attributes);
     }
 
     client.close().await?;

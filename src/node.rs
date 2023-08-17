@@ -1,3 +1,4 @@
+use std::io::Error;
 use std::sync::Arc;
 use std::{net::SocketAddrV4, fmt::Display};
 
@@ -6,7 +7,7 @@ use tokio::net::UdpSocket;
 use chrono::{Utc, SecondsFormat};
 
 use crate::message::{Heartbeat, MessageDirection, MessageKind};
-use crate::send::send;
+use crate::gateway::Gateway;
 
 pub struct Node {
     pub endpoint_pair: EndpointPair,
@@ -14,18 +15,22 @@ pub struct Node {
     peers: DoublePriorityQueue<Peer, i32>,
     found_by: Vec<Peer>,
     nat_kind: NatKind,
-    max_peers: usize
+    max_peers: usize,
+    gateway: Gateway
 }
 
 impl Node {
-    pub fn new(endpoint_pair: EndpointPair, id: String, max_peers: usize) -> Self {
+    pub async fn new(endpoint_pair: EndpointPair, id: String, max_peers: usize) -> Self {
+        let socket = UdpSocket::bind(endpoint_pair.private_endpoint).await.expect("Socket bind failed");
+        println!("Socket: {:?}", socket);
         Self {
             endpoint_pair,
             id,
             peers: DoublePriorityQueue::new(),
             found_by: Vec::new(),
             nat_kind: NatKind::Unknown, 
-            max_peers
+            max_peers,
+            gateway: Gateway::new(socket).await
         }
     }
 
@@ -40,12 +45,19 @@ impl Node {
         }
     }
 
-    pub async fn send_heartbeats(&self, socket: Arc<UdpSocket>) {
+    pub async fn send_heartbeats(&self) {
         for peer in self.peers.iter() {
             let heartbeat = Heartbeat::new(peer.0.endpoint_pair.clone(), self.endpoint_pair.clone(),
                 Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
-            send(Arc::clone(&socket), heartbeat).await;
+            self.gateway.send(heartbeat).await;
         }
+    }
+
+    pub fn receive_heartbeat(&self) -> Option<Error> {
+        if let Some(error) = self.gateway.receive() {
+            return Some(error);
+        }
+        None
     }
 }
 
