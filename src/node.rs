@@ -1,17 +1,18 @@
 use std::io::Error;
-use std::sync::Arc;
 use std::{net::SocketAddrV4, fmt::Display};
 
 use priority_queue::DoublePriorityQueue;
+use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 use chrono::{Utc, SecondsFormat};
+use uuid::Uuid;
 
-use crate::message::{Heartbeat, MessageDirection, MessageKind};
+use crate::message::BaseMessage;
 use crate::gateway::Gateway;
 
 pub struct Node {
     pub endpoint_pair: EndpointPair,
-    id: String,
+    uuid: Uuid,
     peers: DoublePriorityQueue<Peer, i32>,
     found_by: Vec<Peer>,
     nat_kind: NatKind,
@@ -20,12 +21,12 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(endpoint_pair: EndpointPair, id: String, max_peers: usize) -> Self {
+    pub async fn new(endpoint_pair: EndpointPair, uuid: Uuid, max_peers: usize) -> Self {
         let socket = UdpSocket::bind(endpoint_pair.private_endpoint).await.expect("Socket bind failed");
         println!("Socket: {:?}", socket);
         Self {
             endpoint_pair,
-            id,
+            uuid,
             peers: DoublePriorityQueue::new(),
             found_by: Vec::new(),
             nat_kind: NatKind::Unknown, 
@@ -47,9 +48,9 @@ impl Node {
 
     pub async fn send_heartbeats(&self) {
         for peer in self.peers.iter() {
-            let heartbeat = Heartbeat::new(peer.0.endpoint_pair.clone(), self.endpoint_pair.clone(),
+            let heartbeat = BaseMessage::new(peer.0.endpoint_pair.clone(), self.endpoint_pair.clone(),
                 Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
-            self.gateway.send(heartbeat).await;
+            self.gateway.send(&heartbeat).await;
         }
     }
 
@@ -63,7 +64,7 @@ impl Node {
 
 impl PartialEq for Node {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.uuid == other.uuid
     }
 }
 impl Eq for Node {}
@@ -92,7 +93,7 @@ impl PartialEq for Peer {
 }
 impl Eq for Peer {}
 
-#[derive(Hash, Clone)]
+#[derive(Hash, Clone, Serialize, Deserialize)]
 pub struct EndpointPair {
     pub public_endpoint: SocketAddrV4,
     pub private_endpoint: SocketAddrV4,

@@ -1,5 +1,6 @@
 use p2p::node::{Node, EndpointPair};
 use p2p::nat_traversal::stun;
+use uuid::Uuid;
 
 use std::io;
 use std::net::SocketAddrV4;
@@ -21,7 +22,7 @@ async fn main() -> io::Result<()> {
     let my_public_endpoint = SocketAddrV4::new(args[1].parse().unwrap(), 8080);
     let my_private_endpoint = SocketAddrV4::new("0.0.0.0".parse().unwrap(), args[2].parse().unwrap());
     let my_endpoint_pair = EndpointPair::new(my_public_endpoint, my_private_endpoint);
-    let mut my_node = Node::new(my_endpoint_pair, String::from("0"), 6).await;
+    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), 6).await;
 
     let remote_public_endpoint = SocketAddrV4::new(args[3].parse().unwrap(), args[4].parse().unwrap());
     let remote_private_endpoint = SocketAddrV4::new("0.0.0.0".parse().unwrap(), 0);
@@ -41,7 +42,7 @@ async fn main() -> io::Result<()> {
         }
     });
 
-    for _ in 0..30 {
+    loop {
         sleep(Duration::from_secs(2)).await;
         let node = node_mutex_clone.lock().await;
         if let Some(error) = node.receive_heartbeat() {
