@@ -29,7 +29,7 @@ impl Gateway {
         let mut buf = [0; 1024];
         match self.receiver.try_recv_from(&mut buf) {
             Ok((_n, _addr)) => {
-                println!("Recieved {}", std::str::from_utf8(&buf).unwrap().to_owned());
+                println!("Received {}", std::str::from_utf8(&buf).unwrap().to_owned());
             }
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock) => {
                 println!("Nothing to receive");
