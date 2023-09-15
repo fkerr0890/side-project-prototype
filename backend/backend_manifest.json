@@ -1,0 +1,7 @@
+{
+    "name": "p2pbackend",
+    "description": "Backend for p2p solution",
+    "path": "C:\\Users\\fredk\\side_project\\side-project-prototype\\backend\\target\\debug\\p2p.exe",
+    "type": "stdio",
+    "allowed_extensions": ["p2pclient@test.com"]
+}

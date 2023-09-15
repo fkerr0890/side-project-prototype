@@ -11,15 +11,12 @@ use stun::message::Getter;
 impl Node {
     pub async fn connect_peer(&self, remote_public_endpoint: SocketAddrV4, arc_socket: UdpSocket) -> io::Result<()> {
         loop {
-            println!("Sending to {}", remote_public_endpoint.ip());
             arc_socket.send_to(b"Hello" , remote_public_endpoint).await?;
             let mut buf = [0; 1024];
-            let (len, addr) = arc_socket.recv_from(&mut buf).await.unwrap_or_else(|error| {
-                println!("Error receiving: {:?}", error);
+            let (len, addr) = arc_socket.recv_from(&mut buf).await.unwrap_or_else(|_error| {
                 (0 as usize, SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
             });
             if len != 0 as usize && addr.to_string() == remote_public_endpoint.to_string() {
-                println!("{:?} bytes received from {:?}", len, addr);
                 break
             }
         }

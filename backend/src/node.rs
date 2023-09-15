@@ -1,4 +1,3 @@
-use std::io::Error;
 use std::{net::SocketAddrV4, fmt::Display};
 
 use priority_queue::DoublePriorityQueue;
@@ -23,7 +22,6 @@ pub struct Node {
 impl Node {
     pub async fn new(endpoint_pair: EndpointPair, uuid: Uuid, max_peers: usize) -> Self {
         let socket = UdpSocket::bind(endpoint_pair.private_endpoint).await.expect("Socket bind failed");
-        println!("Socket: {:?}", socket);
         Self {
             endpoint_pair,
             uuid,
@@ -54,11 +52,8 @@ impl Node {
         }
     }
 
-    pub fn receive_heartbeat(&self) -> Option<Error> {
-        if let Some(error) = self.gateway.receive() {
-            return Some(error);
-        }
-        None
+    pub async fn receive_heartbeat(&self) {
+        self.gateway.receive().await;
     }
 }
 
