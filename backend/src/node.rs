@@ -2,12 +2,10 @@ use std::{net::SocketAddrV4, fmt::Display};
 
 use priority_queue::DoublePriorityQueue;
 use serde::{Deserialize, Serialize};
-use tokio::net::UdpSocket;
-use chrono::{Utc, SecondsFormat};
+use tokio::{sync::mpsc, fs};
 use uuid::Uuid;
 
-use crate::message::BaseMessage;
-use crate::gateway::Gateway;
+use crate::{message::{BaseMessage, Heartbeat, FullMessage, MessageDirection, MessageKind}, gateway};
 
 pub struct Node {
     pub endpoint_pair: EndpointPair,
@@ -16,12 +14,12 @@ pub struct Node {
     found_by: Vec<Peer>,
     nat_kind: NatKind,
     max_peers: usize,
-    gateway: Gateway
+    ingress: mpsc::UnboundedReceiver<MessageKind>,
+    egress: mpsc::UnboundedSender<FullMessage>
 }
 
 impl Node {
-    pub async fn new(endpoint_pair: EndpointPair, uuid: Uuid, max_peers: usize) -> Self {
-        let socket = UdpSocket::bind(endpoint_pair.private_endpoint).await.expect("Socket bind failed");
+    pub fn new(endpoint_pair: EndpointPair, uuid: Uuid, max_peers: usize, ingress: mpsc::UnboundedReceiver<MessageKind>, egress: mpsc::UnboundedSender<FullMessage>) -> Self {
         Self {
             endpoint_pair,
             uuid,
@@ -29,8 +27,14 @@ impl Node {
             found_by: Vec::new(),
             nat_kind: NatKind::Unknown, 
             max_peers,
-            gateway: Gateway::new(socket).await
+            ingress,
+            egress
         }
+    }
+
+    pub fn add_initial_peer(mut self, endpoint_pair: EndpointPair) -> Self {
+        self.peers.push(Peer::new(endpoint_pair, 0), 0);
+        self
     }
 
     pub fn add_peer(&mut self, endpoint_pair: EndpointPair, score: i32) {
@@ -40,20 +44,61 @@ impl Node {
             should_push = should_push || worst_peer.1 > &score;
         }
         if should_push {
-            self.peers.push(Peer::new(endpoint_pair), score);
+            self.peers.push(Peer::new(endpoint_pair, score), score);
         }
     }
 
-    pub async fn send_heartbeats(&self) {
-        for peer in self.peers.iter() {
-            let heartbeat = BaseMessage::new(peer.0.endpoint_pair.clone(), self.endpoint_pair.clone(),
-                Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
-            self.gateway.send(&heartbeat).await;
+    pub fn get_peers(&self) -> &DoublePriorityQueue<Peer, i32> {
+        &self.peers
+    }
+
+    pub fn send_search_request(&self, requested_filename: String) {
+        let payload = MessageKind::SearchRequest(requested_filename);
+        for peer in self.get_peers() {
+            let message = FullMessage::new(BaseMessage::new(peer.0.endpoint_pair, self.endpoint_pair), self.endpoint_pair, MessageDirection::Request, payload.clone(), 0, 0);
+            self.egress.send(message).unwrap();
         }
     }
 
-    pub async fn receive_heartbeat(&self) {
-        self.gateway.receive().await;
+    pub async fn send_search_response(&self, requested_filename: String) {
+        gateway::log_debug("Checking for resource");
+        if !check_for_resource(&requested_filename).await {
+            gateway::log_debug("Resource not found");
+            self.send_search_request(requested_filename);
+            return;
+        }
+        let full_path = format!("C:/Users/fredk/Downloads/{}", &requested_filename);
+        let payload = MessageKind::SearchResponse(String::from(requested_filename), fs::read(full_path).await.unwrap());
+        for peer in self.get_peers() {
+            gateway::log_debug("Sending search response");
+            let message = FullMessage::new(BaseMessage::new(peer.0.endpoint_pair, self.endpoint_pair), self.endpoint_pair, MessageDirection::Response, payload.clone(), 0, 0);
+            self.egress.send(message).unwrap();
+        }
+    }
+
+    pub async fn receive(&mut self) {
+        gateway::log_debug("Node listening...");
+        match self.ingress.recv().await {
+            Some(payload) => {
+                gateway::log_debug("Node received message");
+                match payload {
+                    MessageKind::SearchRequest(filename) => self.send_search_response(filename).await,
+                    _ => { gateway::log_debug("message wasn't a search request"); }
+                }
+            },
+            None => {
+                gateway::log_debug("Failed to receive message at node");
+            }
+        }
+    }
+
+    pub fn to_node_info(&self) -> NodeInfo {
+        NodeInfo {
+            endpoint_pair: self.endpoint_pair,
+            uuid: self.uuid.to_string(),
+            nat_kind: self.nat_kind,
+            max_peers: self.max_peers
+        }
     }
 }
 
@@ -66,17 +111,19 @@ impl Eq for Node {}
 
 // pub struct RendevousNode(Node);
 
-#[derive(Hash)]
+#[derive(Hash, Serialize, Deserialize, Copy, Clone)]
 pub struct Peer {
-    endpoint_pair: EndpointPair,
-    status: PeerStatus
+    pub endpoint_pair: EndpointPair,
+    status: PeerStatus,
+    score: i32
 }
 
 impl Peer {
-    fn new(endpoint_pair: EndpointPair) -> Self {
+    fn new(endpoint_pair: EndpointPair, score: i32) -> Self {
         Self {
             endpoint_pair,
-            status: PeerStatus::Disconnected
+            status: PeerStatus::Disconnected,
+            score
         }
     }
 }
@@ -88,7 +135,7 @@ impl PartialEq for Peer {
 }
 impl Eq for Peer {}
 
-#[derive(Hash, Clone, Serialize, Deserialize)]
+#[derive(Hash, Clone, Serialize, Deserialize, Copy)]
 pub struct EndpointPair {
     pub public_endpoint: SocketAddrV4,
     pub private_endpoint: SocketAddrV4,
@@ -116,15 +163,44 @@ impl Display for EndpointPair {
     }
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize, Deserialize, Copy, Clone)]
 enum PeerStatus {
     Disconnected,
     Connected
 }
 
+#[derive(Serialize, Deserialize, Copy, Clone)]
 enum NatKind {
     Unknown,
     Static,
     Easy,
     Hard
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub endpoint_pair: EndpointPair,
+    uuid: String,
+    nat_kind: NatKind,
+    max_peers: usize
+}
+
+pub async fn send_heartbeats(tx: mpsc::UnboundedSender<Heartbeat>) {
+    let peers = serde_json::from_slice::<Vec<Peer>>(&fs::read("C:/Users/fredk/Downloads/peers.json").await.unwrap()).unwrap();
+    let node_info = serde_json::from_slice::<NodeInfo>(&fs::read("C:/Users/fredk/Downloads/me.json").await.unwrap()).unwrap();
+    for peer in peers {
+        let heartbeat = Heartbeat(BaseMessage::new(peer.endpoint_pair, node_info.endpoint_pair));
+        tx.send(heartbeat).unwrap();
+    }
+}
+
+async fn check_for_resource(requested_filename: &str) -> bool {
+    let mut filenames = fs::read_dir("C:/Users/fredk/Downloads/").await.unwrap();
+    while let Ok(Some(filename)) = filenames.next_entry().await {
+        gateway::log_debug(filename.file_name().to_str().unwrap());
+        if filename.file_name().to_str().unwrap() == requested_filename {
+            return true;
+        }
+    }
+    false
 }

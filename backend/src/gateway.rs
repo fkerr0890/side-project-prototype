@@ -1,50 +1,140 @@
-use std::sync::Arc;
-use tokio::{net::UdpSocket, io};
-use tokio::io::{BufWriter, stdout, AsyncWriteExt};
+use once_cell::sync::OnceCell;
+use tokio::fs;
+use tokio::sync::mpsc;
+use tokio::net::UdpSocket;
+use tokio::io::{BufReader, stdin, AsyncReadExt};
 use serde::Serialize;
 
-use crate::message::Message;
+use std::str;
+use std::sync::Arc;
+use std::io::{BufWriter, stdout, Write};
 
-pub struct Gateway {
-    sender: Arc<UdpSocket>,
-    receiver: Arc<UdpSocket>
+use crate::message::{Message, FullMessage, MessageKind, Heartbeat};
+
+pub static IS_NM_HOST: OnceCell<bool> = OnceCell::new();
+
+pub struct OutboundGateway<T: Message> {
+    socket: Arc<UdpSocket>,
+    ingress: mpsc::UnboundedReceiver<T>
 }
 
-impl Gateway {
-    pub async fn new(socket: UdpSocket) -> Self 
+impl<T: Message + Serialize> OutboundGateway<T> {
+    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<T>) -> Self 
     {
-        let arc_socket = Arc::new(socket);
         Self {
-            sender: Arc::clone(&arc_socket),
-            receiver: Arc::clone(&arc_socket)
+            socket: socket.clone(),
+            ingress
         }
     }
 
-    pub async fn send<T: Serialize + Message>(&self, message: &T) {
-        self.sender.send_to(serde_json::to_string(&message).unwrap().as_bytes(), message.dest().public_endpoint).await.expect("Sending failed");
+    pub async fn send(&mut self) {
+        let outbound_message = self.ingress.recv().await.unwrap();
+        log_debug("Sending message");
+        self.socket.send_to(serde_json::to_string(&outbound_message).unwrap().as_bytes(), outbound_message.base_message().dest().public_endpoint).await.unwrap();
+    }
+}
+
+pub struct InboundGateway {
+    socket: Arc<UdpSocket>,
+    egress: mpsc::UnboundedSender<MessageKind>
+}
+
+impl InboundGateway {
+    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<MessageKind>) -> Self 
+    {
+        Self {
+            socket: socket.clone(),
+            egress: egress.clone()
+        }
     }
 
     pub async fn receive(&self) {
         let mut buf = [0; 1024];
-        match self.receiver.try_recv_from(&mut buf) {
+        match self.socket.recv_from(&mut buf).await {
             Ok((n, _addr)) => {
-                send_to_frontend(std::str::from_utf8(&buf[..n]).unwrap()).await;
-            }
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock) => {
+                log_debug(&format!("Received {} bytes", n));
+                self.handle_message(&buf[..n]).await;
             }
             Err(e) => {
-                send_to_frontend(&e.to_string()).await;
+                log_debug(&e.to_string());
             }
+        }
+    }
+    
+    async fn handle_message(&self, message_bytes: &[u8]) {
+        if let Ok(message) = serde_json::from_slice::<FullMessage>(message_bytes) {
+            match message.payload() {
+                MessageKind::SearchRequest(_) => {
+                    log_debug("Received search request");
+                    self.egress.send(message.payload().to_owned()).unwrap();
+                },
+                MessageKind::SearchResponse(filename, file_bytes) => {
+                    log_debug("Received search response");
+                    let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
+                    log_debug(&path);
+                    fs::write(path, file_bytes).await.unwrap();
+                    notify_resource_available(filename.to_owned());
+                }
+                _ => {}
+            }
+        }
+        else {
+            match serde_json::from_slice::<Heartbeat>(message_bytes) {
+                Ok(heartbeat) => log_debug(&serde_json::to_string(&heartbeat).unwrap()),
+                Err(e) => log_debug(&format!("Error deserializing net message: {}", &e.to_string()))
+            }
+        }
+    }
+
+    pub async fn receive_frontend_message(&self) {
+        let mut reader = BufReader::new(stdin());
+        let mut len_bytes = [0; 4];
+        reader.read_exact(&mut len_bytes).await.unwrap();
+        let len = u32::from_ne_bytes(len_bytes);
+        let mut message_bytes = vec![0; len as usize];
+        reader.read_exact(&mut message_bytes).await.unwrap();
+        log_debug("Received frontend message");
+        let message_contents = serde_json::from_slice::<String>(&message_bytes).unwrap();
+        log_debug(&format!("Received frontend message: {}", message_contents));
+        self.handle_frontend_message(&message_contents).await;
+    }
+
+    async fn handle_frontend_message(&self, message_contents: &str) {
+        match serde_json::from_str::<MessageKind>(message_contents) {
+            Ok(message) => {
+                match message {
+                    MessageKind::ResourceAvailable(_) => panic!(),
+                    MessageKind::SearchRequest(_) => {
+                        log_debug("Received search request from frontend");
+                        self.egress.send(message).unwrap();
+                    },
+                    _ => { log_debug("Frontend message didn't match any known message kind"); }
+                }
+            },
+            Err(e) => log_debug(&format!("Error deserializing frontend message: {}", &e.to_string()))
         }
     }
 }
 
-pub async fn send_to_frontend(message_contents: &str) {
+fn notify_resource_available(filename: String) {
+    send_to_frontend(MessageKind::ResourceAvailable(filename));
+}
+
+pub fn send_to_frontend<T: Serialize>(contents: T) {
     let mut writer = BufWriter::new(stdout());
-    let message = serde_json::to_string(message_contents).unwrap();
-    let len = message.len() as u32;
+    let contents = serde_json::to_string(&contents).unwrap();
+    let len = contents.len() as u32;
     let len_bytes = len.to_ne_bytes();
-    writer.write_all(&len_bytes).await.unwrap();
-    writer.write_all(message.as_bytes()).await.unwrap();
-    writer.flush().await.unwrap();
+    writer.write_all(&len_bytes).unwrap();
+    writer.write_all(contents.as_bytes()).unwrap();
+    writer.flush().unwrap();
+}
+
+pub fn log_debug(message: &str) {
+    if *IS_NM_HOST.get().unwrap() {
+        send_to_frontend(message);
+    }
+    else {
+        println!("{}", message);
+    }
 }

@@ -1,103 +1,76 @@
 use crate::node::EndpointPair;
-use uuid::Uuid;
+use chrono::{Utc, SecondsFormat};
 use serde::{Serialize, Deserialize};
 
 pub trait Message {
-    fn dest(&self) -> &EndpointPair;
-    fn sender(&self) -> &EndpointPair;
-    fn timestamp(&self) -> &String;
+    fn base_message(&self) -> &BaseMessage;
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct BaseMessage {
-    pub dest: EndpointPair,
-    pub sender: EndpointPair,
-    pub timestamp: String
+    dest: EndpointPair,
+    sender: EndpointPair,
+    timestamp: String,
 }
 
 impl BaseMessage {
-    pub fn new(dest: EndpointPair, sender: EndpointPair, timestamp: String) -> Self { Self { dest, sender, timestamp } }
-}
-impl Message for BaseMessage {
-    fn dest(&self) -> &EndpointPair {
-        return &self.dest;
+    pub fn new(dest: EndpointPair, sender: EndpointPair) -> Self {
+        Self {
+            dest,
+            sender,
+            timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+        }
     }
 
-    fn sender(&self) -> &EndpointPair {
-        return &self.sender;
-    }
-
-    fn timestamp(&self) -> &String {
-        return &self.timestamp;
-    }
+    pub fn dest(&self) -> &EndpointPair { return &self.dest }
+    pub fn sender(&self) -> &EndpointPair { return &self.sender }
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct FullMessage<T> {
-    pub base_message: BaseMessage,
-    pub origin: EndpointPair,
-    pub payload: MessageDirection<T>,
-    pub hop_count: usize,
-    pub max_hop_count: usize,
+pub struct Heartbeat(pub BaseMessage);
+
+impl Message for Heartbeat {
+    fn base_message(&self) -> &BaseMessage { return &self.0 }
 }
-impl<T> FullMessage<T> {
-    pub fn new(base_message: BaseMessage, origin: EndpointPair, payload: MessageDirection<T>, hop_count: usize, max_hop_count: usize) -> Self {
+
+#[derive(Serialize, Deserialize)]
+pub struct FullMessage {
+    base_message: BaseMessage,
+    origin: EndpointPair,
+    message_direction: MessageDirection,
+    payload: MessageKind,
+    hop_count: usize,
+    max_hop_count: usize,
+}
+impl FullMessage {
+    pub fn new(base_message: BaseMessage, origin: EndpointPair, message_direction: MessageDirection, payload: MessageKind, hop_count: usize, max_hop_count: usize) -> Self {
         Self {
             base_message,
             origin,
+            message_direction,
             payload,
             hop_count,
             max_hop_count,
         }
     }
+    
+    pub fn payload(&self) -> &MessageKind { return &self.payload }
 }
-impl<T> Message for FullMessage<T> {
-    fn dest(&self) -> &EndpointPair {
-        return &self.base_message.dest;
-    }
-
-    fn sender(&self) -> &EndpointPair {
-        return &self.base_message.sender;
-    }
-
-    fn timestamp(&self) -> &String {
-        return &self.base_message.timestamp;
-    }
+impl Message for FullMessage {
+    fn base_message(&self) -> &BaseMessage { return &self.base_message }
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum MessageDirection<T> {
-    Request(MessageKind<T>),
-    Response(MessageKind<T>),
+pub enum MessageDirection {
+    Request,
+    Response,
 }
 
-#[derive(Serialize, Deserialize)]
-pub enum MessageKind<T> {
-    DiscoverPeer(T),
-    Search(T)
-}
-
-pub struct DiscoverPeerRequest;
-
-pub struct DiscoverPeerResponse {
-    uuid: Uuid,
-}
-impl DiscoverPeerResponse {
-    pub fn new(uuid: Uuid) -> Self { Self { uuid } }
-}
-
-pub struct SearchRequest {
-    uuid: Uuid
-}
-impl SearchRequest {
-    pub fn new(uuid: Uuid) -> Self { Self { uuid } }
-}
-
-pub struct SearchResponse {
-    uuid: Uuid,
-    body: String
-}
-
-impl SearchResponse {
-    pub fn new(uuid: Uuid, body: String) -> Self { Self { uuid, body } }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum MessageKind {
+    DiscoverPeerRequest,
+    DiscoverPeerResponse(String),
+    SearchRequest(String),
+    SearchResponse(String, Vec<u8>),
+    ResourceAvailable(String)
 }

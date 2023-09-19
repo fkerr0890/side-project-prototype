@@ -1,35 +1,77 @@
-use p2p::node::{EndpointPair, Node};
-use tokio::{time::sleep, sync::Mutex};
+use p2p::{node::{EndpointPair, Node, self}, gateway::{self, OutboundGateway, InboundGateway}, message::Heartbeat};
+use tokio::{sync::mpsc, time::sleep, net::UdpSocket};
 use uuid::Uuid;
-use std::{time::Duration, net::SocketAddrV4, sync::Arc};
+use std::{time::Duration, net::SocketAddrV4, env, sync::Arc, panic, process};
 
 #[tokio::main]
 async fn main() {
-    let my_public_endpoint = SocketAddrV4::new("192.168.0.104".parse().unwrap(), 8080);
+    let args: Vec<String> = env::args().collect();
+    gateway::IS_NM_HOST.set(args[2] == "p2pclient@test.com").unwrap();
+    let (my_public_endpoint, remote_public_endpoint) = if *gateway::IS_NM_HOST.get().unwrap() {
+        (SocketAddrV4::new("192.168.0.104".parse().unwrap(), 8080), SocketAddrV4::new("192.168.0.105".parse().unwrap(), 8080))
+    } else {
+        (SocketAddrV4::new(args[1].parse().unwrap(), 8080), SocketAddrV4::new(args[2].parse().unwrap(), 8080))
+    };
+    
     let my_private_endpoint = SocketAddrV4::new("0.0.0.0".parse().unwrap(), 8080);
-    let my_endpoint_pair = EndpointPair::new(my_public_endpoint, my_private_endpoint);
-    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), 6).await;
-
-    let remote_public_endpoint = SocketAddrV4::new("192.168.0.105".parse().unwrap(), 8080);
+    let my_endpoint_pair = EndpointPair::new(my_public_endpoint, my_private_endpoint);    
     let remote_private_endpoint = SocketAddrV4::new("0.0.0.0".parse().unwrap(), 0);
     let remote_endpoint_pair = EndpointPair::new(remote_public_endpoint, remote_private_endpoint);
-    my_node.add_peer(remote_endpoint_pair, 0);
+    
+    let socket = Arc::new(UdpSocket::bind(my_private_endpoint).await.unwrap());
+    let (heartbeat_tx, heartbeat_rx) = mpsc::unbounded_channel();
+    let (gateway_egress, node_ingress) = mpsc::unbounded_channel();
+    let (node_egress, gateway_ingress) = mpsc::unbounded_channel();
+    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), 6, node_ingress, node_egress).add_initial_peer(remote_endpoint_pair);
 
-    let node_mutex = Arc::new(Mutex::new(my_node));
-    let node_mutex_clone = Arc::clone(&node_mutex);
+    let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
+    let mut outbound_heartbeat_gateway: OutboundGateway<Heartbeat> = OutboundGateway::new(&socket, heartbeat_rx);
+    let inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
+    let inbound_frontend_gateway = gateway::InboundGateway::new(&socket, &gateway_egress);
+
+    let orig_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        // invoke the default handler and exit the process
+        orig_hook(panic_info);
+        gateway::log_debug(&panic_info.to_string());
+        process::exit(1);
+    }));
+
     tokio::spawn(async move {
         loop {
-            {
-                let node = node_mutex.lock().await;
-                node.send_heartbeats().await;
-            }
-            sleep(Duration::from_secs(5)).await;
+            inbound_frontend_gateway.receive_frontend_message().await;
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            outbound_gateway.send().await;
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            outbound_heartbeat_gateway.send().await;
+        }
+    });
+    
+    tokio::spawn(async move {
+        loop {
+            inbound_gateway.receive().await;
+        }
+    });
+
+    tokio::spawn(async move {
+        loop {
+            my_node.receive().await;            
         }
     });
 
     loop {
-        sleep(Duration::from_secs(2)).await;
-        let node = node_mutex_clone.lock().await;
-        node.receive_heartbeat().await;
+        if !*gateway::IS_NM_HOST.get().unwrap() {
+            node::send_heartbeats(heartbeat_tx.clone()).await;
+            sleep(Duration::from_secs(4)).await;
+        }
     }
+
 }
