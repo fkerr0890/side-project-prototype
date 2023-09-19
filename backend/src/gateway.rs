@@ -9,7 +9,8 @@ use std::str;
 use std::sync::Arc;
 use std::io::{BufWriter, stdout, Write};
 
-use crate::message::{Message, FullMessage, MessageKind, Heartbeat};
+use crate::message::{Message, FullMessage, MessageKind, Heartbeat, BaseMessage, MessageDirection};
+use crate::node::EndpointPair;
 
 pub static IS_NM_HOST: OnceCell<bool> = OnceCell::new();
 
@@ -36,11 +37,11 @@ impl<T: Message + Serialize> OutboundGateway<T> {
 
 pub struct InboundGateway {
     socket: Arc<UdpSocket>,
-    egress: mpsc::UnboundedSender<MessageKind>
+    egress: mpsc::UnboundedSender<FullMessage>
 }
 
 impl InboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<MessageKind>) -> Self 
+    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<FullMessage>) -> Self 
     {
         Self {
             socket: socket.clone(),
@@ -52,7 +53,6 @@ impl InboundGateway {
         let mut buf = [0; 1024];
         match self.socket.recv_from(&mut buf).await {
             Ok((n, _addr)) => {
-                log_debug(&format!("Received {} bytes", n));
                 self.handle_message(&buf[..n]).await;
             }
             Err(e) => {
@@ -66,12 +66,11 @@ impl InboundGateway {
             match message.payload() {
                 MessageKind::SearchRequest(_) => {
                     log_debug("Received search request");
-                    self.egress.send(message.payload().to_owned()).unwrap();
+                    self.egress.send(message).unwrap();
                 },
                 MessageKind::SearchResponse(filename, file_bytes) => {
                     log_debug("Received search response");
                     let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
-                    log_debug(&path);
                     fs::write(path, file_bytes).await.unwrap();
                     notify_resource_available(filename.to_owned());
                 }
@@ -93,7 +92,6 @@ impl InboundGateway {
         let len = u32::from_ne_bytes(len_bytes);
         let mut message_bytes = vec![0; len as usize];
         reader.read_exact(&mut message_bytes).await.unwrap();
-        log_debug("Received frontend message");
         let message_contents = serde_json::from_slice::<String>(&message_bytes).unwrap();
         log_debug(&format!("Received frontend message: {}", message_contents));
         self.handle_frontend_message(&message_contents).await;
@@ -101,11 +99,12 @@ impl InboundGateway {
 
     async fn handle_frontend_message(&self, message_contents: &str) {
         match serde_json::from_str::<MessageKind>(message_contents) {
-            Ok(message) => {
-                match message {
+            Ok(payload) => {
+                match payload {
                     MessageKind::ResourceAvailable(_) => panic!(),
                     MessageKind::SearchRequest(_) => {
                         log_debug("Received search request from frontend");
+                        let message = FullMessage::new(BaseMessage::new(EndpointPair::default(), EndpointPair::default()), EndpointPair::default(), MessageDirection::Request, payload, 0, 0);
                         self.egress.send(message).unwrap();
                     },
                     _ => { log_debug("Frontend message didn't match any known message kind"); }
@@ -116,7 +115,7 @@ impl InboundGateway {
     }
 }
 
-fn notify_resource_available(filename: String) {
+pub fn notify_resource_available(filename: String) {
     send_to_frontend(MessageKind::ResourceAvailable(filename));
 }
 

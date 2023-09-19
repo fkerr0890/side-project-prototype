@@ -1,11 +1,11 @@
-use std::{net::SocketAddrV4, fmt::Display};
+use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display};
 
 use priority_queue::DoublePriorityQueue;
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, fs};
 use uuid::Uuid;
 
-use crate::{message::{BaseMessage, Heartbeat, FullMessage, MessageDirection, MessageKind}, gateway};
+use crate::{message::{BaseMessage, Heartbeat, FullMessage, MessageDirection, MessageKind, Message}, gateway};
 
 pub struct Node {
     pub endpoint_pair: EndpointPair,
@@ -14,12 +14,12 @@ pub struct Node {
     found_by: Vec<Peer>,
     nat_kind: NatKind,
     max_peers: usize,
-    ingress: mpsc::UnboundedReceiver<MessageKind>,
+    ingress: mpsc::UnboundedReceiver<FullMessage>,
     egress: mpsc::UnboundedSender<FullMessage>
 }
 
 impl Node {
-    pub fn new(endpoint_pair: EndpointPair, uuid: Uuid, max_peers: usize, ingress: mpsc::UnboundedReceiver<MessageKind>, egress: mpsc::UnboundedSender<FullMessage>) -> Self {
+    pub fn new(endpoint_pair: EndpointPair, uuid: Uuid, max_peers: usize, ingress: mpsc::UnboundedReceiver<FullMessage>, egress: mpsc::UnboundedSender<FullMessage>) -> Self {
         Self {
             endpoint_pair,
             uuid,
@@ -60,35 +60,30 @@ impl Node {
         }
     }
 
-    pub async fn send_search_response(&self, requested_filename: String) {
+    pub async fn send_search_response(&self, requester: &BaseMessage, requested_filename: &str) {
         gateway::log_debug("Checking for resource");
-        if !check_for_resource(&requested_filename).await {
+        if !check_for_resource(requested_filename).await {
             gateway::log_debug("Resource not found");
-            self.send_search_request(requested_filename);
+            self.send_search_request(requested_filename.to_owned());
             return;
         }
-        let full_path = format!("C:/Users/fredk/Downloads/{}", &requested_filename);
-        let payload = MessageKind::SearchResponse(String::from(requested_filename), fs::read(full_path).await.unwrap());
-        for peer in self.get_peers() {
-            gateway::log_debug("Sending search response");
-            let message = FullMessage::new(BaseMessage::new(peer.0.endpoint_pair, self.endpoint_pair), self.endpoint_pair, MessageDirection::Response, payload.clone(), 0, 0);
-            self.egress.send(message).unwrap();
+        if *requester.sender() == EndpointPair::default() {
+            gateway::log_debug("Resource available locally, bypassing network");
+            gateway::notify_resource_available(requested_filename.to_owned());
+            return;
         }
+        let full_path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", requested_filename);
+        let payload = MessageKind::SearchResponse(String::from(requested_filename), fs::read(full_path).await.unwrap());
+        gateway::log_debug("Sending search response");
+        let message = FullMessage::new(BaseMessage::new(*requester.sender(), self.endpoint_pair), self.endpoint_pair, MessageDirection::Response, payload.clone(), 0, 0);
+        self.egress.send(message).unwrap();
     }
 
     pub async fn receive(&mut self) {
-        gateway::log_debug("Node listening...");
-        match self.ingress.recv().await {
-            Some(payload) => {
-                gateway::log_debug("Node received message");
-                match payload {
-                    MessageKind::SearchRequest(filename) => self.send_search_response(filename).await,
-                    _ => { gateway::log_debug("message wasn't a search request"); }
-                }
-            },
-            None => {
-                gateway::log_debug("Failed to receive message at node");
-            }
+        let message = self.ingress.recv().await.unwrap();
+        match message.payload() {
+            MessageKind::SearchRequest(filename) => self.send_search_response(message.base_message(), filename).await,
+            _ => { gateway::log_debug("message wasn't a search request"); } 
         }
     }
 
@@ -148,6 +143,13 @@ impl EndpointPair {
             private_endpoint
         }
     }
+
+    pub fn default() -> Self {
+        Self {
+            public_endpoint: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
+            private_endpoint: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)
+        }
+    }
 }
 
 impl PartialEq for EndpointPair {
@@ -195,9 +197,8 @@ pub async fn send_heartbeats(tx: mpsc::UnboundedSender<Heartbeat>) {
 }
 
 async fn check_for_resource(requested_filename: &str) -> bool {
-    let mut filenames = fs::read_dir("C:/Users/fredk/Downloads/").await.unwrap();
+    let mut filenames = fs::read_dir("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\").await.unwrap();
     while let Ok(Some(filename)) = filenames.next_entry().await {
-        gateway::log_debug(filename.file_name().to_str().unwrap());
         if filename.file_name().to_str().unwrap() == requested_filename {
             return true;
         }
