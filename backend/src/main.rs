@@ -61,17 +61,17 @@ async fn main() {
         }
     });
 
-    tokio::spawn(async move {
-        loop {
-            my_node.receive().await;            
-        }
-    });
+    if !*gateway::IS_NM_HOST.get().unwrap() {
+        tokio::spawn(async move {
+            loop {
+                node::send_heartbeats(heartbeat_tx.clone()).await;
+                sleep(Duration::from_secs(4)).await;
+            }
+        });
+    }
 
     loop {
-        if !*gateway::IS_NM_HOST.get().unwrap() {
-            node::send_heartbeats(heartbeat_tx.clone()).await;
-            sleep(Duration::from_secs(4)).await;
-        }
+        my_node.receive().await;            
     }
 
 }
