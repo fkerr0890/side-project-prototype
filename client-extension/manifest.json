@@ -3,7 +3,8 @@
     "name": "p2p-client",
     "version": "1.0",  
     "description": "p2p client app",
-    "permissions": ["nativeMessaging", "activeTab", "scripting"],
+    "permissions": ["nativeMessaging", "webRequest", "webRequestBlocking", "activeTab", "scripting"],
+    "host_permissions": ["http://localhost/*"],
     "background": {
       "scripts": ["background.js"]
     },
