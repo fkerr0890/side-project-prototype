@@ -56,6 +56,9 @@ impl FullMessage {
     
     pub fn payload(&self) -> &MessageKind { return &self.payload }
 }
+impl FullMessage {
+    pub fn origin(&self) -> &EndpointPair { return &self.origin }
+}
 impl Message for FullMessage {
     fn base_message(&self) -> &BaseMessage { return &self.base_message }
 }

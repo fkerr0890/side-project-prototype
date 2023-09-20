@@ -1,4 +1,3 @@
-use once_cell::sync::OnceCell;
 use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::net::UdpSocket;
@@ -6,13 +5,13 @@ use tokio::io::{BufReader, stdin, AsyncReadExt};
 use serde::Serialize;
 
 use std::str;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::io::{BufWriter, stdout, Write};
 
 use crate::message::{Message, FullMessage, MessageKind, Heartbeat, BaseMessage, MessageDirection};
 use crate::node::EndpointPair;
 
-pub static IS_NM_HOST: OnceCell<bool> = OnceCell::new();
+pub static IS_NM_HOST: OnceLock<bool> = OnceLock::new();
 
 pub struct OutboundGateway<T: Message> {
     socket: Arc<UdpSocket>,

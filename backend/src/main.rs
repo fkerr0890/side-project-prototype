@@ -1,4 +1,4 @@
-use p2p::{node::{EndpointPair, Node, self}, gateway::{self, OutboundGateway, InboundGateway}, message::Heartbeat};
+use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, message::Heartbeat, peer::peer_ops};
 use tokio::{sync::mpsc, time::sleep, net::UdpSocket};
 use uuid::Uuid;
 use std::{time::Duration, net::SocketAddrV4, env, sync::Arc, panic, process};
@@ -22,7 +22,11 @@ async fn main() {
     let (heartbeat_tx, heartbeat_rx) = mpsc::unbounded_channel();
     let (gateway_egress, node_ingress) = mpsc::unbounded_channel();
     let (node_egress, gateway_ingress) = mpsc::unbounded_channel();
-    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), 6, node_ingress, node_egress).add_initial_peer(remote_endpoint_pair);
+
+    peer_ops::EGRESS.set(node_egress.clone()).unwrap();
+    peer_ops::HEARTBEAT_TX.set(heartbeat_tx).unwrap();
+    peer_ops::add_initial_peer(remote_endpoint_pair);
+    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress);
 
     let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
     let mut outbound_heartbeat_gateway: OutboundGateway<Heartbeat> = OutboundGateway::new(&socket, heartbeat_rx);
@@ -61,14 +65,12 @@ async fn main() {
         }
     });
 
-    if !*gateway::IS_NM_HOST.get().unwrap() {
-        tokio::spawn(async move {
-            loop {
-                node::send_heartbeats(heartbeat_tx.clone()).await;
-                sleep(Duration::from_secs(4)).await;
-            }
-        });
-    }
+    tokio::spawn(async move {
+        loop {
+            peer_ops::send_heartbeats(my_endpoint_pair).await;
+            sleep(Duration::from_secs(4)).await;
+        }
+    });
 
     loop {
         my_node.receive().await;            
