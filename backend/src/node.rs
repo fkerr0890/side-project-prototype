@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::{message::{BaseMessage, FullMessage, MessageDirection, MessageKind, Message}, gateway, peer::peer_ops};
 
+pub const SEARCH_MAX_HOP_COUNT: usize = 5;
 pub struct Node {
     endpoint_pair: EndpointPair,
     uuid: Uuid,
@@ -27,50 +28,47 @@ impl Node {
         }
     }
 
-    async fn send_search_response(&mut self, search_request: FullMessage, requested_filename: &str) {
+    async fn send_search_response(&mut self, mut search_request: FullMessage, requested_filename: &str) {
+        if self.breadcrumbs.contains_key(search_request.hash()) {
+            gateway::log_debug("Already visited this node, not propagating message");
+            return;
+        }
+        else {
+            self.breadcrumbs.insert(search_request.hash().to_owned(), *search_request.base_message().sender());
+        }
         gateway::log_debug("Checking for resource");
-        if !check_for_resource(requested_filename).await {
+        if !gateway::check_for_resource(requested_filename).await {
             gateway::log_debug("Resource not found");
-            let hash = FullMessage::hash_for_message(search_request.origin(), search_request.direction(), search_request.payload());
-            if self.breadcrumbs.contains_key(&hash) {
-                gateway::log_debug("Already visited this node, not propagating search request request");
-                return;
-            }
-            self.breadcrumbs.insert(hash, *search_request.base_message().sender());
+            search_request.set_origin_if_unset(self.endpoint_pair.public_endpoint);
             self.try_send(search_request, |message| peer_ops::send_search_request(message));
             return;
         }
-        if *search_request.base_message().sender() == EndpointPair::default_socket() {
-            gateway::log_debug("Resource available locally, bypassing network");
-            gateway::make_resource_available(requested_filename, None).await;
-            return;
-        }
-        let full_path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", requested_filename);
-        let payload = MessageKind::SearchResponse(String::from(requested_filename), fs::read(full_path).await.unwrap());
-        gateway::log_debug("Sending search response");
-        let message = FullMessage::new(BaseMessage::new(*search_request.base_message().sender(), self.endpoint_pair.public_endpoint), *search_request.origin(), MessageDirection::Response, payload, 0, 0);
-        self.egress.send(message).unwrap();
+        self.return_search_response(search_request).await;
     }
 
-    async fn return_search_response(&self, search_response: FullMessage) {
-        if *search_response.origin() == self.endpoint_pair.public_endpoint || *search_response.origin() == self.endpoint_pair.private_endpoint {
-            let (filename, contents) = search_response.payload().inner();
-            gateway::make_resource_available(filename, Some(contents)).await;
-            return;
-        }
-        if let Some(dest) = self.breadcrumbs.get(search_response.hash()) {
+    async fn return_search_response(&mut self, message: FullMessage) {
+        if let Some(dest) = self.breadcrumbs.get(message.hash()) {
+            let search_response = match message.payload() {
+                MessageKind::SearchResponse(..) => message.replace_dest_and_timestamp(*dest),
+                MessageKind::SearchRequest(filename) => {
+                    let full_path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
+                    let payload = MessageKind::SearchResponse(filename.to_owned(), fs::read(full_path).await.unwrap());
+                    FullMessage::new(BaseMessage::new(*dest, self.endpoint_pair.public_endpoint), *message.origin(), MessageDirection::Response, payload, 0, SEARCH_MAX_HOP_COUNT, Some(message.hash().to_owned()))
+                }
+                _ => panic!("return_search_response() improperly called")
+            };
             gateway::log_debug(&format!("Returning search response to {}", dest));
-            let message = search_response.replace_dest_and_timestamp(*dest);
-            self.try_send(message, |message| self.egress.send(message).unwrap());
+            self.try_send(search_response, |message| self.egress.send(message).unwrap());
+            self.breadcrumbs.remove(message.hash());
         }
         else {
             gateway::log_debug("No breadcrumb found for search response");
         }
     }
 
-    fn try_send(&self, search_request: FullMessage, f: impl Fn(FullMessage) -> ()) {
-        if let Some(mut result) = search_request.try_increment_hop_count() {
-            result.replace_sender(self.endpoint_pair.public_endpoint);
+    fn try_send(&self, message: FullMessage, f: impl Fn(FullMessage) -> ()) {
+        if let Some(mut result) = message.try_increment_hop_count() {
+            result.set_sender(self.endpoint_pair.public_endpoint);
             f(result);
         }
         else {
@@ -149,14 +147,4 @@ pub struct NodeInfo {
     uuid: String,
     nat_kind: NatKind,
     max_peers: usize
-}
-
-async fn check_for_resource(requested_filename: &str) -> bool {
-    let mut filenames = fs::read_dir("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\").await.unwrap();
-    while let Ok(Some(filename)) = filenames.next_entry().await {
-        if filename.file_name().to_str().unwrap() == requested_filename {
-            return true;
-        }
-    }
-    false
 }

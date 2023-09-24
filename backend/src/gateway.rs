@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::io::{BufWriter, stdout, Write};
 
 use crate::message::{Message, FullMessage, MessageKind, Heartbeat, BaseMessage, MessageDirection};
-use crate::node::EndpointPair;
+use crate::node::{EndpointPair, SEARCH_MAX_HOP_COUNT};
 
 pub static IS_NM_HOST: OnceLock<bool> = OnceLock::new();
 
@@ -29,6 +29,13 @@ impl<T: Message + Serialize> OutboundGateway<T> {
 
     pub async fn send(&mut self) {
         let outbound_message = self.ingress.recv().await.unwrap();
+        if *outbound_message.base_message().dest() == EndpointPair::default_socket() {
+            if let (Some(filename), Some(contents)) = outbound_message.payload_inner() {
+                log_debug("Returning resource to frontend");
+                make_resource_available(filename, contents).await;
+                return;
+            }
+        }
         log_debug("Sending message");
         self.socket.send_to(serde_json::to_string(&outbound_message).unwrap().as_bytes(), outbound_message.base_message().dest()).await.unwrap();
     }
@@ -91,7 +98,7 @@ impl InboundGateway {
                     MessageKind::ResourceAvailable(_) => panic!(),
                     MessageKind::SearchRequest(_) => {
                         log_debug("Received search request from frontend");
-                        let message = FullMessage::new(BaseMessage::new(EndpointPair::default_socket(), EndpointPair::default_socket()), EndpointPair::default_socket(), MessageDirection::Request, payload, 0, 0);
+                        let message = FullMessage::new(BaseMessage::new(EndpointPair::default_socket(), EndpointPair::default_socket()), EndpointPair::default_socket(), MessageDirection::Request, payload, 0, SEARCH_MAX_HOP_COUNT, None);
                         self.egress.send(message).unwrap();
                     },
                     _ => { log_debug("Frontend message didn't match any known message kind"); }
@@ -102,9 +109,9 @@ impl InboundGateway {
     }
 }
 
-pub async fn make_resource_available(filename: &str, optional_contents: Option<&[u8]>) {
+pub async fn make_resource_available(filename: &str, contents: &[u8]) {
     log_debug(&format!("Making {} available", filename));
-    if let Some(contents) = optional_contents {
+    if !check_for_resource(filename).await{
         let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
         fs::write(path, contents).await.unwrap();
     }
@@ -119,6 +126,16 @@ pub fn send_to_frontend<T: Serialize>(contents: T) {
     writer.write_all(&len_bytes).unwrap();
     writer.write_all(contents.as_bytes()).unwrap();
     writer.flush().unwrap();
+}
+
+pub async fn check_for_resource(requested_filename: &str) -> bool {
+    let mut filenames = fs::read_dir("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\").await.unwrap();
+    while let Ok(Some(filename)) = filenames.next_entry().await {
+        if filename.file_name().to_str().unwrap() == requested_filename {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn log_debug(message: &str) {

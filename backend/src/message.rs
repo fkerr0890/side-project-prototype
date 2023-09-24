@@ -1,10 +1,14 @@
 use chrono::{Utc, SecondsFormat};
+use data_encoding::HEXLOWER;
 use ring::digest::{Context, SHA256};
 use serde::{Serialize, Deserialize};
 use std::{str, net::SocketAddrV4};
 
+use crate::node::EndpointPair;
+
 pub trait Message {
     fn base_message(&self) -> &BaseMessage;
+    fn payload_inner(&self) -> (Option<&String>, Option<&[u8]>);
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -32,6 +36,7 @@ pub struct Heartbeat(pub BaseMessage);
 
 impl Message for Heartbeat {
     fn base_message(&self) -> &BaseMessage { &self.0 }
+    fn payload_inner(&self) -> (Option<&String>, Option<&[u8]>) { (None, None) }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -45,8 +50,8 @@ pub struct FullMessage {
     hash: String
 }
 impl FullMessage {
-    pub fn new(base_message: BaseMessage, origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: usize, max_hop_count: usize) -> Self {
-        let hash = Self::hash_for_message(&origin, &message_direction, &payload);
+    pub fn new(base_message: BaseMessage, origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: usize, max_hop_count: usize, optional_hash: Option<String>) -> Self {
+        let hash = if let Some(hash) = optional_hash { hash } else { Self::hash_for_message(&origin, &message_direction, &payload) };
         Self {
             base_message,
             origin,
@@ -71,8 +76,12 @@ impl FullMessage {
         None
     }
 
-    pub fn replace_sender(&mut self, sender: SocketAddrV4) {
-        self.base_message.sender = sender;
+    pub fn set_sender(&mut self, sender: SocketAddrV4) { self.base_message.sender = sender; }
+
+    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
+        if self.origin == EndpointPair::default_socket() {
+            self.origin = origin;
+        }
     }
 
     pub fn replace_dest_and_timestamp(&self, dest: SocketAddrV4) -> Self {
@@ -88,11 +97,19 @@ impl FullMessage {
         context.update(serde_json::to_string(&message_direction).unwrap().as_bytes());
         context.update(serde_json::to_string(&payload).unwrap().as_bytes());
         let digest = context.finish();
-        str::from_utf8(digest.as_ref()).unwrap().to_owned()
+        HEXLOWER.encode(digest.as_ref())
     }
 }
 impl Message for FullMessage {
     fn base_message(&self) -> &BaseMessage { return &self.base_message }
+
+    fn payload_inner(&self) -> (Option<&String>, Option<&[u8]>) {
+        match &self.payload {
+            MessageKind::SearchResponse(filename, contents) => (Some(filename), Some(contents)),
+            MessageKind::DiscoverPeerResponse(uuid) => (Some(uuid), None),
+            _ => (None, None)
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -108,12 +125,4 @@ pub enum MessageKind {
     SearchRequest(String),
     SearchResponse(String, Vec<u8>),
     ResourceAvailable(String)
-}
-impl MessageKind {
-    pub fn inner(&self) -> (&str, &[u8]) {
-        match self {
-            MessageKind::SearchResponse(filename, contents) => (filename, contents),
-            _ => panic!("Message contents not available")
-        }
-    }
 }
