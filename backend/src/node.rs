@@ -1,15 +1,15 @@
-use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display};
+use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, fs};
 use uuid::Uuid;
 
-use crate::{message::{BaseMessage, FullMessage, MessageDirection, MessageKind, Message}, gateway, peer::{Peer, peer_ops}};
+use crate::{message::{BaseMessage, FullMessage, MessageDirection, MessageKind, Message}, gateway, peer::peer_ops};
 
 pub struct Node {
-    pub endpoint_pair: EndpointPair,
+    endpoint_pair: EndpointPair,
     uuid: Uuid,
-    found_by: Vec<Peer>,
+    breadcrumbs: HashMap<String, SocketAddrV4>,
     nat_kind: NatKind,
     ingress: mpsc::UnboundedReceiver<FullMessage>,
     egress: mpsc::UnboundedSender<FullMessage>
@@ -20,37 +20,70 @@ impl Node {
         Self {
             endpoint_pair,
             uuid,
-            found_by: Vec::new(),
+            breadcrumbs: HashMap::new(),
             nat_kind: NatKind::Unknown, 
             ingress,
             egress
         }
     }
 
-    pub async fn send_search_response(&self, requester: &FullMessage, requested_filename: &str) {
+    async fn send_search_response(&mut self, search_request: FullMessage, requested_filename: &str) {
         gateway::log_debug("Checking for resource");
         if !check_for_resource(requested_filename).await {
             gateway::log_debug("Resource not found");
-            peer_ops::send_search_request(requested_filename.to_owned(), self.endpoint_pair, *requester.origin());
+            let hash = FullMessage::hash_for_message(search_request.origin(), search_request.direction(), search_request.payload());
+            if self.breadcrumbs.contains_key(&hash) {
+                gateway::log_debug("Already visited this node, not propagating search request request");
+                return;
+            }
+            self.breadcrumbs.insert(hash, *search_request.base_message().sender());
+            self.try_send(search_request, |message| peer_ops::send_search_request(message));
             return;
         }
-        if *requester.base_message().sender() == EndpointPair::default() {
+        if *search_request.base_message().sender() == EndpointPair::default_socket() {
             gateway::log_debug("Resource available locally, bypassing network");
-            gateway::notify_resource_available(requested_filename.to_owned());
+            gateway::make_resource_available(requested_filename, None).await;
             return;
         }
         let full_path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", requested_filename);
         let payload = MessageKind::SearchResponse(String::from(requested_filename), fs::read(full_path).await.unwrap());
         gateway::log_debug("Sending search response");
-        let message = FullMessage::new(BaseMessage::new(*requester.base_message().sender(), self.endpoint_pair), self.endpoint_pair, MessageDirection::Response, payload.clone(), 0, 0);
+        let message = FullMessage::new(BaseMessage::new(*search_request.base_message().sender(), self.endpoint_pair.public_endpoint), *search_request.origin(), MessageDirection::Response, payload, 0, 0);
         self.egress.send(message).unwrap();
+    }
+
+    async fn return_search_response(&self, search_response: FullMessage) {
+        if *search_response.origin() == self.endpoint_pair.public_endpoint || *search_response.origin() == self.endpoint_pair.private_endpoint {
+            let (filename, contents) = search_response.payload().inner();
+            gateway::make_resource_available(filename, Some(contents)).await;
+            return;
+        }
+        if let Some(dest) = self.breadcrumbs.get(search_response.hash()) {
+            gateway::log_debug(&format!("Returning search response to {}", dest));
+            let message = search_response.replace_dest_and_timestamp(*dest);
+            self.try_send(message, |message| self.egress.send(message).unwrap());
+        }
+        else {
+            gateway::log_debug("No breadcrumb found for search response");
+        }
+    }
+
+    fn try_send(&self, search_request: FullMessage, f: impl Fn(FullMessage) -> ()) {
+        if let Some(mut result) = search_request.try_increment_hop_count() {
+            result.replace_sender(self.endpoint_pair.public_endpoint);
+            f(result);
+        }
+        else {
+            gateway::log_debug("Max hop count reached");
+        }
     }
 
     pub async fn receive(&mut self) {
         let message = self.ingress.recv().await.unwrap();
         match message.payload() {
-            MessageKind::SearchRequest(filename) => self.send_search_response(&message, filename).await,
-            _ => { gateway::log_debug("message wasn't a search request"); } 
+            MessageKind::SearchRequest(filename) => self.send_search_response(message.clone(), filename).await,
+            MessageKind::SearchResponse(..) => self.return_search_response(message).await,
+            _ => gateway::log_debug("message wasn't a search request") 
         }
     }
 
@@ -73,7 +106,7 @@ impl Eq for Node {}
 
 // pub struct RendevousNode(Node);
 
-#[derive(Hash, Clone, Serialize, Deserialize, Copy)]
+#[derive(Hash, Clone, Serialize, Deserialize, Copy, Eq, PartialEq)]
 pub struct EndpointPair {
     pub public_endpoint: SocketAddrV4,
     pub private_endpoint: SocketAddrV4,
@@ -87,21 +120,9 @@ impl EndpointPair {
         }
     }
 
-    pub fn default() -> Self {
-        Self {
-            public_endpoint: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0),
-            private_endpoint: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)
-        }
-    }
+    pub fn default_socket() -> SocketAddrV4 { SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0) }
 }
 
-impl PartialEq for EndpointPair {
-    fn eq(&self, other: &Self) -> bool {
-        self.public_endpoint == other.public_endpoint
-            && self.private_endpoint == other.private_endpoint
-    }
-}
-impl Eq for EndpointPair {}
 impl Display for EndpointPair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Public: {}, Private: {}", self.private_endpoint, self.public_endpoint)

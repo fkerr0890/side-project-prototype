@@ -33,7 +33,7 @@ pub mod peer_ops {
     use priority_queue::DoublePriorityQueue;
     use tokio::sync::mpsc;
     
-    use crate::{node::EndpointPair, message::{FullMessage, MessageKind, BaseMessage, MessageDirection, Heartbeat}};
+    use crate::{node::EndpointPair, message::{FullMessage, BaseMessage, Heartbeat}};
 
     use super::Peer;
 
@@ -58,11 +58,10 @@ pub mod peer_ops {
         }
     }
 
-    pub fn send_search_request(requested_filename: String, sender: EndpointPair, origin: EndpointPair) {
-        let payload = MessageKind::SearchRequest(requested_filename);
+    pub fn send_search_request(search_request: FullMessage) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let message = FullMessage::new(BaseMessage::new(peer.0.endpoint_pair, sender), origin, MessageDirection::Request, payload.clone(), 0, 0);
+            let message = search_request.replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint);
             EGRESS.get().unwrap().send(message).unwrap();
         }
     }
@@ -70,7 +69,7 @@ pub mod peer_ops {
     pub async fn send_heartbeats(sender: EndpointPair) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let heartbeat = Heartbeat(BaseMessage::new(peer.0.endpoint_pair, sender));
+            let heartbeat = Heartbeat(BaseMessage::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint));
             HEARTBEAT_TX.get().unwrap().send(heartbeat).unwrap();
         }
     }

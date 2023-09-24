@@ -402,6 +402,7 @@ dependencies = [
  "chrono",
  "once_cell",
  "priority-queue",
+ "ring",
  "serde",
  "serde_json",
  "stun",

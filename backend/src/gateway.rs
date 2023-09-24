@@ -30,7 +30,7 @@ impl<T: Message + Serialize> OutboundGateway<T> {
     pub async fn send(&mut self) {
         let outbound_message = self.ingress.recv().await.unwrap();
         log_debug("Sending message");
-        self.socket.send_to(serde_json::to_string(&outbound_message).unwrap().as_bytes(), outbound_message.base_message().dest().public_endpoint).await.unwrap();
+        self.socket.send_to(serde_json::to_string(&outbound_message).unwrap().as_bytes(), outbound_message.base_message().dest()).await.unwrap();
     }
 }
 
@@ -62,19 +62,7 @@ impl InboundGateway {
     
     async fn handle_message(&self, message_bytes: &[u8]) {
         if let Ok(message) = serde_json::from_slice::<FullMessage>(message_bytes) {
-            match message.payload() {
-                MessageKind::SearchRequest(_) => {
-                    log_debug("Received search request");
-                    self.egress.send(message).unwrap();
-                },
-                MessageKind::SearchResponse(filename, file_bytes) => {
-                    log_debug("Received search response");
-                    let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
-                    fs::write(path, file_bytes).await.unwrap();
-                    notify_resource_available(filename.to_owned());
-                }
-                _ => {}
-            }
+            self.egress.send(message).unwrap();
         }
         else {
             match serde_json::from_slice::<Heartbeat>(message_bytes) {
@@ -103,7 +91,7 @@ impl InboundGateway {
                     MessageKind::ResourceAvailable(_) => panic!(),
                     MessageKind::SearchRequest(_) => {
                         log_debug("Received search request from frontend");
-                        let message = FullMessage::new(BaseMessage::new(EndpointPair::default(), EndpointPair::default()), EndpointPair::default(), MessageDirection::Request, payload, 0, 0);
+                        let message = FullMessage::new(BaseMessage::new(EndpointPair::default_socket(), EndpointPair::default_socket()), EndpointPair::default_socket(), MessageDirection::Request, payload, 0, 0);
                         self.egress.send(message).unwrap();
                     },
                     _ => { log_debug("Frontend message didn't match any known message kind"); }
@@ -114,8 +102,13 @@ impl InboundGateway {
     }
 }
 
-pub fn notify_resource_available(filename: String) {
-    send_to_frontend(MessageKind::ResourceAvailable(filename));
+pub async fn make_resource_available(filename: &str, optional_contents: Option<&[u8]>) {
+    log_debug(&format!("Making {} available", filename));
+    if let Some(contents) = optional_contents {
+        let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
+        fs::write(path, contents).await.unwrap();
+    }
+    send_to_frontend(MessageKind::ResourceAvailable(filename.to_owned()));
 }
 
 pub fn send_to_frontend<T: Serialize>(contents: T) {
