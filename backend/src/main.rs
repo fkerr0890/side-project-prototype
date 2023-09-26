@@ -1,4 +1,4 @@
-use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, message::Heartbeat, peer::peer_ops};
+use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops};
 use tokio::{sync::mpsc, time::sleep, net::UdpSocket};
 use uuid::Uuid;
 use std::{time::Duration, net::SocketAddrV4, env, sync::Arc, panic, process};
@@ -19,17 +19,14 @@ async fn main() {
     let remote_endpoint_pair = EndpointPair::new(remote_public_endpoint, remote_private_endpoint);
     
     let socket = Arc::new(UdpSocket::bind(my_private_endpoint).await.unwrap());
-    let (heartbeat_tx, heartbeat_rx) = mpsc::unbounded_channel();
     let (gateway_egress, node_ingress) = mpsc::unbounded_channel();
     let (node_egress, gateway_ingress) = mpsc::unbounded_channel();
 
     peer_ops::EGRESS.set(node_egress.clone()).unwrap();
-    peer_ops::HEARTBEAT_TX.set(heartbeat_tx).unwrap();
     peer_ops::add_initial_peer(remote_endpoint_pair);
     let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress);
 
     let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
-    let mut outbound_heartbeat_gateway: OutboundGateway<Heartbeat> = OutboundGateway::new(&socket, heartbeat_rx);
     let inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
     let inbound_frontend_gateway = gateway::InboundGateway::new(&socket, &gateway_egress);
 
@@ -52,12 +49,6 @@ async fn main() {
             outbound_gateway.send().await;
         }
     });
-
-    tokio::spawn(async move {
-        loop {
-            outbound_heartbeat_gateway.send().await;
-        }
-    });
     
     tokio::spawn(async move {
         loop {
@@ -65,12 +56,12 @@ async fn main() {
         }
     });
 
-    tokio::spawn(async move {
-        loop {
-            peer_ops::send_heartbeats(my_endpoint_pair).await;
-            sleep(Duration::from_secs(4)).await;
-        }
-    });
+    // tokio::spawn(async move {
+    //     loop {
+    //         peer_ops::send_heartbeats(my_endpoint_pair).await;
+    //         sleep(Duration::from_secs(4)).await;
+    //     }
+    // });
 
     loop {
         my_node.receive().await;            

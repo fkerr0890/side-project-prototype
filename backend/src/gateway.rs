@@ -8,18 +8,18 @@ use std::str;
 use std::sync::{Arc, OnceLock};
 use std::io::{BufWriter, stdout, Write};
 
-use crate::message::{Message, FullMessage, MessageKind, Heartbeat, BaseMessage, MessageDirection};
+use crate::message::{Message, MessageKind, MessageDirection, MessageExt};
 use crate::node::{EndpointPair, SEARCH_MAX_HOP_COUNT};
 
 pub static IS_NM_HOST: OnceLock<bool> = OnceLock::new();
 
-pub struct OutboundGateway<T: Message> {
+pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
-    ingress: mpsc::UnboundedReceiver<T>
+    ingress: mpsc::UnboundedReceiver<Vec<Message>>
 }
 
-impl<T: Message + Serialize> OutboundGateway<T> {
-    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<T>) -> Self 
+impl OutboundGateway {
+    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<Vec<Message>>) -> Self 
     {
         Self {
             socket: socket.clone(),
@@ -28,26 +28,44 @@ impl<T: Message + Serialize> OutboundGateway<T> {
     }
 
     pub async fn send(&mut self) {
-        let outbound_message = self.ingress.recv().await.unwrap();
-        if *outbound_message.base_message().dest() == EndpointPair::default_socket() {
-            if let (Some(filename), Some(contents)) = outbound_message.payload_inner() {
+        let outbound_messages = self.ingress.recv().await.unwrap();
+        if *outbound_messages[0].dest() == EndpointPair::default_socket() {
+            log_debug("Found messages to frontend");
+            if outbound_messages[0].is_search_response() {
                 log_debug("Returning resource to frontend");
+                let (filename, contents) = Self::reassemble_resource(outbound_messages);
                 make_resource_available(filename, contents).await;
                 return;
             }
         }
-        log_debug("Sending message");
-        self.socket.send_to(serde_json::to_string(&outbound_message).unwrap().as_bytes(), outbound_message.base_message().dest()).await.unwrap();
+        for message in outbound_messages {
+            log_debug("Sending message");
+            self.socket.send_to(serde_json::to_string(&message).unwrap().as_bytes(), message.dest()).await.unwrap();
+        }
+    }
+
+    fn reassemble_resource(messages: Vec<Message>) -> (String, Vec<u8>) {
+        let mut contents: Vec<u8> = Vec::new();
+        let filename = messages[0].payload_inner().0.unwrap().to_owned();
+        for message in messages {
+            if let MessageKind::SearchResponse(_, mut slice) = message.to_payload() {
+                contents.append(&mut slice);
+            }
+            else {
+                panic!();
+            }
+        }
+        (filename, contents)
     }
 }
 
 pub struct InboundGateway {
     socket: Arc<UdpSocket>,
-    egress: mpsc::UnboundedSender<FullMessage>
+    egress: mpsc::UnboundedSender<Message>
 }
 
 impl InboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<FullMessage>) -> Self 
+    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<Message>) -> Self 
     {
         Self {
             socket: socket.clone(),
@@ -56,7 +74,7 @@ impl InboundGateway {
     }
 
     pub async fn receive(&self) {
-        let mut buf = [0; 1024];
+        let mut buf = [0; 8192];
         match self.socket.recv_from(&mut buf).await {
             Ok((n, _addr)) => {
                 self.handle_message(&buf[..n]).await;
@@ -68,14 +86,16 @@ impl InboundGateway {
     }
     
     async fn handle_message(&self, message_bytes: &[u8]) {
-        if let Ok(message) = serde_json::from_slice::<FullMessage>(message_bytes) {
-            self.egress.send(message).unwrap();
-        }
-        else {
-            match serde_json::from_slice::<Heartbeat>(message_bytes) {
-                Ok(heartbeat) => log_debug(&serde_json::to_string(&heartbeat).unwrap()),
-                Err(e) => log_debug(&format!("Error deserializing net message: {}", &e.to_string()))
-            }
+        match serde_json::from_slice::<Message>(message_bytes) {
+            Ok(message) => {
+                if message.is_heartbeat() {
+                    log_debug(&serde_json::to_string(&message).unwrap());
+                }
+                else {
+                    self.egress.send(message).unwrap();
+                }
+            },
+            Err(e) => log_debug(&format!("Error deserializing net message: {}", &e.to_string()))
         }
     }
 
@@ -98,7 +118,8 @@ impl InboundGateway {
                     MessageKind::ResourceAvailable(_) => panic!(),
                     MessageKind::SearchRequest(_) => {
                         log_debug("Received search request from frontend");
-                        let message = FullMessage::new(BaseMessage::new(EndpointPair::default_socket(), EndpointPair::default_socket()), EndpointPair::default_socket(), MessageDirection::Request, payload, 0, SEARCH_MAX_HOP_COUNT, None);
+                        let message = Message::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(MessageExt::new(EndpointPair::default_socket(), MessageDirection::Request, payload, 0, SEARCH_MAX_HOP_COUNT, None, MessageExt::no_position())));
+                        // log_debug(&format!("Og hash {}", message.message_ext().hash()));
                         self.egress.send(message).unwrap();
                     },
                     _ => { log_debug("Frontend message didn't match any known message kind"); }
@@ -109,13 +130,13 @@ impl InboundGateway {
     }
 }
 
-pub async fn make_resource_available(filename: &str, contents: &[u8]) {
+pub async fn make_resource_available(filename: String, contents: Vec<u8>) {
     log_debug(&format!("Making {} available", filename));
-    if !check_for_resource(filename).await{
-        let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
+    if !check_for_resource(&filename).await{
+        let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{filename}");
         fs::write(path, contents).await.unwrap();
     }
-    send_to_frontend(MessageKind::ResourceAvailable(filename.to_owned()));
+    send_to_frontend(MessageKind::ResourceAvailable(filename));
 }
 
 pub fn send_to_frontend<T: Serialize>(contents: T) {

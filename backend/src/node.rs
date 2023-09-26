@@ -1,40 +1,43 @@
-use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap};
+use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::{HashMap, BTreeMap}};
 
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, fs};
 use uuid::Uuid;
 
-use crate::{message::{BaseMessage, FullMessage, MessageDirection, MessageKind, Message}, gateway, peer::peer_ops};
+use crate::{message::{Message, MessageDirection, MessageKind, MessageExt}, gateway, peer::peer_ops};
 
-pub const SEARCH_MAX_HOP_COUNT: usize = 5;
+pub const SEARCH_MAX_HOP_COUNT: u8 = 5;
 pub struct Node {
     endpoint_pair: EndpointPair,
     uuid: Uuid,
     breadcrumbs: HashMap<String, SocketAddrV4>,
+    response_staging: HashMap<String, BTreeMap<u32, Message>>,
     nat_kind: NatKind,
-    ingress: mpsc::UnboundedReceiver<FullMessage>,
-    egress: mpsc::UnboundedSender<FullMessage>
+    ingress: mpsc::UnboundedReceiver<Message>,
+    egress: mpsc::UnboundedSender<Vec<Message>>
 }
 
 impl Node {
-    pub fn new(endpoint_pair: EndpointPair, uuid: Uuid, ingress: mpsc::UnboundedReceiver<FullMessage>, egress: mpsc::UnboundedSender<FullMessage>) -> Self {
+    pub fn new(endpoint_pair: EndpointPair, uuid: Uuid, ingress: mpsc::UnboundedReceiver<Message>, egress: mpsc::UnboundedSender<Vec<Message>>) -> Self {
         Self {
             endpoint_pair,
             uuid,
             breadcrumbs: HashMap::new(),
+            response_staging: HashMap::new(),
             nat_kind: NatKind::Unknown, 
             ingress,
             egress
         }
     }
 
-    async fn send_search_response(&mut self, mut search_request: FullMessage, requested_filename: &str) {
-        if self.breadcrumbs.contains_key(search_request.hash()) {
+    async fn send_search_response(&mut self, mut search_request: Message, requested_filename: &str) {
+        let hash = search_request.message_ext().hash();
+        if self.breadcrumbs.contains_key(hash) {
             gateway::log_debug("Already visited this node, not propagating message");
             return;
         }
         else {
-            self.breadcrumbs.insert(search_request.hash().to_owned(), *search_request.base_message().sender());
+            self.breadcrumbs.insert(hash.to_owned(), *search_request.sender());
         }
         gateway::log_debug("Checking for resource");
         if !gateway::check_for_resource(requested_filename).await {
@@ -43,30 +46,41 @@ impl Node {
             self.try_send(search_request, |message| peer_ops::send_search_request(message));
             return;
         }
-        self.return_search_response(search_request).await;
+        // gateway::log_debug(&format!("Hash at hairpin {hash}"));
+        let dest = self.get_dest_or_panic(hash);
+        self.return_search_responses(self.construct_search_response(search_request.payload_inner().0.unwrap(), hash, dest, *search_request.message_ext().origin()).await).await;
     }
 
-    async fn return_search_response(&mut self, message: FullMessage) {
-        if let Some(dest) = self.breadcrumbs.get(message.hash()) {
-            let search_response = match message.payload() {
-                MessageKind::SearchResponse(..) => message.replace_dest_and_timestamp(*dest),
-                MessageKind::SearchRequest(filename) => {
-                    let full_path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{}", filename);
-                    let payload = MessageKind::SearchResponse(filename.to_owned(), fs::read(full_path).await.unwrap());
-                    FullMessage::new(BaseMessage::new(*dest, self.endpoint_pair.public_endpoint), *message.origin(), MessageDirection::Response, payload, 0, SEARCH_MAX_HOP_COUNT, Some(message.hash().to_owned()))
-                }
-                _ => panic!("return_search_response() improperly called")
-            };
-            gateway::log_debug(&format!("Returning search response to {}", dest));
-            self.try_send(search_response, |message| self.egress.send(message).unwrap());
-            self.breadcrumbs.remove(message.hash());
-        }
-        else {
-            gateway::log_debug("No breadcrumb found for search response");
-        }
+    async fn return_search_responses(&mut self, search_responses: Vec<Message>) {
+        let hash = search_responses[0].message_ext().hash().to_owned();
+        let dest = self.breadcrumbs.get(&hash).unwrap();
+        gateway::log_debug(&format!("Returning search responses to {dest}"));
+        self.egress.send(search_responses).unwrap();
+        self.breadcrumbs.remove(&hash);
+
+    }
+    
+    async fn construct_search_response(&self, filename: &str, hash: &str, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<Message> {
+        let full_path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{filename}");
+        let file_bytes = fs::read(full_path).await.unwrap();
+        let chunks = file_bytes.chunks(1024);
+        let num_chunks = chunks.len();
+        chunks
+            .enumerate()
+            .map(|(i, chunk)| Message::new(
+                dest,
+                self.endpoint_pair.public_endpoint,
+                Some(MessageExt::new(origin,
+                MessageDirection::Response,
+                MessageKind::SearchResponse(filename.to_owned(), chunk.to_vec()),
+                0,
+                SEARCH_MAX_HOP_COUNT, 
+                Some(hash.to_owned()),
+                (i as u32, num_chunks as i32)))))
+            .collect()
     }
 
-    fn try_send(&self, message: FullMessage, f: impl Fn(FullMessage) -> ()) {
+    fn try_send(&self, message: Message, f: impl Fn(Message) -> ()) {
         if let Some(mut result) = message.try_increment_hop_count() {
             result.set_sender(self.endpoint_pair.public_endpoint);
             f(result);
@@ -78,10 +92,40 @@ impl Node {
 
     pub async fn receive(&mut self) {
         let message = self.ingress.recv().await.unwrap();
-        match message.payload() {
+        match message.message_ext().payload() {
             MessageKind::SearchRequest(filename) => self.send_search_response(message.clone(), filename).await,
-            MessageKind::SearchResponse(..) => self.return_search_response(message).await,
+            MessageKind::SearchResponse(..) => {
+                let (index, num_chunks) = *message.message_ext().position();
+                if num_chunks == 1 {
+                    // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
+                    let dest = self.get_dest_or_panic(message.message_ext().hash());
+                    self.return_search_responses(vec![message.replace_dest_and_timestamp(dest)]).await
+                }
+                else {
+                    let hash = message.message_ext().hash().to_owned();
+                    let search_responses = self.response_staging.entry(hash.clone()).or_insert(BTreeMap::new());
+                    let target_length = num_chunks as usize;
+                    gateway::log_debug(&format!("Collecting all search responses, total {target_length}"));
+                    search_responses.insert(index, message);
+                    if search_responses.len() < target_length {
+                        return;
+                    }
+                    gateway::log_debug("Collected all search responses");
+                    let dest = self.get_dest_or_panic(&hash);
+                    let search_responses = self.response_staging.remove(&hash).unwrap().into_values().map(|message| message.replace_dest_and_timestamp(dest)).collect();
+                    self.return_search_responses(search_responses).await;
+                }
+            },
             _ => gateway::log_debug("message wasn't a search request") 
+        }
+    }
+
+    fn get_dest_or_panic(&self, hash: &str) -> SocketAddrV4 {
+        if let Some(dest) = self.breadcrumbs.get(hash) {
+            *dest
+        }
+        else {
+            panic!("No breadcrumb found");
         }
     }
 

@@ -33,17 +33,16 @@ pub mod peer_ops {
     use priority_queue::DoublePriorityQueue;
     use tokio::sync::mpsc;
     
-    use crate::{node::EndpointPair, message::{FullMessage, BaseMessage, Heartbeat}};
+    use crate::{node::EndpointPair, message::Message};
 
     use super::Peer;
 
     static mut PEERS: Lazy<Mutex<DoublePriorityQueue<Peer, i32>>> = Lazy::new(|| { Mutex::new(DoublePriorityQueue::new()) });
     pub const MAX_PEERS: usize = 6;
-    pub static EGRESS: OnceLock<mpsc::UnboundedSender<FullMessage>> = OnceLock::new();
-    pub static HEARTBEAT_TX: OnceLock<mpsc::UnboundedSender<Heartbeat>> = OnceLock::new();
+    pub static EGRESS: OnceLock<mpsc::UnboundedSender<Vec<Message>>> = OnceLock::new();
 
     pub fn add_initial_peer(endpoint_pair: EndpointPair) {
-        unsafe { PEERS.get_mut().unwrap().push(Peer::new(endpoint_pair, 0), 0) };
+        add_peer(endpoint_pair, 0);
     }
 
     pub fn add_peer(endpoint_pair: EndpointPair, score: i32) {
@@ -58,19 +57,19 @@ pub mod peer_ops {
         }
     }
 
-    pub fn send_search_request(search_request: FullMessage) {
+    pub fn send_search_request(search_request: Message) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
             let message = search_request.replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint);
-            EGRESS.get().unwrap().send(message).unwrap();
+            EGRESS.get().unwrap().send(vec![message]).unwrap();
         }
     }
 
     pub async fn send_heartbeats(sender: EndpointPair) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let heartbeat = Heartbeat(BaseMessage::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint));
-            HEARTBEAT_TX.get().unwrap().send(heartbeat).unwrap();
+            let heartbeat = Message::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, None);
+            EGRESS.get().unwrap().send(vec![heartbeat]).unwrap();
         }
     }
 }
