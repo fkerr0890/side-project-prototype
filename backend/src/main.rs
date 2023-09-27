@@ -27,7 +27,6 @@ async fn main() {
     let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress);
 
     let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
-    let inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
     let inbound_frontend_gateway = gateway::InboundGateway::new(&socket, &gateway_egress);
 
     let orig_hook = panic::take_hook();
@@ -50,18 +49,21 @@ async fn main() {
         }
     });
     
+    for _ in 0..15 {
+        let inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
+        tokio::spawn(async move {
+            loop {
+                inbound_gateway.receive().await;
+            }
+        });
+    }
+
     tokio::spawn(async move {
         loop {
-            inbound_gateway.receive().await;
+            peer_ops::send_heartbeats(my_endpoint_pair).await;
+            sleep(Duration::from_secs(29)).await;
         }
     });
-
-    // tokio::spawn(async move {
-    //     loop {
-    //         peer_ops::send_heartbeats(my_endpoint_pair).await;
-    //         sleep(Duration::from_secs(4)).await;
-    //     }
-    // });
 
     loop {
         my_node.receive().await;            

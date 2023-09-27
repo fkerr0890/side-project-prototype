@@ -1,5 +1,6 @@
 use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::{HashMap, BTreeMap}};
 
+use rand::{seq::SliceRandom, rngs::SmallRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, fs};
 use uuid::Uuid;
@@ -11,7 +12,7 @@ pub struct Node {
     endpoint_pair: EndpointPair,
     uuid: Uuid,
     breadcrumbs: HashMap<String, SocketAddrV4>,
-    response_staging: HashMap<String, BTreeMap<u32, Message>>,
+    response_staging: HashMap<String, BTreeMap<usize, Message>>,
     nat_kind: NatKind,
     ingress: mpsc::UnboundedReceiver<Message>,
     egress: mpsc::UnboundedSender<Vec<Message>>
@@ -65,7 +66,7 @@ impl Node {
         let file_bytes = fs::read(full_path).await.unwrap();
         let chunks = file_bytes.chunks(1024);
         let num_chunks = chunks.len();
-        chunks
+        let mut messages: Vec<Message> = chunks
             .enumerate()
             .map(|(i, chunk)| Message::new(
                 dest,
@@ -76,8 +77,10 @@ impl Node {
                 0,
                 SEARCH_MAX_HOP_COUNT, 
                 Some(hash.to_owned()),
-                (i as u32, num_chunks as i32)))))
-            .collect()
+                (i, num_chunks as i32)))))
+            .collect();
+        messages.shuffle(&mut SmallRng::from_entropy());
+        messages
     }
 
     fn try_send(&self, message: Message, f: impl Fn(Message) -> ()) {

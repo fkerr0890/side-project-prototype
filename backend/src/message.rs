@@ -1,6 +1,4 @@
 use chrono::{Utc, SecondsFormat};
-use data_encoding::HEXLOWER;
-use ring::digest::{Context, SHA256};
 use serde::{Serialize, Deserialize};
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
@@ -15,11 +13,11 @@ pub struct MessageExt {
     hop_count: u8,
     max_hop_count: u8,
     uuid: String,
-    position: (u32, i32)
+    position: (usize, i32)
 }
 
 impl MessageExt {
-    pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, max_hop_count: u8, optional_hash: Option<String>, position: (u32, i32)) -> Self {
+    pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, max_hop_count: u8, optional_hash: Option<String>, position: (usize, i32)) -> Self {
         let uuid = if let Some(hash) = optional_hash { hash } else { Uuid::new_v4().simple().to_string() };
         Self {
             origin,
@@ -36,17 +34,17 @@ impl MessageExt {
     pub fn hash(&self) -> &String { &self.uuid }
     pub fn origin(&self) -> &SocketAddrV4 { &self.origin }
     pub fn direction(&self) -> &MessageDirection { &self.message_direction }
-    pub fn position(&self) -> &(u32, i32) { &self.position }
-    pub fn no_position() -> (u32, i32) { (0, -1) }
+    pub fn position(&self) -> &(usize, i32) { &self.position }
+    pub fn no_position() -> (usize, i32) { (0, -1) }
     
-    pub fn hash_for_message(origin: &SocketAddrV4, message_direction: &MessageDirection, payload: &MessageKind) -> String {
-        let mut context = Context::new(&SHA256);
-        context.update(origin.to_string().as_bytes());
-        context.update(serde_json::to_string(&message_direction).unwrap().as_bytes());
-        context.update(serde_json::to_string(&payload).unwrap().as_bytes());
-        let digest = context.finish();
-        HEXLOWER.encode(digest.as_ref())
-    }
+    // pub fn hash_for_message(origin: &SocketAddrV4, message_direction: &MessageDirection, payload: &MessageKind) -> String {
+    //     let mut context = Context::new(&SHA256);
+    //     context.update(origin.to_string().as_bytes());
+    //     context.update(serde_json::to_string(&message_direction).unwrap().as_bytes());
+    //     context.update(serde_json::to_string(&payload).unwrap().as_bytes());
+    //     let digest = context.finish();
+    //     HEXLOWER.encode(digest.as_ref())
+    // }
 }
 
 #[derive(Serialize, Deserialize, Clone)]

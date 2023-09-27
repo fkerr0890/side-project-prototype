@@ -3,10 +3,12 @@ use tokio::sync::mpsc;
 use tokio::net::UdpSocket;
 use tokio::io::{BufReader, stdin, AsyncReadExt};
 use serde::Serialize;
+use tokio::time::sleep;
 
 use std::str;
 use std::sync::{Arc, OnceLock};
 use std::io::{BufWriter, stdout, Write};
+use std::time::Duration;
 
 use crate::message::{Message, MessageKind, MessageDirection, MessageExt};
 use crate::node::{EndpointPair, SEARCH_MAX_HOP_COUNT};
@@ -38,9 +40,13 @@ impl OutboundGateway {
                 return;
             }
         }
-        for message in outbound_messages {
-            log_debug("Sending message");
-            self.socket.send_to(serde_json::to_string(&message).unwrap().as_bytes(), message.dest()).await.unwrap();
+
+        let num_retries = if outbound_messages[0].is_search_response() { 1 } else { 0 };
+        for _ in 0..=num_retries {
+            for message in outbound_messages.iter() {
+                self.socket.send_to(serde_json::to_string(&message).unwrap().as_bytes(), message.dest()).await.unwrap();
+                sleep(Duration::from_millis(20)).await;
+            }
         }
     }
 
@@ -77,6 +83,7 @@ impl InboundGateway {
         let mut buf = [0; 8192];
         match self.socket.recv_from(&mut buf).await {
             Ok((n, _addr)) => {
+                // log_debug("Message received");
                 self.handle_message(&buf[..n]).await;
             }
             Err(e) => {

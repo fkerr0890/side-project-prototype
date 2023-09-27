@@ -44,7 +44,7 @@ function inteceptRequestAsync(requestDetails) {
         pendingRequests[resourcePath] = resolve;
         setTimeout(() => {
             reject('Request timed out');
-        }, 10000);
+        }, 100000);
     });
 }
 
