@@ -49,7 +49,7 @@ async fn main() {
         }
     });
     
-    for _ in 0..15 {
+    for _ in 0..40 {
         let inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
         tokio::spawn(async move {
             loop {

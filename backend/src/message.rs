@@ -11,20 +11,18 @@ pub struct MessageExt {
     message_direction: MessageDirection,
     payload: MessageKind,
     hop_count: u8,
-    max_hop_count: u8,
     uuid: String,
-    position: (usize, i32)
+    position: (usize, usize)
 }
 
 impl MessageExt {
-    pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, max_hop_count: u8, optional_hash: Option<String>, position: (usize, i32)) -> Self {
+    pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, optional_hash: Option<String>, position: (usize, usize)) -> Self {
         let uuid = if let Some(hash) = optional_hash { hash } else { Uuid::new_v4().simple().to_string() };
         Self {
             origin,
             message_direction,
             payload,
             hop_count,
-            max_hop_count,
             uuid,
             position
         }
@@ -34,8 +32,8 @@ impl MessageExt {
     pub fn hash(&self) -> &String { &self.uuid }
     pub fn origin(&self) -> &SocketAddrV4 { &self.origin }
     pub fn direction(&self) -> &MessageDirection { &self.message_direction }
-    pub fn position(&self) -> &(usize, i32) { &self.position }
-    pub fn no_position() -> (usize, i32) { (0, -1) }
+    pub fn position(&self) -> &(usize, usize) { &self.position }
+    pub fn no_position() -> (usize, usize) { (0, 0) }
     
     // pub fn hash_for_message(origin: &SocketAddrV4, message_direction: &MessageDirection, payload: &MessageKind) -> String {
     //     let mut context = Context::new(&SHA256);
@@ -115,9 +113,9 @@ impl Message {
         result
     }
 
-    pub fn try_increment_hop_count(mut self) -> Option<Self> {
-        if self.message_ext().hop_count < self.message_ext().max_hop_count {
-            self.message_ext_mut().hop_count += 1;
+    pub fn try_decrement_hop_count(mut self) -> Option<Self> {
+        if self.message_ext().hop_count > 0 {
+            self.message_ext_mut().hop_count -= 1;
             return Some(self);
         }
         None

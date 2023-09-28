@@ -1,4 +1,4 @@
-use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::{HashMap, BTreeMap}};
+use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap};
 
 use rand::{seq::SliceRandom, rngs::SmallRng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ pub struct Node {
     endpoint_pair: EndpointPair,
     uuid: Uuid,
     breadcrumbs: HashMap<String, SocketAddrV4>,
-    response_staging: HashMap<String, BTreeMap<usize, Message>>,
+    response_staging: HashMap<String, Vec<Message>>,
     nat_kind: NatKind,
     ingress: mpsc::UnboundedReceiver<Message>,
     egress: mpsc::UnboundedSender<Vec<Message>>
@@ -74,17 +74,16 @@ impl Node {
                 Some(MessageExt::new(origin,
                 MessageDirection::Response,
                 MessageKind::SearchResponse(filename.to_owned(), chunk.to_vec()),
-                0,
-                SEARCH_MAX_HOP_COUNT, 
+                SEARCH_MAX_HOP_COUNT,
                 Some(hash.to_owned()),
-                (i, num_chunks as i32)))))
+                (i, num_chunks)))))
             .collect();
         messages.shuffle(&mut SmallRng::from_entropy());
         messages
     }
 
     fn try_send(&self, message: Message, f: impl Fn(Message) -> ()) {
-        if let Some(mut result) = message.try_increment_hop_count() {
+        if let Some(mut result) = message.try_decrement_hop_count() {
             result.set_sender(self.endpoint_pair.public_endpoint);
             f(result);
         }
@@ -106,20 +105,19 @@ impl Node {
                 }
                 else {
                     let hash = message.message_ext().hash().to_owned();
-                    let search_responses = self.response_staging.entry(hash.clone()).or_insert(BTreeMap::new());
-                    let target_length = num_chunks as usize;
-                    gateway::log_debug(&format!("Collecting all search responses, total {target_length}"));
-                    search_responses.insert(index, message);
-                    if search_responses.len() < target_length {
+                    let search_responses = self.response_staging.entry(hash.clone()).or_insert(Vec::with_capacity(num_chunks));
+                    gateway::log_debug(&format!("Collecting all search responses, {index} of {num_chunks}"));
+                    search_responses.push(message);
+                    if search_responses.len() < num_chunks {
                         return;
                     }
                     gateway::log_debug("Collected all search responses");
                     let dest = self.get_dest_or_panic(&hash);
-                    let search_responses = self.response_staging.remove(&hash).unwrap().into_values().map(|message| message.replace_dest_and_timestamp(dest)).collect();
+                    let search_responses = self.response_staging.remove(&hash).unwrap().iter().map(|message| message.replace_dest_and_timestamp(dest)).collect();
                     self.return_search_responses(search_responses).await;
                 }
             },
-            _ => gateway::log_debug("message wasn't a search request") 
+            _ => gateway::log_debug("not supported") 
         }
     }
 

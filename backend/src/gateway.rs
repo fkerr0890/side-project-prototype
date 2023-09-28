@@ -42,15 +42,20 @@ impl OutboundGateway {
         }
 
         let num_retries = if outbound_messages[0].is_search_response() { 1 } else { 0 };
-        for _ in 0..=num_retries {
-            for message in outbound_messages.iter() {
-                self.socket.send_to(serde_json::to_string(&message).unwrap().as_bytes(), message.dest()).await.unwrap();
-                sleep(Duration::from_millis(20)).await;
+        // for _ in 0..=num_retries {
+            for (i, message) in outbound_messages.iter().enumerate() {
+                let bytes = &bincode::serialize(&message).unwrap();
+                if num_retries == 1 {
+                    log_debug(&format!("Sending {} of {} (index = {}), bytes = {}", i + 1, outbound_messages.len(), message.message_ext().position().0, bytes.len()));
+                }
+                self.socket.send_to(&bytes, message.dest()).await.unwrap();
+                // sleep(Duration::from_micros(50)).await;
             }
-        }
+        // }
     }
 
-    fn reassemble_resource(messages: Vec<Message>) -> (String, Vec<u8>) {
+    fn reassemble_resource(mut messages: Vec<Message>) -> (String, Vec<u8>) {
+        messages.sort_by(|a, b| a.message_ext().position().0.cmp(&b.message_ext().position().0));
         let mut contents: Vec<u8> = Vec::new();
         let filename = messages[0].payload_inner().0.unwrap().to_owned();
         for message in messages {
@@ -83,7 +88,7 @@ impl InboundGateway {
         let mut buf = [0; 8192];
         match self.socket.recv_from(&mut buf).await {
             Ok((n, _addr)) => {
-                // log_debug("Message received");
+                // log_debug(&format!("Received {n} bytes"));
                 self.handle_message(&buf[..n]).await;
             }
             Err(e) => {
@@ -93,7 +98,7 @@ impl InboundGateway {
     }
     
     async fn handle_message(&self, message_bytes: &[u8]) {
-        match serde_json::from_slice::<Message>(message_bytes) {
+        match bincode::deserialize::<Message>(message_bytes) {
             Ok(message) => {
                 if message.is_heartbeat() {
                     log_debug(&serde_json::to_string(&message).unwrap());
@@ -125,7 +130,7 @@ impl InboundGateway {
                     MessageKind::ResourceAvailable(_) => panic!(),
                     MessageKind::SearchRequest(_) => {
                         log_debug("Received search request from frontend");
-                        let message = Message::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(MessageExt::new(EndpointPair::default_socket(), MessageDirection::Request, payload, 0, SEARCH_MAX_HOP_COUNT, None, MessageExt::no_position())));
+                        let message = Message::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(MessageExt::new(EndpointPair::default_socket(), MessageDirection::Request, payload, SEARCH_MAX_HOP_COUNT, None, MessageExt::no_position())));
                         // log_debug(&format!("Og hash {}", message.message_ext().hash()));
                         self.egress.send(message).unwrap();
                     },
@@ -167,10 +172,10 @@ pub async fn check_for_resource(requested_filename: &str) -> bool {
 }
 
 pub fn log_debug(message: &str) {
-    if *IS_NM_HOST.get().unwrap() {
-        send_to_frontend(message);
-    }
-    else {
-        println!("{}", message);
-    }
+    // if *IS_NM_HOST.get().unwrap() {
+    //     send_to_frontend(message);
+    // }
+    // else {
+    //     println!("{}", message);
+    // }
 }
