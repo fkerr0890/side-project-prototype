@@ -60,7 +60,7 @@ pub mod peer_ops {
     pub fn send_search_request(search_request: Message) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let message = search_request.replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint);
+            let message = search_request.clone().replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint);
             EGRESS.get().unwrap().send(vec![message]).unwrap();
         }
     }
@@ -68,7 +68,7 @@ pub mod peer_ops {
     pub async fn send_heartbeats(sender: EndpointPair) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let heartbeat = Message::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, None);
+            let heartbeat = Message::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, None, None);
             EGRESS.get().unwrap().send(vec![heartbeat]).unwrap();
         }
     }

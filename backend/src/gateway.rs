@@ -1,19 +1,19 @@
+use once_cell::sync::Lazy;
 use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::net::UdpSocket;
 use tokio::io::{BufReader, stdin, AsyncReadExt};
 use serde::Serialize;
-use tokio::time::sleep;
 
 use std::str;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Mutex};
 use std::io::{BufWriter, stdout, Write};
-use std::time::Duration;
 
 use crate::message::{Message, MessageKind, MessageDirection, MessageExt};
 use crate::node::{EndpointPair, SEARCH_MAX_HOP_COUNT};
 
 pub static IS_NM_HOST: OnceLock<bool> = OnceLock::new();
+pub static mut SEARCH_RESPONSE_COUNT: Lazy<Mutex<i16>> = Lazy::new(|| { Mutex::new(0) });
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
@@ -72,7 +72,7 @@ impl OutboundGateway {
 
 pub struct InboundGateway {
     socket: Arc<UdpSocket>,
-    egress: mpsc::UnboundedSender<Message>
+    egress: mpsc::UnboundedSender<Message>,
 }
 
 impl InboundGateway {
@@ -84,7 +84,7 @@ impl InboundGateway {
         }
     }
 
-    pub async fn receive(&self) {
+    pub async fn receive(&mut self) {
         let mut buf = [0; 8192];
         match self.socket.recv_from(&mut buf).await {
             Ok((n, _addr)) => {
@@ -104,6 +104,11 @@ impl InboundGateway {
                     log_debug(&serde_json::to_string(&message).unwrap());
                 }
                 else {
+                    if message.payload_inner().0.unwrap().ends_with(".jpg") {
+                        let mut search_response_count = unsafe { SEARCH_RESPONSE_COUNT.lock().unwrap() };
+                        *search_response_count += 1;
+                        log_debug(&format!("Search response count {}", search_response_count));
+                    }
                     self.egress.send(message).unwrap();
                 }
             },
@@ -126,11 +131,15 @@ impl InboundGateway {
     async fn handle_frontend_message(&self, message_contents: &str) {
         match serde_json::from_str::<MessageKind>(message_contents) {
             Ok(payload) => {
-                match payload {
+                match &payload {
                     MessageKind::ResourceAvailable(_) => panic!(),
-                    MessageKind::SearchRequest(_) => {
+                    MessageKind::SearchRequest(filename) => {
+                        if filename.ends_with(".jpg") {
+                            let mut search_response_count = unsafe { SEARCH_RESPONSE_COUNT.lock().unwrap() };
+                            *search_response_count = 0;
+                        }
                         log_debug("Received search request from frontend");
-                        let message = Message::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(MessageExt::new(EndpointPair::default_socket(), MessageDirection::Request, payload, SEARCH_MAX_HOP_COUNT, None, MessageExt::no_position())));
+                        let message = Message::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(MessageExt::new(EndpointPair::default_socket(), MessageDirection::Request, payload, SEARCH_MAX_HOP_COUNT,  MessageExt::no_position())), None);
                         // log_debug(&format!("Og hash {}", message.message_ext().hash()));
                         self.egress.send(message).unwrap();
                     },
@@ -172,10 +181,10 @@ pub async fn check_for_resource(requested_filename: &str) -> bool {
 }
 
 pub fn log_debug(message: &str) {
-    // if *IS_NM_HOST.get().unwrap() {
-    //     send_to_frontend(message);
-    // }
-    // else {
-    //     println!("{}", message);
-    // }
+    if *IS_NM_HOST.get().unwrap() {
+        send_to_frontend(message);
+    }
+    else {
+        println!("{}", message);
+    }
 }

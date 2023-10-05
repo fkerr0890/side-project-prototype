@@ -1,18 +1,18 @@
-use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap};
+use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap, hash::Hash};
 
 use rand::{seq::SliceRandom, rngs::SmallRng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, fs};
 use uuid::Uuid;
 
-use crate::{message::{Message, MessageDirection, MessageKind, MessageExt}, gateway, peer::peer_ops};
+use crate::{message::{Message, MessageDirection, MessageKind, MessageExt, self}, gateway, peer::peer_ops};
 
 pub const SEARCH_MAX_HOP_COUNT: u8 = 5;
 pub struct Node {
     endpoint_pair: EndpointPair,
     uuid: Uuid,
     breadcrumbs: HashMap<String, SocketAddrV4>,
-    response_staging: HashMap<String, Vec<Message>>,
+    response_staging: HashMap<String, HashMap<usize, Message>>,
     nat_kind: NatKind,
     ingress: mpsc::UnboundedReceiver<Message>,
     egress: mpsc::UnboundedSender<Vec<Message>>
@@ -31,8 +31,8 @@ impl Node {
         }
     }
 
-    async fn send_search_response(&mut self, mut search_request: Message, requested_filename: &str) {
-        let hash = search_request.message_ext().hash();
+    pub async fn send_search_response(&mut self, mut search_request: Message, requested_filename: &str) {
+        let hash = search_request.uuid();
         if self.breadcrumbs.contains_key(hash) {
             gateway::log_debug("Already visited this node, not propagating message");
             return;
@@ -53,30 +53,30 @@ impl Node {
     }
 
     async fn return_search_responses(&mut self, search_responses: Vec<Message>) {
-        let hash = search_responses[0].message_ext().hash().to_owned();
+        let hash = search_responses[0].uuid().to_owned();
         let dest = self.breadcrumbs.get(&hash).unwrap();
         gateway::log_debug(&format!("Returning search responses to {dest}"));
         self.egress.send(search_responses).unwrap();
         self.breadcrumbs.remove(&hash);
-
     }
     
     async fn construct_search_response(&self, filename: &str, hash: &str, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<Message> {
         let full_path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{filename}");
         let file_bytes = fs::read(full_path).await.unwrap();
-        let chunks = file_bytes.chunks(1024);
+        let empty_message = Message::new(
+            dest,
+            self.endpoint_pair.public_endpoint,
+            Some(MessageExt::new(origin,
+            MessageDirection::Response,
+            MessageKind::SearchResponse(filename.to_owned(), Vec::with_capacity(0)),
+            SEARCH_MAX_HOP_COUNT,
+            MessageExt::no_position())),
+            Some(hash.to_owned()));
+        let chunks = file_bytes.chunks(1024 - empty_message.size());
         let num_chunks = chunks.len();
         let mut messages: Vec<Message> = chunks
             .enumerate()
-            .map(|(i, chunk)| Message::new(
-                dest,
-                self.endpoint_pair.public_endpoint,
-                Some(MessageExt::new(origin,
-                MessageDirection::Response,
-                MessageKind::SearchResponse(filename.to_owned(), chunk.to_vec()),
-                SEARCH_MAX_HOP_COUNT,
-                Some(hash.to_owned()),
-                (i, num_chunks)))))
+            .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_contents(chunk.to_vec()))
             .collect();
         messages.shuffle(&mut SmallRng::from_entropy());
         messages
@@ -100,20 +100,20 @@ impl Node {
                 let (index, num_chunks) = *message.message_ext().position();
                 if num_chunks == 1 {
                     // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
-                    let dest = self.get_dest_or_panic(message.message_ext().hash());
+                    let dest = self.get_dest_or_panic(message.uuid());
                     self.return_search_responses(vec![message.replace_dest_and_timestamp(dest)]).await
                 }
                 else {
-                    let hash = message.message_ext().hash().to_owned();
-                    let search_responses = self.response_staging.entry(hash.clone()).or_insert(Vec::with_capacity(num_chunks));
-                    gateway::log_debug(&format!("Collecting all search responses, {index} of {num_chunks}"));
-                    search_responses.push(message);
+                    let hash = message.uuid().to_owned();
+                    let search_responses = self.response_staging.entry(hash.clone()).or_insert(HashMap::with_capacity(num_chunks));
+                    // gateway::log_debug(&format!("Collecting all search responses, {} of {}", index + 1, num_chunks));
+                    search_responses.insert(index, message);
                     if search_responses.len() < num_chunks {
                         return;
                     }
                     gateway::log_debug("Collected all search responses");
                     let dest = self.get_dest_or_panic(&hash);
-                    let search_responses = self.response_staging.remove(&hash).unwrap().iter().map(|message| message.replace_dest_and_timestamp(dest)).collect();
+                    let search_responses = self.response_staging.remove(&hash).unwrap().into_values().map(|message| message.replace_dest_and_timestamp(dest)).collect();
                     self.return_search_responses(search_responses).await;
                 }
             },

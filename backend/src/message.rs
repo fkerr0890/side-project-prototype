@@ -11,25 +11,21 @@ pub struct MessageExt {
     message_direction: MessageDirection,
     payload: MessageKind,
     hop_count: u8,
-    uuid: String,
     position: (usize, usize)
 }
 
 impl MessageExt {
-    pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, optional_hash: Option<String>, position: (usize, usize)) -> Self {
-        let uuid = if let Some(hash) = optional_hash { hash } else { Uuid::new_v4().simple().to_string() };
+    pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, position: (usize, usize)) -> Self {
         Self {
             origin,
             message_direction,
             payload,
             hop_count,
-            uuid,
             position
         }
     }
 
     pub fn payload(&self) -> &MessageKind { &self.payload }
-    pub fn hash(&self) -> &String { &self.uuid }
     pub fn origin(&self) -> &SocketAddrV4 { &self.origin }
     pub fn direction(&self) -> &MessageDirection { &self.message_direction }
     pub fn position(&self) -> &(usize, usize) { &self.position }
@@ -50,20 +46,25 @@ pub struct Message {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
-    message_ext: Option<MessageExt>
+    message_ext: Option<MessageExt>,
+    uuid: String
 }
 impl Message {
-    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, message_ext: Option<MessageExt>) -> Self {
+    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, message_ext: Option<MessageExt>, optional_uuid: Option<String>) -> Self {
+        let uuid = if let Some(hash) = optional_uuid { hash } else { Uuid::new_v4().simple().to_string() };
         Self {
             dest,
             sender,
             timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-            message_ext
+            message_ext,
+            uuid
         }
     }
 
     pub fn dest(&self) -> &SocketAddrV4 { &self.dest }
     pub fn sender(&self) -> &SocketAddrV4 { &self.sender }
+    pub fn uuid(&self) -> &String { &self.uuid }
+
     pub fn is_heartbeat(&self) -> bool { self.message_ext.is_none() }
 
     pub fn is_search_response(&self) -> bool {
@@ -106,11 +107,18 @@ impl Message {
         }
     }
 
-    pub fn replace_dest_and_timestamp(&self, dest: SocketAddrV4) -> Self {
-        let mut result = self.clone();
-        result.dest = dest;
-        result.timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-        result
+    pub fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
+        self.dest = dest;
+        self.timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        self
+    }
+
+    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.message_ext_mut().position = position; self }
+    pub fn set_contents(mut self, contents: Vec<u8>) -> Self {
+        if let MessageKind::SearchResponse(_, ref mut slice) = self.message_ext_mut().payload {
+            *slice = contents;
+        }
+        self
     }
 
     pub fn try_decrement_hop_count(mut self) -> Option<Self> {
@@ -127,6 +135,10 @@ impl Message {
         } else {
             panic!("Cannot convert to payload without message_ext")
         }
+    }
+
+    pub fn size(&self) -> usize {
+        bincode::serialize(&self).unwrap().len()
     }
 }
 

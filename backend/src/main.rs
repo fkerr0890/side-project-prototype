@@ -1,4 +1,4 @@
-use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops};
+use p2p::{node::{EndpointPair, Node, SEARCH_MAX_HOP_COUNT}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops, message::{Message, MessageExt, MessageDirection, MessageKind}};
 use tokio::{sync::mpsc, time::sleep, net::UdpSocket};
 use uuid::Uuid;
 use std::{time::Duration, net::SocketAddrV4, env, sync::Arc, panic, process};
@@ -8,7 +8,7 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
     gateway::IS_NM_HOST.set(args[2] == "p2pclient@test.com").unwrap();
     let (my_public_endpoint, remote_public_endpoint) = if *gateway::IS_NM_HOST.get().unwrap() {
-        (SocketAddrV4::new("192.168.0.104".parse().unwrap(), 8080), SocketAddrV4::new("192.168.0.105".parse().unwrap(), 8080))
+        (SocketAddrV4::new("192.168.0.103".parse().unwrap(), 8080), SocketAddrV4::new("192.168.0.105".parse().unwrap(), 8080))
     } else {
         (SocketAddrV4::new(args[1].parse().unwrap(), 8080), SocketAddrV4::new(args[2].parse().unwrap(), 8080))
     };
@@ -49,8 +49,8 @@ async fn main() {
         }
     });
     
-    for _ in 0..40 {
-        let inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
+    for _ in 0..225 {
+        let mut inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
         tokio::spawn(async move {
             loop {
                 inbound_gateway.receive().await;
@@ -58,15 +58,19 @@ async fn main() {
         });
     }
 
+    // if my_public_endpoint.ip().to_string() == "192.168.0.103" {
+    //     my_node.send_search_response(Message::new(remote_public_endpoint, EndpointPair::default_socket(), Some(MessageExt::new(my_public_endpoint, MessageDirection::Request, MessageKind::SearchRequest(String::from("pexels-andrea-piacquadio-3824771.jpg")), SEARCH_MAX_HOP_COUNT, None, MessageExt::no_position()))), "pexels-andrea-piacquadio-3824771.jpg").await;
+    // }    
+
     tokio::spawn(async move {
         loop {
-            peer_ops::send_heartbeats(my_endpoint_pair).await;
-            sleep(Duration::from_secs(29)).await;
+            my_node.receive().await;            
         }
     });
 
     loop {
-        my_node.receive().await;            
+        peer_ops::send_heartbeats(my_endpoint_pair).await;
+        sleep(Duration::from_secs(29)).await;
     }
 
 }
