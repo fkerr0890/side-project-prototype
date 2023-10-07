@@ -23,7 +23,7 @@ backendPort.onMessage.addListener(async response => {
     }
     else if (pendingRequests[response['ResourceAvailable']]) {
         console.log('Redirecting...');
-        pendingRequests[response['ResourceAvailable']]({redirectUrl: 'http://localhost/' + response['ResourceAvailable']});
+        pendingRequests[response['ResourceAvailable']]();
     }
 });
 
@@ -48,7 +48,7 @@ function inteceptRequestAsync(requestDetails) {
     });
 }
 
-browser.webRequest.onBeforeRequest.addListener(inteceptRequestAsync, {urls: ['<all_urls>']}, ['blocking']);
+browser.webRequest.onBeforeRequest.addListener(inteceptRequestAsync, {urls: ['http://localhost/*']}, ['blocking']);
 
 // browser.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 //     if (changeInfo.status === 'complete') {

@@ -1,16 +1,16 @@
 use once_cell::sync::Lazy;
-use tokio::fs;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::sync::mpsc;
-use tokio::net::UdpSocket;
-use tokio::io::{BufReader, stdin, AsyncReadExt};
+use tokio::net::{UdpSocket, TcpListener, TcpStream};
 use serde::Serialize;
 
+use std::net::SocketAddrV4;
 use std::str;
 use std::sync::{Arc, OnceLock, Mutex};
 use std::io::{BufWriter, stdout, Write};
 
-use crate::message::{Message, MessageKind, MessageDirection, MessageExt};
-use crate::node::{EndpointPair, SEARCH_MAX_HOP_COUNT};
+use crate::message::{Message, MessageKind};
+use crate::node::EndpointPair;
 
 pub static IS_NM_HOST: OnceLock<bool> = OnceLock::new();
 pub static mut SEARCH_RESPONSE_COUNT: Lazy<Mutex<i16>> = Lazy::new(|| { Mutex::new(0) });
@@ -33,15 +33,15 @@ impl OutboundGateway {
         let outbound_messages = self.ingress.recv().await.unwrap();
         if *outbound_messages[0].dest() == EndpointPair::default_socket() {
             log_debug("Found messages to frontend");
-            if outbound_messages[0].is_search_response() {
+            if outbound_messages[0].is_http() {
                 log_debug("Returning resource to frontend");
-                let (filename, contents) = Self::reassemble_resource(outbound_messages);
-                make_resource_available(filename, contents).await;
+                let request = Self::reassemble_resource(outbound_messages);
+                // make_resource_available(filename, contents).await;
                 return;
             }
         }
 
-        let num_retries = if outbound_messages[0].is_search_response() { 1 } else { 0 };
+        let num_retries = if outbound_messages[0].is_http() { 1 } else { 0 };
         // for _ in 0..=num_retries {
             for (i, message) in outbound_messages.iter().enumerate() {
                 let bytes = &bincode::serialize(&message).unwrap();
@@ -54,39 +54,46 @@ impl OutboundGateway {
         // }
     }
 
-    fn reassemble_resource(mut messages: Vec<Message>) -> (String, Vec<u8>) {
+    fn reassemble_resource(mut messages: Vec<Message>) -> Vec<u8> {
         messages.sort_by(|a, b| a.message_ext().position().0.cmp(&b.message_ext().position().0));
         let mut contents: Vec<u8> = Vec::new();
-        let filename = messages[0].payload_inner().0.unwrap().to_owned();
         for message in messages {
-            if let MessageKind::SearchResponse(_, mut slice) = message.to_payload() {
-                contents.append(&mut slice);
+            if let MessageKind::Http(_, mut bytes) = message.into_payload() {
+                contents.append(&mut bytes);
             }
             else {
                 panic!();
             }
         }
-        (filename, contents)
+        contents
     }
 }
 
 pub struct InboundGateway {
-    socket: Arc<UdpSocket>,
+    socket: Option<Arc<UdpSocket>>,
     egress: mpsc::UnboundedSender<Message>,
+    proxy: Option<TcpListener>
 }
 
 impl InboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<Message>) -> Self 
+    pub fn new(socket: Option<&Arc<UdpSocket>>, egress: &mpsc::UnboundedSender<Message>, proxy: Option<TcpListener>) -> Self 
     {
+        let socket = if let Some(inner) = socket {
+            Some(inner.clone())
+        }
+        else {
+            None
+        };
         Self {
-            socket: socket.clone(),
-            egress: egress.clone()
+            socket,
+            egress: egress.clone(), 
+            proxy
         }
     }
 
     pub async fn receive(&mut self) {
         let mut buf = [0; 8192];
-        match self.socket.recv_from(&mut buf).await {
+        match self.socket.as_ref().unwrap().recv_from(&mut buf).await {
             Ok((n, _addr)) => {
                 // log_debug(&format!("Received {n} bytes"));
                 self.handle_message(&buf[..n]).await;
@@ -104,11 +111,6 @@ impl InboundGateway {
                     log_debug(&serde_json::to_string(&message).unwrap());
                 }
                 else {
-                    if message.payload_inner().0.unwrap().ends_with(".jpg") {
-                        let mut search_response_count = unsafe { SEARCH_RESPONSE_COUNT.lock().unwrap() };
-                        *search_response_count += 1;
-                        log_debug(&format!("Search response count {}", search_response_count));
-                    }
                     self.egress.send(message).unwrap();
                 }
             },
@@ -116,48 +118,10 @@ impl InboundGateway {
         }
     }
 
-    pub async fn receive_frontend_message(&self) {
-        let mut reader = BufReader::new(stdin());
-        let mut len_bytes = [0; 4];
-        reader.read_exact(&mut len_bytes).await.unwrap();
-        let len = u32::from_ne_bytes(len_bytes);
-        let mut message_bytes = vec![0; len as usize];
-        reader.read_exact(&mut message_bytes).await.unwrap();
-        let message_contents = serde_json::from_slice::<String>(&message_bytes).unwrap();
-        log_debug(&format!("Received frontend message: {}", message_contents));
-        self.handle_frontend_message(&message_contents).await;
+    pub async fn receive_request(&self) -> Vec<u8> {
+        let (tcp_stream, _addr) = self.proxy.as_ref().unwrap().accept().await.unwrap();
+        read_to_end(tcp_stream).await
     }
-
-    async fn handle_frontend_message(&self, message_contents: &str) {
-        match serde_json::from_str::<MessageKind>(message_contents) {
-            Ok(payload) => {
-                match &payload {
-                    MessageKind::ResourceAvailable(_) => panic!(),
-                    MessageKind::SearchRequest(filename) => {
-                        if filename.ends_with(".jpg") {
-                            let mut search_response_count = unsafe { SEARCH_RESPONSE_COUNT.lock().unwrap() };
-                            *search_response_count = 0;
-                        }
-                        log_debug("Received search request from frontend");
-                        let message = Message::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(MessageExt::new(EndpointPair::default_socket(), MessageDirection::Request, payload, SEARCH_MAX_HOP_COUNT,  MessageExt::no_position())), None);
-                        // log_debug(&format!("Og hash {}", message.message_ext().hash()));
-                        self.egress.send(message).unwrap();
-                    },
-                    _ => { log_debug("Frontend message didn't match any known message kind"); }
-                }
-            },
-            Err(e) => log_debug(&format!("Error deserializing frontend message: {}", &e.to_string()))
-        }
-    }
-}
-
-pub async fn make_resource_available(filename: String, contents: Vec<u8>) {
-    log_debug(&format!("Making {} available", filename));
-    if !check_for_resource(&filename).await{
-        let path = format!("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\{filename}");
-        fs::write(path, contents).await.unwrap();
-    }
-    send_to_frontend(MessageKind::ResourceAvailable(filename));
 }
 
 pub fn send_to_frontend<T: Serialize>(contents: T) {
@@ -170,16 +134,6 @@ pub fn send_to_frontend<T: Serialize>(contents: T) {
     writer.flush().unwrap();
 }
 
-pub async fn check_for_resource(requested_filename: &str) -> bool {
-    let mut filenames = fs::read_dir("C:\\Users\\fredk\\side_project\\side-project-prototype\\static_hosting_test\\").await.unwrap();
-    while let Ok(Some(filename)) = filenames.next_entry().await {
-        if filename.file_name().to_str().unwrap() == requested_filename {
-            return true;
-        }
-    }
-    false
-}
-
 pub fn log_debug(message: &str) {
     if *IS_NM_HOST.get().unwrap() {
         send_to_frontend(message);
@@ -187,4 +141,16 @@ pub fn log_debug(message: &str) {
     else {
         println!("{}", message);
     }
+}
+
+pub async fn send_request(socket: SocketAddrV4, request: &Vec<u8>) -> Vec<u8> {
+    let mut stream = TcpStream::connect(socket).await.unwrap();
+    stream.write_all(request).await.unwrap();
+    read_to_end(stream).await
+}
+
+async fn read_to_end(mut tcp_stream: TcpStream) -> Vec<u8> {
+    let mut buf = Vec::new();
+    tcp_stream.read_to_end(&mut buf).await.unwrap();
+    buf
 }

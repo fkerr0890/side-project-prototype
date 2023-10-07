@@ -7,9 +7,9 @@ use crate::node::EndpointPair;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MessageExt {
-    origin: SocketAddrV4,
-    message_direction: MessageDirection,
-    payload: MessageKind,
+    pub payload: MessageKind,
+    pub message_direction: MessageDirection,
+    pub origin: SocketAddrV4,
     hop_count: u8,
     position: (usize, usize)
 }
@@ -17,9 +17,9 @@ pub struct MessageExt {
 impl MessageExt {
     pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, position: (usize, usize)) -> Self {
         Self {
-            origin,
-            message_direction,
             payload,
+            message_direction,
+            origin,
             hop_count,
             position
         }
@@ -43,21 +43,21 @@ impl MessageExt {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Message {
+    pub message_ext: Option<MessageExt>,
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
-    message_ext: Option<MessageExt>,
     uuid: String
 }
 impl Message {
     pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, message_ext: Option<MessageExt>, optional_uuid: Option<String>) -> Self {
         let uuid = if let Some(hash) = optional_uuid { hash } else { Uuid::new_v4().simple().to_string() };
         Self {
+            message_ext,
             dest,
             sender,
             timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
-            message_ext,
-            uuid
+            uuid,
         }
     }
 
@@ -67,9 +67,9 @@ impl Message {
 
     pub fn is_heartbeat(&self) -> bool { self.message_ext.is_none() }
 
-    pub fn is_search_response(&self) -> bool {
+    pub fn is_http(&self) -> bool {
         if let Some(message_ext) = &self.message_ext {
-            if let MessageKind::SearchResponse(..) = message_ext.payload() {
+            if let MessageKind::Http{..} = message_ext.payload() {
                 return true;
             }
         }
@@ -89,17 +89,8 @@ impl Message {
             None => panic!("No message_ext")
         }
     }
-
-    pub fn payload_inner(&self) -> (Option<&String>, Option<&[u8]>) {
-        match &self.message_ext().payload {
-            MessageKind::SearchRequest(filename) => (Some(filename), None),
-            MessageKind::SearchResponse(filename, contents) => (Some(filename), Some(contents)),
-            MessageKind::DiscoverPeerResponse(uuid) => (Some(uuid), None),
-            _ => (None, None)
-        }
-    }
     
-    pub fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
+    pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
 
     pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
         if self.message_ext().origin == EndpointPair::default_socket() {
@@ -115,21 +106,23 @@ impl Message {
 
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.message_ext_mut().position = position; self }
     pub fn set_contents(mut self, contents: Vec<u8>) -> Self {
-        if let MessageKind::SearchResponse(_, ref mut slice) = self.message_ext_mut().payload {
-            *slice = contents;
+        if let MessageKind::Http(_, ref mut bytes) = self.message_ext_mut().payload {
+            *bytes = contents;
         }
         self
     }
 
-    pub fn try_decrement_hop_count(mut self) -> Option<Self> {
+    pub fn try_decrement_hop_count(mut self) -> Result<Self, ()> {
         if self.message_ext().hop_count > 0 {
             self.message_ext_mut().hop_count -= 1;
-            return Some(self);
+            Ok(self)
         }
-        None
+        else {
+            Err(())
+        }
     }
 
-    pub fn to_payload(self) -> MessageKind {
+    pub fn into_payload(self) -> MessageKind {
         if let Some(message_ext) = self.message_ext {
             message_ext.payload
         } else {
@@ -152,7 +145,5 @@ pub enum MessageDirection {
 pub enum MessageKind {
     DiscoverPeerRequest,
     DiscoverPeerResponse(String),
-    SearchRequest(String),
-    SearchResponse(String, Vec<u8>),
-    ResourceAvailable(String)
+    Http(Option<String>, Vec<u8>)
 }

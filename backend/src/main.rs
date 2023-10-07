@@ -1,7 +1,7 @@
-use p2p::{node::{EndpointPair, Node, SEARCH_MAX_HOP_COUNT}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops, message::{Message, MessageExt, MessageDirection, MessageKind}};
-use tokio::{sync::mpsc, time::sleep, net::UdpSocket};
+use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops};
+use tokio::{sync::mpsc, time::sleep, net::{UdpSocket, TcpListener}};
 use uuid::Uuid;
-use std::{time::Duration, net::SocketAddrV4, env, sync::Arc, panic, process};
+use std::{time::Duration, net::SocketAddrV4, env, sync::Arc, panic, process, collections::HashMap};
 
 #[tokio::main]
 async fn main() {
@@ -24,10 +24,13 @@ async fn main() {
 
     peer_ops::EGRESS.set(node_egress.clone()).unwrap();
     peer_ops::add_initial_peer(remote_endpoint_pair);
-    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress);
+    let mut local_hosts = HashMap::new();
+    let local_host_addr = "127.0.0.1".parse().unwrap();
+    local_hosts.insert(String::from("example"), SocketAddrV4::new(local_host_addr, 3000));
+    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress, local_hosts);
 
     let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
-    let inbound_frontend_gateway = gateway::InboundGateway::new(&socket, &gateway_egress);
+    let frontend_proxy = InboundGateway::new(None, &gateway_egress, Some(TcpListener::bind(SocketAddrV4::new(local_host_addr, 80)).await.unwrap()));
 
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
@@ -39,7 +42,7 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            inbound_frontend_gateway.receive_frontend_message().await;
+            frontend_proxy.receive_request().await;
         }
     });
 
@@ -50,17 +53,13 @@ async fn main() {
     });
     
     for _ in 0..225 {
-        let mut inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
+        let mut inbound_gateway = InboundGateway::new(Some(&socket), &gateway_egress, None);
         tokio::spawn(async move {
             loop {
                 inbound_gateway.receive().await;
             }
         });
     }
-
-    // if my_public_endpoint.ip().to_string() == "192.168.0.103" {
-    //     my_node.send_search_response(Message::new(remote_public_endpoint, EndpointPair::default_socket(), Some(MessageExt::new(my_public_endpoint, MessageDirection::Request, MessageKind::SearchRequest(String::from("pexels-andrea-piacquadio-3824771.jpg")), SEARCH_MAX_HOP_COUNT, None, MessageExt::no_position()))), "pexels-andrea-piacquadio-3824771.jpg").await;
-    // }    
 
     tokio::spawn(async move {
         loop {

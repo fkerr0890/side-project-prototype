@@ -27,13 +27,13 @@ impl PartialEq for Peer {
 impl Eq for Peer {}
 
 pub mod peer_ops {
-    use std::sync::{OnceLock, Mutex};
+    use std::{sync::{OnceLock, Mutex}, net::SocketAddrV4};
 
     use once_cell::sync::Lazy;
     use priority_queue::DoublePriorityQueue;
     use tokio::sync::mpsc;
     
-    use crate::{node::EndpointPair, message::Message};
+    use crate::{node::EndpointPair, message::Message, gateway};
 
     use super::Peer;
 
@@ -57,11 +57,21 @@ pub mod peer_ops {
         }
     }
 
-    pub fn send_search_request(search_request: Message) {
+    pub fn send_search_request(search_request: &Message, sender: SocketAddrV4) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let message = search_request.clone().replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint);
-            EGRESS.get().unwrap().send(vec![message]).unwrap();
+            let result = search_request
+                .clone()
+                .set_sender(sender)
+                .replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint)
+                .try_decrement_hop_count();
+            if let Ok(message) = result {
+                EGRESS.get().unwrap().send(vec![message]).unwrap();
+            }
+            else {
+                gateway::log_debug("Max hop count reached");
+                return;
+            };
         }
     }
 
