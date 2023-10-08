@@ -9,23 +9,25 @@ use std::str;
 use std::sync::{Arc, OnceLock, Mutex};
 use std::io::{BufWriter, stdout, Write};
 
-use crate::message::{Message, MessageKind};
-use crate::node::EndpointPair;
+use crate::message::{Message, MessageKind, MessageDirection, MessageExt};
+use crate::node::{EndpointPair, SEARCH_MAX_HOP_COUNT};
 
 pub static IS_NM_HOST: OnceLock<bool> = OnceLock::new();
 pub static mut SEARCH_RESPONSE_COUNT: Lazy<Mutex<i16>> = Lazy::new(|| { Mutex::new(0) });
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
-    ingress: mpsc::UnboundedReceiver<Vec<Message>>
+    ingress: mpsc::UnboundedReceiver<Vec<Message>>,
+    to_inbound_gateway: mpsc::UnboundedSender<Vec<u8>>
 }
 
 impl OutboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<Vec<Message>>) -> Self 
+    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<Vec<Message>>, to_frontend: mpsc::UnboundedSender<Vec<u8>>) -> Self 
     {
         Self {
             socket: socket.clone(),
-            ingress
+            ingress,
+            to_inbound_gateway: to_frontend
         }
     }
 
@@ -35,8 +37,8 @@ impl OutboundGateway {
             log_debug("Found messages to frontend");
             if outbound_messages[0].is_http() {
                 log_debug("Returning resource to frontend");
-                let request = Self::reassemble_resource(outbound_messages);
-                // make_resource_available(filename, contents).await;
+                let response = Self::reassemble_resource(outbound_messages);
+                self.to_inbound_gateway.send(response).unwrap();
                 return;
             }
         }
@@ -52,6 +54,12 @@ impl OutboundGateway {
                 // sleep(Duration::from_micros(50)).await;
             }
         // }
+    }
+
+    pub async fn send_request(socket: SocketAddrV4, request: &Vec<u8>) -> Vec<u8> {
+        let mut stream = TcpStream::connect(socket).await.unwrap();
+        stream.write_all(request).await.unwrap();
+        read_to_end(&mut stream).await
     }
 
     fn reassemble_resource(mut messages: Vec<Message>) -> Vec<u8> {
@@ -72,11 +80,12 @@ impl OutboundGateway {
 pub struct InboundGateway {
     socket: Option<Arc<UdpSocket>>,
     egress: mpsc::UnboundedSender<Message>,
-    proxy: Option<TcpListener>
+    proxy: Option<TcpListener>,
+    from_outbound_gateway: Option<mpsc::UnboundedReceiver<Vec<u8>>>
 }
 
 impl InboundGateway {
-    pub fn new(socket: Option<&Arc<UdpSocket>>, egress: &mpsc::UnboundedSender<Message>, proxy: Option<TcpListener>) -> Self 
+    pub fn new(socket: Option<&Arc<UdpSocket>>, egress: &mpsc::UnboundedSender<Message>, proxy: Option<TcpListener>, from_outbound_gateway: Option<mpsc::UnboundedReceiver<Vec<u8>>>) -> Self 
     {
         let socket = if let Some(inner) = socket {
             Some(inner.clone())
@@ -87,7 +96,8 @@ impl InboundGateway {
         Self {
             socket,
             egress: egress.clone(), 
-            proxy
+            proxy,
+            from_outbound_gateway
         }
     }
 
@@ -118,9 +128,20 @@ impl InboundGateway {
         }
     }
 
-    pub async fn receive_request(&self) -> Vec<u8> {
-        let (tcp_stream, _addr) = self.proxy.as_ref().unwrap().accept().await.unwrap();
-        read_to_end(tcp_stream).await
+    pub async fn handle_http_request(&mut self) {
+        let (mut tcp_stream, _addr) = self.proxy.as_ref().unwrap().accept().await.unwrap();
+        let request = read_to_end(&mut tcp_stream).await;
+        let message = Message::new(EndpointPair::default_socket(),
+            EndpointPair::default_socket(),
+            Some(MessageExt::new(EndpointPair::default_socket(),
+            MessageDirection::Request,
+            MessageKind::Http(Some(String::from("example")), request),
+            SEARCH_MAX_HOP_COUNT,
+            MessageExt::no_position())),
+            None);
+        self.egress.send(message).unwrap();
+        let response = self.from_outbound_gateway.as_mut().unwrap().recv().await.unwrap();
+        tcp_stream.write_all(&response).await.unwrap();
     }
 }
 
@@ -143,13 +164,7 @@ pub fn log_debug(message: &str) {
     }
 }
 
-pub async fn send_request(socket: SocketAddrV4, request: &Vec<u8>) -> Vec<u8> {
-    let mut stream = TcpStream::connect(socket).await.unwrap();
-    stream.write_all(request).await.unwrap();
-    read_to_end(stream).await
-}
-
-async fn read_to_end(mut tcp_stream: TcpStream) -> Vec<u8> {
+async fn read_to_end(tcp_stream: &mut TcpStream) -> Vec<u8> {
     let mut buf = Vec::new();
     tcp_stream.read_to_end(&mut buf).await.unwrap();
     buf

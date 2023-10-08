@@ -21,6 +21,7 @@ async fn main() {
     let socket = Arc::new(UdpSocket::bind(my_private_endpoint).await.unwrap());
     let (gateway_egress, node_ingress) = mpsc::unbounded_channel();
     let (node_egress, gateway_ingress) = mpsc::unbounded_channel();
+    let (to_inbound_gateway, from_outbound_gateway) = mpsc::unbounded_channel();
 
     peer_ops::EGRESS.set(node_egress.clone()).unwrap();
     peer_ops::add_initial_peer(remote_endpoint_pair);
@@ -29,8 +30,8 @@ async fn main() {
     local_hosts.insert(String::from("example"), SocketAddrV4::new(local_host_addr, 3000));
     let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress, local_hosts);
 
-    let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
-    let frontend_proxy = InboundGateway::new(None, &gateway_egress, Some(TcpListener::bind(SocketAddrV4::new(local_host_addr, 80)).await.unwrap()));
+    let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress, to_inbound_gateway);
+    let mut frontend_proxy = InboundGateway::new(None, &gateway_egress, Some(TcpListener::bind(SocketAddrV4::new(local_host_addr, 80)).await.unwrap()), Some(from_outbound_gateway));
 
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
@@ -42,7 +43,7 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            frontend_proxy.receive_request().await;
+            frontend_proxy.handle_http_request().await;
         }
     });
 
@@ -53,7 +54,7 @@ async fn main() {
     });
     
     for _ in 0..225 {
-        let mut inbound_gateway = InboundGateway::new(Some(&socket), &gateway_egress, None);
+        let mut inbound_gateway = InboundGateway::new(Some(&socket), &gateway_egress, None, None);
         tokio::spawn(async move {
             loop {
                 inbound_gateway.receive().await;

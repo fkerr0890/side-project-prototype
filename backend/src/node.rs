@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::{message::{Message, MessageDirection, MessageKind, MessageExt}, gateway, peer::peer_ops};
+use crate::{message::{Message, MessageDirection, MessageKind, MessageExt}, gateway::{self, OutboundGateway}, peer::peer_ops};
 
 pub const SEARCH_MAX_HOP_COUNT: u8 = 5;
 pub struct Node {
@@ -33,7 +33,7 @@ impl Node {
         }
     }
 
-    pub async fn send_search_response(&mut self, search_request: &Message, host_name: &str, request: &Vec<u8>) {
+    pub async fn send_search_response(&mut self, search_request: &Message, host_name: &str, request: &Vec<u8>, origin: SocketAddrV4) {
         let hash = search_request.uuid();
         if self.breadcrumbs.contains_key(hash) {
             gateway::log_debug("Already visited this node, not propagating message");
@@ -46,8 +46,8 @@ impl Node {
         if let Some(socket) = self.local_hosts.get(host_name) {
             // gateway::log_debug(&format!("Hash at hairpin {hash}"));
             let dest = self.get_dest_or_panic(hash);
-            let response = gateway::send_request(*socket, request).await;
-            self.return_search_responses(self.construct_search_response(response, hash, dest, *search_request.message_ext().origin()).await).await;
+            let response = OutboundGateway::send_request(*socket, request).await;
+            self.return_search_responses(self.construct_search_response(response, hash, dest, origin).await).await;
         }
         else {
             gateway::log_debug("Resource not found");
@@ -86,7 +86,8 @@ impl Node {
     pub async fn receive(&mut self) {
         let message = self.ingress.recv().await.unwrap();
         match &message {
-            Message { message_ext: Some(MessageExt { payload: MessageKind::Http(Some(host_name), http_request), message_direction: MessageDirection::Request, .. }), ..} => self.send_search_response(&message, host_name, http_request).await,
+            Message { message_ext: Some(MessageExt { payload: MessageKind::Http(Some(host_name), http_request),
+                message_direction: MessageDirection::Request, origin, .. }), ..} => self.send_search_response(&message, host_name, http_request, *origin).await,
             Message { message_ext: Some(MessageExt { payload: MessageKind::Http(..), message_direction: MessageDirection::Response, .. }), .. } => {
                 let (index, num_chunks) = *message.message_ext().position();
                 if num_chunks == 1 {
