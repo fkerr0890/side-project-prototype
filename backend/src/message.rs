@@ -3,13 +3,13 @@ use serde::{Serialize, Deserialize};
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
-use crate::node::EndpointPair;
+use crate::{node::{EndpointPair, SEARCH_MAX_HOP_COUNT}, http::{SerdeHttpRequest, SerdeHttpResponse}};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MessageExt {
     pub payload: MessageKind,
-    pub message_direction: MessageDirection,
     pub origin: SocketAddrV4,
+    pub message_direction: MessageDirection,
     hop_count: u8,
     position: (usize, usize)
 }
@@ -18,14 +18,15 @@ impl MessageExt {
     pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, position: (usize, usize)) -> Self {
         Self {
             payload,
-            message_direction,
             origin,
+            message_direction,
             hop_count,
             position
         }
     }
 
     pub fn payload(&self) -> &MessageKind { &self.payload }
+    pub fn payload_mut(&mut self) -> &mut MessageKind { &mut self.payload }
     pub fn origin(&self) -> &SocketAddrV4 { &self.origin }
     pub fn direction(&self) -> &MessageDirection { &self.message_direction }
     pub fn position(&self) -> &(usize, usize) { &self.position }
@@ -39,6 +40,15 @@ impl MessageExt {
     //     let digest = context.finish();
     //     HEXLOWER.encode(digest.as_ref())
     // }
+
+    pub fn into_response(self) -> SerdeHttpResponse {
+        if let MessageKind::HttpResponse(response) = self.payload {
+            response
+        }
+        else {
+            panic!("That's just WRONG")
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -61,15 +71,26 @@ impl Message {
         }
     }
 
+    pub fn initial_http_request(request: SerdeHttpRequest) -> Self {
+        Message::new(EndpointPair::default_socket(),
+            EndpointPair::default_socket(),
+            Some(MessageExt::new(EndpointPair::default_socket(),
+            MessageDirection::Request,
+            MessageKind::HttpRequest(String::from("example"), request),
+            SEARCH_MAX_HOP_COUNT,
+            MessageExt::no_position())),
+            None)
+    }
+
     pub fn dest(&self) -> &SocketAddrV4 { &self.dest }
     pub fn sender(&self) -> &SocketAddrV4 { &self.sender }
     pub fn uuid(&self) -> &String { &self.uuid }
 
     pub fn is_heartbeat(&self) -> bool { self.message_ext.is_none() }
 
-    pub fn is_http(&self) -> bool {
+    pub fn is_http_response(&self) -> bool {
         if let Some(message_ext) = &self.message_ext {
-            if let MessageKind::Http{..} = message_ext.payload() {
+            if let MessageKind::HttpResponse{..} = message_ext.payload() {
                 return true;
             }
         }
@@ -89,6 +110,15 @@ impl Message {
             None => panic!("No message_ext")
         }
     }
+
+    pub fn into_message_ext(self) -> MessageExt {
+        if let Some(message_ext) = self.message_ext {
+            message_ext
+        }
+        else {
+            panic!("No message_ext")
+        }
+    }
     
     pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
 
@@ -105,9 +135,10 @@ impl Message {
     }
 
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.message_ext_mut().position = position; self }
-    pub fn set_contents(mut self, contents: Vec<u8>) -> Self {
-        if let MessageKind::Http(_, ref mut bytes) = self.message_ext_mut().payload {
-            *bytes = contents;
+
+    pub fn set_body(mut self, bytes: Vec<u8>) -> Self {
+        if let MessageKind::HttpResponse(SerdeHttpResponse {ref mut body, ..}) = self.message_ext_mut().payload_mut() {
+            *body = bytes;
         }
         self
     }
@@ -122,14 +153,6 @@ impl Message {
         }
     }
 
-    pub fn into_payload(self) -> MessageKind {
-        if let Some(message_ext) = self.message_ext {
-            message_ext.payload
-        } else {
-            panic!("Cannot convert to payload without message_ext")
-        }
-    }
-
     pub fn size(&self) -> usize {
         bincode::serialize(&self).unwrap().len()
     }
@@ -141,9 +164,10 @@ pub enum MessageDirection {
     Response,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum MessageKind {
     DiscoverPeerRequest,
     DiscoverPeerResponse(String),
-    Http(Option<String>, Vec<u8>)
+    HttpRequest(String, SerdeHttpRequest),
+    HttpResponse(SerdeHttpResponse)
 }

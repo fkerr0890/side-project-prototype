@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::{message::{Message, MessageDirection, MessageKind, MessageExt}, gateway::{self, OutboundGateway}, peer::peer_ops};
+use crate::{message::{Message, MessageDirection, MessageKind, MessageExt}, gateway, peer::peer_ops, http::{SerdeHttpResponse, SerdeHttpRequest, self}};
 
 pub const SEARCH_MAX_HOP_COUNT: u8 = 5;
 pub struct Node {
@@ -33,7 +33,7 @@ impl Node {
         }
     }
 
-    pub async fn send_search_response(&mut self, search_request: &Message, host_name: &str, request: &Vec<u8>, origin: SocketAddrV4) {
+    pub async fn send_search_response(&mut self, search_request: &Message, host_name: &String, request: &SerdeHttpRequest, origin: SocketAddrV4) {
         let hash = search_request.uuid();
         if self.breadcrumbs.contains_key(hash) {
             gateway::log_debug("Already visited this node, not propagating message");
@@ -45,14 +45,13 @@ impl Node {
         gateway::log_debug("Checking for resource");
         if let Some(socket) = self.local_hosts.get(host_name) {
             // gateway::log_debug(&format!("Hash at hairpin {hash}"));
+            let response = http::make_request(request.clone(), String::from("http://") + &socket.to_string() + "/").await;
             let dest = self.get_dest_or_panic(hash);
-            let response = OutboundGateway::send_request(*socket, request).await;
             self.return_search_responses(self.construct_search_response(response, hash, dest, origin).await).await;
+            return;
         }
-        else {
-            gateway::log_debug("Resource not found");
-            peer_ops::send_search_request(search_request, self.endpoint_pair.public_endpoint);
-        }
+        gateway::log_debug("Resource not found");
+        peer_ops::send_search_request(search_request, self.endpoint_pair.public_endpoint);
     }
 
     async fn return_search_responses(&mut self, search_responses: Vec<Message>) {
@@ -63,21 +62,22 @@ impl Node {
         self.breadcrumbs.remove(&hash);
     }
     
-    async fn construct_search_response(&self, response: Vec<u8>, hash: &str, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<Message> {
+    async fn construct_search_response(&self, response: SerdeHttpResponse, hash: &str, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<Message> {
+        let (status_code, version, headers, body) = response.into_parts();
         let empty_message = Message::new(
             dest,
             self.endpoint_pair.public_endpoint,
             Some(MessageExt::new(origin,
             MessageDirection::Response,
-            MessageKind::Http(None, Vec::with_capacity(0)),
+            MessageKind::HttpResponse(SerdeHttpResponse::without_body(status_code, version, headers)),
             SEARCH_MAX_HOP_COUNT,
             MessageExt::no_position())),
             Some(hash.to_owned()));
-        let chunks = response.chunks(1024 - empty_message.size());
+        let chunks = body.chunks(1024 - empty_message.size());
         let num_chunks = chunks.len();
         let mut messages: Vec<Message> = chunks
             .enumerate()
-            .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_contents(chunk.to_vec()))
+            .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_body(chunk.to_vec()))
             .collect();
         messages.shuffle(&mut SmallRng::from_entropy());
         messages
@@ -85,10 +85,11 @@ impl Node {
 
     pub async fn receive(&mut self) {
         let message = self.ingress.recv().await.unwrap();
+        gateway::log_debug("Node received message");
         match &message {
-            Message { message_ext: Some(MessageExt { payload: MessageKind::Http(Some(host_name), http_request),
-                message_direction: MessageDirection::Request, origin, .. }), ..} => self.send_search_response(&message, host_name, http_request, *origin).await,
-            Message { message_ext: Some(MessageExt { payload: MessageKind::Http(..), message_direction: MessageDirection::Response, .. }), .. } => {
+            Message { message_ext: Some(MessageExt { payload: MessageKind::HttpRequest(ref host_name, ref http_request),
+                origin, .. }), ..} => self.send_search_response(&message, host_name, http_request, *origin).await,
+            Message { message_ext: Some(MessageExt { payload: MessageKind::HttpResponse(..), .. }), .. } => {
                 let (index, num_chunks) = *message.message_ext().position();
                 if num_chunks == 1 {
                     // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));

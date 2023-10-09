@@ -1,7 +1,7 @@
-use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops};
-use tokio::{sync::mpsc, time::sleep, net::{UdpSocket, TcpListener}};
+use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops, http::{self, ServerContext}};
+use tokio::{sync::{mpsc, Mutex}, time::sleep, net::UdpSocket};
 use uuid::Uuid;
-use std::{time::Duration, net::SocketAddrV4, env, sync::Arc, panic, process, collections::HashMap};
+use std::{time::Duration, net::{SocketAddrV4, SocketAddr}, env, sync::Arc, panic, process, collections::HashMap};
 
 #[tokio::main]
 async fn main() {
@@ -26,12 +26,10 @@ async fn main() {
     peer_ops::EGRESS.set(node_egress.clone()).unwrap();
     peer_ops::add_initial_peer(remote_endpoint_pair);
     let mut local_hosts = HashMap::new();
-    let local_host_addr = "127.0.0.1".parse().unwrap();
-    local_hosts.insert(String::from("example"), SocketAddrV4::new(local_host_addr, 3000));
+    local_hosts.insert(args[3].to_owned(), SocketAddrV4::new(args[4].parse().unwrap(), args[5].parse().unwrap()));
     let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress, local_hosts);
 
     let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress, to_inbound_gateway);
-    let mut frontend_proxy = InboundGateway::new(None, &gateway_egress, Some(TcpListener::bind(SocketAddrV4::new(local_host_addr, 80)).await.unwrap()), Some(from_outbound_gateway));
 
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
@@ -43,18 +41,12 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            frontend_proxy.handle_http_request().await;
-        }
-    });
-
-    tokio::spawn(async move {
-        loop {
             outbound_gateway.send().await;
         }
     });
     
     for _ in 0..225 {
-        let mut inbound_gateway = InboundGateway::new(Some(&socket), &gateway_egress, None, None);
+        let mut inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
         tokio::spawn(async move {
             loop {
                 inbound_gateway.receive().await;
@@ -68,9 +60,14 @@ async fn main() {
         }
     });
 
-    loop {
-        peer_ops::send_heartbeats(my_endpoint_pair).await;
-        sleep(Duration::from_secs(29)).await;
-    }
+    tokio::spawn(async move {
+        loop {
+            peer_ops::send_heartbeats(my_endpoint_pair).await;
+            sleep(Duration::from_secs(29)).await;
+        }
+    });
+
+    let server_context = ServerContext::new(&gateway_egress, Arc::new(Mutex::new(from_outbound_gateway)));
+    http::tcp_listen(SocketAddr::from(([127,0,0,1], 80)), server_context).await;
 
 }
