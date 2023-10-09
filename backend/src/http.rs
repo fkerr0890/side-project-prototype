@@ -27,10 +27,10 @@ impl SerdeHttpRequest {
         }
     }
 
-    fn to_hyper_request(self, uri: &str) -> Request<Body> {
+    fn to_hyper_request(self, uri_prefix: String) -> Request<Body> {
         let mut request = Request::new(Body::from(self.body));
         *request.method_mut() = Method::from_str(&self.method).unwrap();
-        *request.uri_mut() = Uri::from_str(uri).unwrap();
+        *request.uri_mut() = Uri::from_str(&(uri_prefix + &self.uri)).unwrap();
         *request.version_mut() = string_to_version(self.version);
         *request.headers_mut() = reconstruct_header_map(self.headers);
         request
@@ -156,7 +156,7 @@ pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
 
 pub async fn make_request(request: SerdeHttpRequest, socket: String) -> SerdeHttpResponse {
     let client = Client::new();
-    let request = request.to_hyper_request(&socket);
+    let request = request.to_hyper_request(socket);
     let response = client.request(request).await.unwrap();
     gateway::log_debug(&format!("{:#?}", response));
     let serde_response = SerdeHttpResponse::from_hyper_response(response).await;

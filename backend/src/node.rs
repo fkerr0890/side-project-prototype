@@ -45,7 +45,7 @@ impl Node {
         gateway::log_debug("Checking for resource");
         if let Some(socket) = self.local_hosts.get(host_name) {
             // gateway::log_debug(&format!("Hash at hairpin {hash}"));
-            let response = http::make_request(request.clone(), String::from("http://") + &socket.to_string() + "/").await;
+            let response = http::make_request(request.clone(), String::from("http://") + &socket.to_string()).await;
             let dest = self.get_dest_or_panic(hash);
             self.return_search_responses(self.construct_search_response(response, hash, dest, origin).await).await;
             return;
