@@ -73,14 +73,19 @@ impl Node {
             SEARCH_MAX_HOP_COUNT,
             MessageExt::no_position())),
             Some(hash.to_owned()));
-        let chunks = body.chunks(1024 - empty_message.size());
-        let num_chunks = chunks.len();
-        let mut messages: Vec<Message> = chunks
-            .enumerate()
-            .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_body(chunk.to_vec()))
-            .collect();
-        messages.shuffle(&mut SmallRng::from_entropy());
-        messages
+        if !body.is_empty() {
+            let chunks = body.chunks(1024 - empty_message.size());
+            let num_chunks = chunks.len();
+            let mut messages: Vec<Message> = chunks
+                .enumerate()
+                .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_body(chunk.to_vec()))
+                .collect();
+            messages.shuffle(&mut SmallRng::from_entropy());
+            messages
+        }
+        else {
+            vec![empty_message]
+        }
     }
 
     pub async fn receive(&mut self) {

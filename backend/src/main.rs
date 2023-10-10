@@ -26,7 +26,9 @@ async fn main() {
     peer_ops::EGRESS.set(node_egress.clone()).unwrap();
     peer_ops::add_initial_peer(remote_endpoint_pair);
     let mut local_hosts = HashMap::new();
-    local_hosts.insert(args[3].to_owned(), SocketAddrV4::new(args[4].parse().unwrap(), args[5].parse().unwrap()));
+    if args.len() > 3 {
+        local_hosts.insert(args[3].to_owned(), SocketAddrV4::new(args[4].parse().unwrap(), args[5].parse().unwrap()));
+    }
     let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress, local_hosts);
 
     let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress, to_inbound_gateway);
