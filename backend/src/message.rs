@@ -1,34 +1,36 @@
 use chrono::{Utc, SecondsFormat};
+use rand::{seq::SliceRandom, rngs::SmallRng, SeedableRng};
 use serde::{Serialize, Deserialize};
-use std::{str, net::SocketAddrV4};
+use std::{str, net::SocketAddrV4, mem};
 use uuid::Uuid;
 
 use crate::{node::{EndpointPair, SEARCH_MAX_HOP_COUNT}, http::{SerdeHttpRequest, SerdeHttpResponse}};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MessageExt {
-    pub payload: MessageKind,
+    pub kind: MessageKind,
     pub origin: SocketAddrV4,
-    pub message_direction: MessageDirection,
+    pub payload: Vec<u8>,
     hop_count: u8,
     position: (usize, usize)
 }
 
 impl MessageExt {
-    pub fn new(origin: SocketAddrV4, message_direction: MessageDirection, payload: MessageKind, hop_count: u8, position: (usize, usize)) -> Self {
+    pub fn new(origin: SocketAddrV4, message_direction: MessageKind, payload: Vec<u8>, hop_count: u8, position: (usize, usize)) -> Self {
         Self {
             payload,
             origin,
-            message_direction,
+            kind: message_direction,
             hop_count,
             position
         }
     }
 
-    pub fn payload(&self) -> &MessageKind { &self.payload }
-    pub fn payload_mut(&mut self) -> &mut MessageKind { &mut self.payload }
+    pub fn payload(&self) -> &Vec<u8> { &self.payload }
+    pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
+    pub fn into_payload(self) -> Vec<u8> { self.payload }
     pub fn origin(&self) -> &SocketAddrV4 { &self.origin }
-    pub fn direction(&self) -> &MessageDirection { &self.message_direction }
+    pub fn kind(&self) -> &MessageKind { &self.kind }
     pub fn position(&self) -> &(usize, usize) { &self.position }
     pub fn no_position() -> (usize, usize) { (0, 0) }
     
@@ -40,15 +42,6 @@ impl MessageExt {
     //     let digest = context.finish();
     //     HEXLOWER.encode(digest.as_ref())
     // }
-
-    pub fn into_response(self) -> SerdeHttpResponse {
-        if let MessageKind::HttpResponse(response) = self.payload {
-            response
-        }
-        else {
-            panic!("That's just WRONG")
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -71,15 +64,39 @@ impl Message {
         }
     }
 
-    pub fn initial_http_request(request: SerdeHttpRequest) -> Self {
+    pub fn initial_http_request(host_name: String, request: SerdeHttpRequest) -> Self {
         Message::new(EndpointPair::default_socket(),
             EndpointPair::default_socket(),
             Some(MessageExt::new(EndpointPair::default_socket(),
-            MessageDirection::Request,
-            MessageKind::HttpRequest(String::from("example"), request),
+            MessageKind::HttpRequest(host_name),
+            bincode::serialize(&request).unwrap(),
             SEARCH_MAX_HOP_COUNT,
             MessageExt::no_position())),
             None)
+    }
+
+    pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, hash: String, response: SerdeHttpResponse) -> Self {
+        Message::new(
+            dest,
+            sender,
+            Some(MessageExt::new(origin,
+            MessageKind::HttpResponse,
+            bincode::serialize(&response).unwrap(),
+            SEARCH_MAX_HOP_COUNT,
+            MessageExt::no_position())),
+            Some(hash))
+    }
+
+    pub fn chunked(self) -> Vec<Message> {
+        let (payload, empty_message) = self.extract_payload();
+        let chunks = payload.chunks(1024 - (bincode::serialized_size(&empty_message).unwrap() as usize));
+        let num_chunks = chunks.len();
+        let mut messages: Vec<Message> = chunks
+            .enumerate()
+            .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_payload(chunk.to_vec()))
+            .collect();
+        messages.shuffle(&mut SmallRng::from_entropy());
+        messages
     }
 
     pub fn dest(&self) -> &SocketAddrV4 { &self.dest }
@@ -87,15 +104,6 @@ impl Message {
     pub fn uuid(&self) -> &String { &self.uuid }
 
     pub fn is_heartbeat(&self) -> bool { self.message_ext.is_none() }
-
-    pub fn is_http_response(&self) -> bool {
-        if let Some(message_ext) = &self.message_ext {
-            if let MessageKind::HttpResponse{..} = message_ext.payload() {
-                return true;
-            }
-        }
-        false
-    }
 
     pub fn message_ext(&self) -> &MessageExt {
         match self.message_ext {
@@ -119,6 +127,10 @@ impl Message {
             panic!("No message_ext")
         }
     }
+
+    pub fn extract_payload(mut self) -> (Vec<u8>, Self) {
+        return (mem::take(self.message_ext_mut().payload_mut()), self)
+    }
     
     pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
 
@@ -136,10 +148,8 @@ impl Message {
 
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.message_ext_mut().position = position; self }
 
-    pub fn set_body(mut self, bytes: Vec<u8>) -> Self {
-        if let MessageKind::HttpResponse(SerdeHttpResponse {ref mut body, ..}) = self.message_ext_mut().payload_mut() {
-            *body = bytes;
-        }
+    pub fn set_payload(mut self, bytes: Vec<u8>) -> Self {
+        *self.message_ext_mut().payload_mut() = bytes;
         self
     }
 
@@ -168,6 +178,17 @@ pub enum MessageDirection {
 pub enum MessageKind {
     DiscoverPeerRequest,
     DiscoverPeerResponse(String),
-    HttpRequest(String, SerdeHttpRequest),
-    HttpResponse(SerdeHttpResponse)
+    HttpRequest(String),
+    HttpResponse
+}
+
+impl MessageKind {
+    pub fn host_name(&self) -> &str {
+        if let Self::HttpRequest(host_name) = self {
+            host_name
+        }
+        else {
+            panic!()
+        }
+    }
 }

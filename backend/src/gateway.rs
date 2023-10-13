@@ -6,7 +6,7 @@ use std::str;
 use std::sync::{Arc, OnceLock};
 
 use crate::http::SerdeHttpResponse;
-use crate::message::Message;
+use crate::message::{Message, MessageKind};
 use crate::node::EndpointPair;
 
 pub static IS_NM_HOST: OnceLock<bool> = OnceLock::new();
@@ -14,58 +14,42 @@ pub static mut SEARCH_RESPONSE_COUNT: Lazy<Mutex<i16>> = Lazy::new(|| { Mutex::n
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
-    ingress: mpsc::UnboundedReceiver<Vec<Message>>,
+    ingress: mpsc::UnboundedReceiver<Message>,
     to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>
 }
 
 impl OutboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<Vec<Message>>, to_frontend: mpsc::UnboundedSender<SerdeHttpResponse>) -> Self 
+    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<Message>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>) -> Self 
     {
         Self {
             socket: socket.clone(),
             ingress,
-            to_http_handler: to_frontend
+            to_http_handler
         }
     }
 
     pub async fn send(&mut self) {
-        let outbound_messages = self.ingress.recv().await.unwrap();
-        if *outbound_messages[0].dest() == EndpointPair::default_socket() {
-            log_debug("Found messages to frontend");
-            if outbound_messages[0].is_http_response() {
-                log_debug("Returning resource to frontend");
-                let response = Self::reassemble_resource(outbound_messages);
+        let outbound_message = self.ingress.recv().await.unwrap();
+        if *outbound_message.dest() == EndpointPair::default_socket() {
+            log_debug("Returning resource to frontend");
+            if let MessageKind::HttpResponse = outbound_message.message_ext().kind() {
+                let response: SerdeHttpResponse = bincode::deserialize(&outbound_message.into_message_ext().into_payload()).unwrap();
                 self.to_http_handler.send(response).unwrap();
-                return;
             }
+            return;
         }
 
-        for (i, message) in outbound_messages.iter().enumerate() {
+        let is_heartbeat = outbound_message.is_heartbeat();
+        let len = outbound_message.message_ext().position().1;
+        let dest = *outbound_message.dest();
+        for (i, message) in outbound_message.chunked().iter().enumerate() {
             let bytes = &bincode::serialize(&message).unwrap();
-            if outbound_messages[0].is_http_response() {
-                log_debug(&format!("Sending {} of {} (index = {}), bytes = {}", i + 1, outbound_messages.len(), message.message_ext().position().0, bytes.len()));
+            if !is_heartbeat {
+                log_debug(&format!("Sending {} of {}, bytes = {}", i + 1, len, bytes.len()));
             }
-            self.socket.send_to(&bytes, message.dest()).await.unwrap();
+            self.socket.send_to(&bytes, dest).await.unwrap();
             // sleep(Duration::from_micros(50)).await;
         }
-    }
-
-    fn reassemble_resource(mut messages: Vec<Message>) -> SerdeHttpResponse {
-        let mut unfinished_response: Option<SerdeHttpResponse> = None;
-        let mut first = false;
-        messages.sort_by(|a, b| a.message_ext().position().0.cmp(&b.message_ext().position().0));
-        let mut bytes: Vec<u8> = Vec::new();
-        for message in messages {
-            let (status_code, version, headers, mut body) = message.into_message_ext().into_response().into_parts();
-            if !first {
-                unfinished_response = Some(SerdeHttpResponse::without_body(status_code, version, headers));
-                first = true
-            }
-            bytes.append(&mut body);
-        }
-        let mut reponse = unfinished_response.unwrap();
-        reponse.body = bytes;
-        reponse
     }
 }
 
@@ -109,6 +93,16 @@ impl InboundGateway {
             Err(e) => log_debug(&format!("Error deserializing net message: {}", &e.to_string()))
         }
     }
+}
+
+pub fn reassemble_resource(mut messages: Vec<Message>) -> Message {
+    let (mut bytes, mut unfinished_message) = messages.pop().unwrap().extract_payload();
+    messages.sort_by(|a, b| a.message_ext().position().0.cmp(&b.message_ext().position().0));
+    for message in messages {
+        bytes.append(&mut message.into_message_ext().into_payload());
+    }
+    unfinished_message = unfinished_message.set_payload(bytes);
+    unfinished_message
 }
 
 pub fn log_debug(message: &str) {

@@ -39,7 +39,7 @@ pub mod peer_ops {
 
     static mut PEERS: Lazy<Mutex<DoublePriorityQueue<Peer, i32>>> = Lazy::new(|| { Mutex::new(DoublePriorityQueue::new()) });
     pub const MAX_PEERS: usize = 6;
-    pub static EGRESS: OnceLock<mpsc::UnboundedSender<Vec<Message>>> = OnceLock::new();
+    pub static EGRESS: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
 
     pub fn add_initial_peer(endpoint_pair: EndpointPair) {
         add_peer(endpoint_pair, 0);
@@ -57,21 +57,22 @@ pub mod peer_ops {
         }
     }
 
-    pub fn send_search_request(search_request: &Message, sender: SocketAddrV4) {
+    pub fn send_search_request(search_request_parts: Vec<Message>, sender: SocketAddrV4) {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let result = search_request
-                .clone()
-                .set_sender(sender)
-                .replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint)
-                .try_decrement_hop_count();
-            if let Ok(message) = result {
-                EGRESS.get().unwrap().send(vec![message]).unwrap();
+            for message in search_request_parts.clone() {
+                let result = message
+                    .set_sender(sender)
+                    .replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint)
+                    .try_decrement_hop_count();
+                if let Ok(message) = result {
+                    EGRESS.get().unwrap().send(message).unwrap();
+                }
+                else {
+                    gateway::log_debug("Max hop count reached");
+                    return;
+                }
             }
-            else {
-                gateway::log_debug("Max hop count reached");
-                return;
-            };
         }
     }
 
@@ -79,7 +80,7 @@ pub mod peer_ops {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
             let heartbeat = Message::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, None, None);
-            EGRESS.get().unwrap().send(vec![heartbeat]).unwrap();
+            EGRESS.get().unwrap().send(heartbeat).unwrap();
         }
     }
 }

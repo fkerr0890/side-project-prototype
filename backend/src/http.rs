@@ -136,7 +136,7 @@ impl ServerContext {
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {      
     gateway::log_debug(&format!("Handling http request: {:#?}", request));      
     let serde_request = SerdeHttpRequest::from_hyper_request(request).await;
-    context.egress.send(Message::initial_http_request(serde_request)).unwrap();
+    context.egress.send(Message::initial_http_request(String::from("example"), serde_request)).unwrap();
     let mut rx = context.from_outbound_gateway.lock().await;
     let response = rx.recv().await.unwrap();
     Ok(response.to_hyper_response())
