@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{node::{EndpointPair, SEARCH_MAX_HOP_COUNT}, http::{SerdeHttpRequest, SerdeHttpResponse}};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MessageExt {
     pub kind: MessageKind,
     pub origin: SocketAddrV4,
@@ -32,7 +32,7 @@ impl MessageExt {
     pub fn origin(&self) -> &SocketAddrV4 { &self.origin }
     pub fn kind(&self) -> &MessageKind { &self.kind }
     pub fn position(&self) -> &(usize, usize) { &self.position }
-    pub fn no_position() -> (usize, usize) { (0, 0) }
+    pub fn no_position() -> (usize, usize) { (0, 1) }
     
     // pub fn hash_for_message(origin: &SocketAddrV4, message_direction: &MessageDirection, payload: &MessageKind) -> String {
     //     let mut context = Context::new(&SHA256);
@@ -44,7 +44,7 @@ impl MessageExt {
     // }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     pub message_ext: Option<MessageExt>,
     dest: SocketAddrV4,
@@ -97,6 +97,15 @@ impl Message {
             .collect();
         messages.shuffle(&mut SmallRng::from_entropy());
         messages
+    }
+
+    pub fn reassemble_message_payload(mut messages: Vec<Self>) -> Vec<u8> {
+        messages.sort_by(|a, b| a.message_ext().position().0.cmp(&b.message_ext().position().0));
+        let mut bytes = Vec::new();
+        for message in messages {
+            bytes.append(&mut message.into_message_ext().into_payload());
+        }
+        bytes
     }
 
     pub fn dest(&self) -> &SocketAddrV4 { &self.dest }
@@ -174,7 +183,7 @@ pub enum MessageDirection {
     Response,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum MessageKind {
     DiscoverPeerRequest,
     DiscoverPeerResponse(String),

@@ -21,7 +21,7 @@ async fn main() {
     let socket = Arc::new(UdpSocket::bind(my_private_endpoint).await.unwrap());
     let (gateway_egress, node_ingress) = mpsc::unbounded_channel();
     let (node_egress, gateway_ingress) = mpsc::unbounded_channel();
-    let (to_inbound_gateway, from_outbound_gateway) = mpsc::unbounded_channel();
+    let (to_http_handler, from_node) = mpsc::unbounded_channel();
 
     peer_ops::EGRESS.set(node_egress.clone()).unwrap();
     peer_ops::add_initial_peer(remote_endpoint_pair);
@@ -29,9 +29,9 @@ async fn main() {
     if args.len() > 3 {
         local_hosts.insert(args[3].to_owned(), SocketAddrV4::new(args[4].parse().unwrap(), args[5].parse().unwrap()));
     }
-    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress, local_hosts);
+    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress, to_http_handler, local_hosts);
 
-    let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress, to_inbound_gateway);
+    let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
 
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
@@ -69,7 +69,7 @@ async fn main() {
         }
     });
 
-    let server_context = ServerContext::new(&gateway_egress, Arc::new(Mutex::new(from_outbound_gateway)));
+    let server_context = ServerContext::new(&gateway_egress, Arc::new(Mutex::new(from_node)));
     http::tcp_listen(SocketAddr::from(([127,0,0,1], 80)), server_context).await;
 
 }

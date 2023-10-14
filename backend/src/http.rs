@@ -4,7 +4,7 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::{message::Message, gateway};
+use crate::message::Message;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SerdeHttpRequest {
@@ -56,9 +56,9 @@ impl SerdeHttpResponse {
         }
     }
 
-    pub fn without_body(status_code: u16, version: String, headers: HashMap<String, Vec<String>>) -> Self {
+    pub fn new(status_code: u16, version: String, headers: HashMap<String, Vec<String>>, body: Vec<u8>) -> Self {
         Self {
-            body: Vec::with_capacity(0),
+            body,
             status_code,
             version,
             headers,
@@ -133,10 +133,11 @@ impl ServerContext {
     pub fn new(egress: &mpsc::UnboundedSender<Message>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>) -> Self { Self { egress: egress.clone(), from_outbound_gateway } }
 }
 
-async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {      
-    gateway::log_debug(&format!("Handling http request: {:#?}", request));      
+async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {     
     let serde_request = SerdeHttpRequest::from_hyper_request(request).await;
-    context.egress.send(Message::initial_http_request(String::from("example"), serde_request)).unwrap();
+    for message in Message::initial_http_request(String::from("example"), serde_request).chunked() {
+        context.egress.send(message).unwrap();
+    }
     let mut rx = context.from_outbound_gateway.lock().await;
     let response = rx.recv().await.unwrap();
     Ok(response.to_hyper_response())
@@ -158,7 +159,6 @@ pub async fn make_request(request: SerdeHttpRequest, socket: String) -> SerdeHtt
     let client = Client::new();
     let request = request.to_hyper_request(socket);
     let response = client.request(request).await.unwrap();
-    gateway::log_debug(&format!("{:#?}", response));
     let serde_response = SerdeHttpResponse::from_hyper_response(response).await;
     serde_response
 }
