@@ -1,17 +1,17 @@
-use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap, hash::Hash};
+use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap, hash::Hash, time::Duration};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::{sync::{mpsc::{self, UnboundedSender}, oneshot}, time::sleep};
 use uuid::Uuid;
 
-use crate::{message::{Message, MessageKind, MessageExt}, gateway, peer::peer_ops, http::{SerdeHttpResponse, self}};
+use crate::{message::{Message, MessageKind, MessageExt}, gateway::{self, EmptyResult}, peer::peer_ops, http::{SerdeHttpResponse, self}};
 
-pub const SEARCH_MAX_HOP_COUNT: u8 = 5;
+pub static SEARCH_TIMEOUT: i64 = 30;
 pub struct Node {
     endpoint_pair: EndpointPair,
     uuid: Uuid,
-    breadcrumbs: HashMap<String, SocketAddrV4>,
-    message_staging: HashMap<String, HashMap<usize, Message>>,
+    breadcrumbs: HashMap<String, (SocketAddrV4, oneshot::Receiver<()>)>,
+    message_staging: HashMap<String, (HashMap<usize, Message>, oneshot::Receiver<()>)>,
     nat_kind: NatKind,
     ingress: mpsc::UnboundedReceiver<Message>,
     egress: mpsc::UnboundedSender<Message>,
@@ -34,59 +34,61 @@ impl Node {
         }
     }
 
-    pub async fn send_search_response(&mut self, search_request_parts: Vec<Message>, origin: SocketAddrV4) {
+    pub async fn send_search_response(&mut self, search_request_parts: Vec<Message>, origin: SocketAddrV4) -> EmptyResult {
         let hash = search_request_parts[0].uuid().to_owned();
         if self.breadcrumbs.contains_key(&hash) {
             gateway::log_debug("Already visited this node, not propagating message");
-            return;
+            return Ok(());
         }
         else {
-            self.breadcrumbs.insert(hash.to_owned(), *search_request_parts[0].sender());
+            self.insert_breadcrumb_ttl(hash.clone(), *search_request_parts[0].sender(), 30);
         }
         gateway::log_debug("Checking for resource");
         if let Some(socket) = self.local_hosts.get(search_request_parts[0].message_ext().kind().host_name()) {
             // gateway::log_debug(&format!("Hash at hairpin {hash}"));
+            let dest = *search_request_parts[0].sender();
             let bytes = Message::reassemble_message_payload(search_request_parts);
             let search_request = bincode::deserialize(&bytes).unwrap();
             let response = http::make_request(search_request, String::from("http://") + &socket.to_string()).await;
-            let dest = self.get_dest_or_panic(&hash);
-            self.return_search_responses(self.construct_search_response(response, &hash, dest, origin).await).await;
-            return;
+            return self.return_search_responses(self.construct_search_response(response, &hash, dest, origin).await).await;
         }
         gateway::log_debug("Resource not found");
-        peer_ops::send_search_request(search_request_parts, self.endpoint_pair.public_endpoint);
+        peer_ops::send_search_request(search_request_parts, self.endpoint_pair.public_endpoint)?;
+        Ok(())
     }
 
-    async fn return_search_responses(&mut self, search_responses: Vec<Message>) {
+    async fn return_search_responses(&mut self, search_responses: Vec<Message>) -> EmptyResult {
         let hash = search_responses[0].uuid().to_owned();
-        let dest = self.get_dest_or_panic(&hash);
+        let Some(dest) = self.get_breadcrumb_ttl(&hash) else { return Ok(()) };
         gateway::log_debug(&format!("Returning search responses to {dest}"));
         if dest == EndpointPair::default_socket() {
             let bytes = Message::reassemble_message_payload(search_responses);
             let response = bincode::deserialize(&bytes).unwrap();
-            self.to_http_handler.send(response).unwrap();
+            self.to_http_handler.send(response).map_err(|_| { () })?;
         }
         else {
             for response in search_responses {
-                self.egress.send(response.replace_dest_and_timestamp(dest)).unwrap();
+                self.egress.send(response.replace_dest_and_timestamp(dest)).map_err(|_| { () })?;
             }
-            self.breadcrumbs.remove(&hash);
         }
+        self.breadcrumbs.remove(&hash);
+        Ok(())
     }
     
     async fn construct_search_response(&self, response: SerdeHttpResponse, hash: &str, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<Message> {
         Message::initial_http_response(dest, self.endpoint_pair.public_endpoint, origin, hash.to_owned(), response).chunked()
     }
 
-    pub async fn receive(&mut self) {
+    pub async fn receive(&mut self) -> EmptyResult  {
         let message = self.ingress.recv().await.unwrap();
         if let Some(messages) = self.collect_messages(message) {
             match messages[0] {
-                Message { message_ext: Some(MessageExt { kind: MessageKind::HttpRequest(..), origin, ..}), .. } => self.send_search_response(messages, origin).await,
-                Message { message_ext: Some(MessageExt { kind: MessageKind::HttpResponse, .. }), .. } => self.return_search_responses(messages).await,
+                Message { message_ext: Some(MessageExt { kind: MessageKind::HttpRequest(..), origin, ..}), .. } => return self.send_search_response(messages, origin).await,
+                Message { message_ext: Some(MessageExt { kind: MessageKind::HttpResponse, .. }), .. } => return self.return_search_responses(messages).await,
                 _ => gateway::log_debug("not supported") 
-            }
-        }
+            };
+        };
+        Ok(())
     }
 
     fn collect_messages(&mut self, message: Message) -> Option<Vec<Message>> {
@@ -109,13 +111,31 @@ impl Node {
         }
     }
 
-    fn get_dest_or_panic(&self, hash: &str) -> SocketAddrV4 {
-        if let Some(dest) = self.breadcrumbs.get(hash) {
-            *dest
+    fn insert_breadcrumb_ttl(&mut self, uuid: String, value: SocketAddrV4, ttl_secs: u64) {
+        let (tx, rx) = oneshot::channel();
+        self.breadcrumbs.insert(uuid, (value, rx));
+        tokio::spawn(async move {
+            sleep(Duration::from_secs(ttl_secs)).await;
+            tx.send(()).ok()
+        });
+    }
+
+    fn get_breadcrumb_ttl(&mut self, uuid: &str) -> Option<SocketAddrV4> {
+        let Some((dest, rx)) = self.breadcrumbs.get_mut(uuid) else { return None };
+        if let Err(_) = rx.try_recv() {
+            Some(*dest)
         }
         else {
-            panic!("No breadcrumb found");
+            gateway::log_debug("Ttl for breadcrumb expired");
+            self.breadcrumbs.remove(uuid);
+            None
         }
+    }
+
+    fn stage_message_ttl(&mut self, uuid: String, message: Message, num_chunks: usize, ttl_secs: u64) {
+        let (tx, rx) = oneshot::channel();
+        let staged_messages = self.message_staging.entry(uuid).or_insert((HashMap::with_capacity(num_chunks), rx));
+        
     }
 
     pub fn to_node_info(&self) -> NodeInfo {

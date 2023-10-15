@@ -6,12 +6,7 @@ use std::{time::Duration, net::{SocketAddrV4, SocketAddr}, env, sync::Arc, panic
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
-    gateway::IS_NM_HOST.set(args[2] == "p2pclient@test.com").unwrap();
-    let (my_public_endpoint, remote_public_endpoint) = if *gateway::IS_NM_HOST.get().unwrap() {
-        (SocketAddrV4::new("192.168.0.103".parse().unwrap(), 8080), SocketAddrV4::new("192.168.0.105".parse().unwrap(), 8080))
-    } else {
-        (SocketAddrV4::new(args[1].parse().unwrap(), 8080), SocketAddrV4::new(args[2].parse().unwrap(), 8080))
-    };
+    let (my_public_endpoint, remote_public_endpoint) = (SocketAddrV4::new(args[1].parse().unwrap(), 8080), SocketAddrV4::new(args[2].parse().unwrap(), 8080));
     
     let my_private_endpoint = SocketAddrV4::new("0.0.0.0".parse().unwrap(), 8080);
     let my_endpoint_pair = EndpointPair::new(my_public_endpoint, my_private_endpoint);    
@@ -43,7 +38,7 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            outbound_gateway.send().await;
+            let Some(_) = outbound_gateway.send().await else { return };
         }
     });
     
@@ -51,20 +46,20 @@ async fn main() {
         let mut inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
         tokio::spawn(async move {
             loop {
-                inbound_gateway.receive().await;
+                let Ok(_) = inbound_gateway.receive().await else { return };
             }
         });
     }
 
     tokio::spawn(async move {
         loop {
-            my_node.receive().await;            
+            let Ok(_) = my_node.receive().await else { return };            
         }
     });
 
     tokio::spawn(async move {
         loop {
-            peer_ops::send_heartbeats(my_endpoint_pair).await;
+            let Ok(_) = peer_ops::send_heartbeats(my_endpoint_pair).await else { return };
             sleep(Duration::from_secs(29)).await;
         }
     });

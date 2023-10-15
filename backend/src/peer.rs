@@ -29,11 +29,12 @@ impl Eq for Peer {}
 pub mod peer_ops {
     use std::{sync::{OnceLock, Mutex}, net::SocketAddrV4};
 
+    use chrono::Utc;
     use once_cell::sync::Lazy;
     use priority_queue::DoublePriorityQueue;
     use tokio::sync::mpsc;
     
-    use crate::{node::EndpointPair, message::Message, gateway};
+    use crate::{node::EndpointPair, message::{Message, self}, gateway::{self, EmptyResult}};
 
     use super::Peer;
 
@@ -53,34 +54,39 @@ pub mod peer_ops {
             should_push = should_push || worst_peer.1 > &score;
         }
         if should_push {
+            if peer_limit_reached {
+                peers.pop_min();
+            }
             peers.push(Peer::new(endpoint_pair, score), score);
         }
     }
 
-    pub fn send_search_request(search_request_parts: Vec<Message>, sender: SocketAddrV4) {
+    pub fn send_search_request(search_request_parts: Vec<Message>, sender: SocketAddrV4) -> EmptyResult {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
             for message in search_request_parts.clone() {
                 let result = message
                     .set_sender(sender)
                     .replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint)
-                    .try_decrement_hop_count();
+                    .check_expiry();
                 if let Ok(message) = result {
-                    EGRESS.get().unwrap().send(message).unwrap();
+                    EGRESS.get().unwrap().send(message).map_err(|_| { () })?;
                 }
                 else {
-                    gateway::log_debug("Max hop count reached");
-                    return;
+                    gateway::log_debug("Message expired");
+                    return Ok(());
                 }
             }
         }
+        Ok(())
     }
 
-    pub async fn send_heartbeats(sender: EndpointPair) {
+    pub async fn send_heartbeats(sender: EndpointPair) -> EmptyResult {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let heartbeat = Message::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, None, None);
-            EGRESS.get().unwrap().send(heartbeat).unwrap();
+            let heartbeat = Message::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, message::datetime_to_timestamp(Utc::now()), None, None);
+            EGRESS.get().unwrap().send(heartbeat).map_err(|_| { () })?;
         }
+        Ok(())
     }
 }
