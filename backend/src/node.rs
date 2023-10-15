@@ -98,15 +98,13 @@ impl Node {
             Some(vec![message])
         }
         else {
-            let hash = message.uuid().to_owned();
-            let staged_messages = self.message_staging.entry(hash.clone()).or_insert(HashMap::with_capacity(num_chunks));
-            // gateway::log_debug(&format!("Collecting all search responses, {} of {}", index + 1, num_chunks));
-            staged_messages.insert(index, message);
-            if staged_messages.len() < num_chunks {
+            let hash = message.uuid().clone();
+            // gateway::log_debug(&format!("Collecting all search responses, {} of {}", index + 1, num_chunks));            
+            if self.stage_message_ttl(&hash, message, index, num_chunks, 30) {
                 return None;
             }
             gateway::log_debug("Collected all messages");
-            let messages: Vec<Message> = self.message_staging.remove(&hash).unwrap().into_values().collect();
+            let messages: Vec<Message> = self.message_staging.remove(&hash).unwrap().0.into_values().collect();
             Some(messages)
         }
     }
@@ -132,10 +130,22 @@ impl Node {
         }
     }
 
-    fn stage_message_ttl(&mut self, uuid: String, message: Message, num_chunks: usize, ttl_secs: u64) {
+    fn stage_message_ttl(&mut self, uuid: &String, message: Message, index: usize, num_chunks: usize, ttl_secs: u64) -> bool {
         let (tx, rx) = oneshot::channel();
-        let staged_messages = self.message_staging.entry(uuid).or_insert((HashMap::with_capacity(num_chunks), rx));
-        
+        let (staged_messages, rx) = self.message_staging.entry(uuid.clone()).or_insert((HashMap::with_capacity(num_chunks), rx));
+        if let Ok(_) = rx.try_recv() {
+            gateway::log_debug("Ttl for message staging expired");
+            self.message_staging.remove(uuid);
+            return true;
+        }
+        staged_messages.insert(index, message);
+        if staged_messages.len() == 1 {
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(ttl_secs)).await;
+                tx.send(()).ok()
+            });
+        }
+        return staged_messages.len() < num_chunks
     }
 
     pub fn to_node_info(&self) -> NodeInfo {
