@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 
-use crate::node::{EndpointPair, PeerStatus};
+use crate::node::EndpointPair;
 
 #[derive(Hash, Serialize, Deserialize, Copy, Clone)]
 pub struct Peer {
@@ -26,6 +26,12 @@ impl PartialEq for Peer {
 }
 impl Eq for Peer {}
 
+#[derive(Hash, Serialize, Deserialize, Copy, Clone)]
+pub enum PeerStatus {
+    Disconnected,
+    Connected
+}
+
 pub mod peer_ops {
     use std::{sync::{OnceLock, Mutex}, net::SocketAddrV4};
 
@@ -34,13 +40,13 @@ pub mod peer_ops {
     use priority_queue::DoublePriorityQueue;
     use tokio::sync::mpsc;
     
-    use crate::{node::EndpointPair, message::{Message, self}, gateway::{self, EmptyResult}};
+    use crate::{node::EndpointPair, message::{Message, self, Heartbeat}, gateway::{self, EmptyResult}};
 
     use super::Peer;
 
     static mut PEERS: Lazy<Mutex<DoublePriorityQueue<Peer, i32>>> = Lazy::new(|| { Mutex::new(DoublePriorityQueue::new()) });
     pub const MAX_PEERS: usize = 6;
-    pub static EGRESS: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
+    pub static HEARTBEAT_TX: OnceLock<mpsc::UnboundedSender<Heartbeat>> = OnceLock::new();
 
     pub fn add_initial_peer(endpoint_pair: EndpointPair) {
         add_peer(endpoint_pair, 0);
@@ -61,7 +67,7 @@ pub mod peer_ops {
         }
     }
 
-    pub fn send_search_request(search_request_parts: Vec<Message>, sender: SocketAddrV4) -> EmptyResult {
+    pub fn send_request<T: Message<T> + Clone>(search_request_parts: Vec<T>, sender: SocketAddrV4, tx: &mpsc::UnboundedSender<T>) -> EmptyResult {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
             for message in search_request_parts.clone() {
@@ -70,7 +76,7 @@ pub mod peer_ops {
                     .replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint)
                     .check_expiry();
                 if let Ok(message) = result {
-                    EGRESS.get().unwrap().send(message).map_err(|_| { () })?;
+                    tx.send(message).map_err(|_| { () })?;
                 }
                 else {
                     gateway::log_debug("Message expired");
@@ -84,8 +90,8 @@ pub mod peer_ops {
     pub async fn send_heartbeats(sender: EndpointPair) -> EmptyResult {
         let peers = unsafe { PEERS.lock().unwrap() };
         for peer in peers.iter() {
-            let heartbeat = Message::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, message::datetime_to_timestamp(Utc::now()), None, None);
-            EGRESS.get().unwrap().send(heartbeat).map_err(|_| { () })?;
+            let heartbeat = Heartbeat::new(peer.0.endpoint_pair.public_endpoint, sender.public_endpoint, message::datetime_to_timestamp(Utc::now()));
+            HEARTBEAT_TX.get().unwrap().send(heartbeat).map_err(|_| { () })?;
         }
         Ok(())
     }

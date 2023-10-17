@@ -1,4 +1,4 @@
-use crate::node::Node;
+use crate::node::SearchRequestProcessor;
 
 use std::io;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, SocketAddrV4};
@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 use stun::{Error, client, message, agent, xoraddr};
 use stun::message::Getter;
 
-impl Node {
+impl SearchRequestProcessor {
     pub async fn connect_peer(&self, remote_public_endpoint: SocketAddrV4, arc_socket: UdpSocket) -> io::Result<()> {
         loop {
             arc_socket.send_to(b"Hello" , remote_public_endpoint).await?;

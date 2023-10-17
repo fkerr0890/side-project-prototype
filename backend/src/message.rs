@@ -6,95 +6,80 @@ use uuid::Uuid;
 
 use crate::{node::{EndpointPair, SEARCH_TIMEOUT}, http::{SerdeHttpRequest, SerdeHttpResponse}};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct MessageExt {
-    pub kind: MessageKind,
-    pub origin: SocketAddrV4,
-    pub payload: Vec<u8>,
-    expiry: String,
-    position: (usize, usize)
-}
-
-impl MessageExt {
-    pub fn new(origin: SocketAddrV4, message_direction: MessageKind, payload: Vec<u8>, expiry: String, position: (usize, usize)) -> Self {
-        Self {
-            payload,
-            origin,
-            kind: message_direction,
-            expiry,
-            position
-        }
-    }
-
-    pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
-    pub fn into_payload(self) -> Vec<u8> { self.payload }
-    pub fn origin(&self) -> &SocketAddrV4 { &self.origin }
-    pub fn kind(&self) -> &MessageKind { &self.kind }
-    pub fn position(&self) -> &(usize, usize) { &self.position }
-    pub fn no_position() -> (usize, usize) { (0, 1) }
-    
-    // pub fn hash_for_message(origin: &SocketAddrV4, message_direction: &MessageDirection, payload: &MessageKind) -> String {
-    //     let mut context = Context::new(&SHA256);
-    //     context.update(origin.to_string().as_bytes());
-    //     context.update(serde_json::to_string(&message_direction).unwrap().as_bytes());
-    //     context.update(serde_json::to_string(&payload).unwrap().as_bytes());
-    //     let digest = context.finish();
-    //     HEXLOWER.encode(digest.as_ref())
-    // }
+pub trait Message<T> {
+    fn dest(&self) -> SocketAddrV4;
+    fn id(&self) -> &String;
+    fn is_heartbeat(&self) -> bool { false }
+    fn replace_dest_and_timestamp(self, dest: SocketAddrV4) -> T;
+    fn check_expiry(self) -> Result<T, ()>;
+    fn set_sender(self, sender: SocketAddrV4) -> Self;
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Message {
-    pub message_ext: Option<MessageExt>,
+pub struct Heartbeat {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
     uuid: String
 }
-impl Message {
-    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, timestamp: String, message_ext: Option<MessageExt>, optional_uuid: Option<String>) -> Self {
-        let uuid = if let Some(hash) = optional_uuid { hash } else { Uuid::new_v4().simple().to_string() };
+
+impl Heartbeat {
+    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, timestamp: String) -> Self { Self { dest, sender, timestamp, uuid: Uuid::new_v4().simple().to_string() } }
+}
+
+impl Message<Self> for Heartbeat {
+    fn dest(&self) -> SocketAddrV4 { self.dest }
+    fn id(&self) -> &String { &self.uuid }
+    fn is_heartbeat(&self) -> bool { true }
+    fn replace_dest_and_timestamp(self, _dest: SocketAddrV4) -> Self { self }
+    fn check_expiry(self) -> Result<Self, ()> { Ok(self) }
+    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SearchMessage {
+    pub kind: MessageKind,
+    dest: SocketAddrV4,
+    sender: SocketAddrV4,
+    timestamp: String,
+    query: String,
+    origin: SocketAddrV4,
+    payload: Vec<u8>,
+    expiry: String,
+    position: (usize, usize)
+}
+impl SearchMessage {
+    const NO_POSITION: (usize, usize) = (0, 1);
+
+    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, kind: MessageKind, payload: Vec<u8>) -> Self {
+        let datetime = Utc::now();
         Self {
-            message_ext,
             dest,
             sender,
-            timestamp,
-            uuid,
+            timestamp: datetime_to_timestamp(datetime),
+            query,
+            kind,
+            origin,
+            payload,
+            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
+            position: Self::NO_POSITION
         }
     }
 
-    pub fn initial_http_request(host_name: String, request: SerdeHttpRequest) -> Self {
-        let datetime = Utc::now();
-        Message::new(EndpointPair::default_socket(),
-            EndpointPair::default_socket(),
-            datetime_to_timestamp(datetime),
-            Some(MessageExt::new(EndpointPair::default_socket(),
-            MessageKind::HttpRequest(host_name),
-            bincode::serialize(&request).unwrap(),
-            datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
-            MessageExt::no_position())),
-            None)
+    pub fn initial_http_request(query: String, request: SerdeHttpRequest) -> Self {
+        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
+            query, MessageKind::Request, bincode::serialize(&request).unwrap())
     }
 
-    pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, hash: String, response: SerdeHttpResponse) -> Self {
-        let datetime = Utc::now();
-        Message::new(
-            dest,
-            sender,
-            datetime_to_timestamp(datetime),
-            Some(MessageExt::new(origin,
-            MessageKind::HttpResponse,
-            bincode::serialize(&response).unwrap(),
-            datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
-            MessageExt::no_position())),
-            Some(hash))
+    pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, response: SerdeHttpResponse) -> Self {
+        Self::new(dest, sender, origin, query, MessageKind::Response, bincode::serialize(&response).unwrap())
     }
 
-    pub fn chunked(self) -> Vec<Message> {
+    pub fn chunked(self) -> Vec<Self> {
         let (payload, empty_message) = self.extract_payload();
         let chunks = payload.chunks(1024 - (bincode::serialized_size(&empty_message).unwrap() as usize));
         let num_chunks = chunks.len();
-        let mut messages: Vec<Message> = chunks
+        let mut messages: Vec<Self> = chunks
             .enumerate()
             .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_payload(chunk.to_vec()))
             .collect();
@@ -102,72 +87,129 @@ impl Message {
         messages
     }
 
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn into_payload(self) -> Vec<u8> { self.payload }
+    pub fn origin(&self) -> SocketAddrV4 { self.origin }
+    pub fn kind(&self) -> &MessageKind { &self.kind }
+    pub fn position(&self) -> (usize, usize) { self.position }
+    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
+    
+    pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
+
+    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
+        if self.origin == EndpointPair::default_socket() {
+            self.origin = origin;
+        }
+    }
+
+    pub fn set_payload(mut self, bytes: Vec<u8>) -> Self {
+        self.payload = bytes;
+        self
+    }
+
     pub fn reassemble_message_payload(mut messages: Vec<Self>) -> Vec<u8> {
-        messages.sort_by(|a, b| a.message_ext().position().0.cmp(&b.message_ext().position().0));
+        messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
         let mut bytes = Vec::new();
         for message in messages {
-            bytes.append(&mut message.into_message_ext().into_payload());
+            bytes.append(&mut message.into_payload());
         }
         bytes
     }
+}
 
-    pub fn dest(&self) -> &SocketAddrV4 { &self.dest }
-    pub fn sender(&self) -> &SocketAddrV4 { &self.sender }
-    pub fn uuid(&self) -> &String { &self.uuid }
-    pub fn is_heartbeat(&self) -> bool { self.message_ext.is_none() }
-    pub fn message_ext(&self) -> &MessageExt { self.message_ext.as_ref().expect("No message ext") }
-    pub fn message_ext_mut(&mut self) -> &mut MessageExt { self.message_ext.as_mut().expect("No message ext") }
-    pub fn into_message_ext(self) -> MessageExt { self.message_ext.expect("No message ext") }
-    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(self.message_ext_mut().payload_mut()), self) }
-    
-    pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
-    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.message_ext_mut().position = position; self }
+impl Message<Self> for SearchMessage {
+    fn dest(&self) -> SocketAddrV4 { self.dest }
+    fn id(&self) -> &String { &self.query }
+    fn is_heartbeat(&self) -> bool { true }
 
-    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
-        if self.message_ext().origin == EndpointPair::default_socket() {
-            self.message_ext_mut().origin = origin;
-        }
-    }
-
-    pub fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
+    fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
         self.dest = dest;
         self.timestamp = datetime_to_timestamp(Utc::now());
         self
     }
 
-    pub fn set_payload(mut self, bytes: Vec<u8>) -> Self {
-        *self.message_ext_mut().payload_mut() = bytes;
-        self
-    }
-
-    pub fn check_expiry(self) -> Result<Self, ()> {
-        if let Some(ref message_ext) = self.message_ext {
-            let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&message_ext.expiry).unwrap().into();
-            if expiry >= Utc::now() {
-                return Ok(self);
-            }
+    fn check_expiry(self) -> Result<Self, ()> {
+        let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&self.expiry).unwrap().into();
+        if expiry >= Utc::now() {
+            return Ok(self);
         }
         Err(())
     }
+
+    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DiscoverPeerMessage {
+    pub kind: MessageKind,
+    dest: SocketAddrV4,
+    sender: SocketAddrV4,
+    timestamp: String,
+    uuid: String,
+    origin: SocketAddrV4,
+    peer_list: Vec<EndpointPair>,
+    hop_count: u16
+}
+
+impl DiscoverPeerMessage {
+    pub fn new(kind: MessageKind, dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String) -> Self {
+        Self {
+            kind,
+            dest,
+            sender,
+            timestamp: datetime_to_timestamp(Utc::now()),
+            uuid,
+            origin,
+            peer_list: Vec::new(),
+            hop_count: 0
+        }
+    }
+
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn origin(&self) -> SocketAddrV4 { self.origin }
+    pub fn kind(&self) -> &MessageKind { &self.kind }
+    pub fn into_peer_list(self) -> Vec<EndpointPair> { self.peer_list }
+
+    pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+    pub fn add_peer(&mut self, endpoint_pair: EndpointPair) { self.peer_list.push(endpoint_pair); }
+
+    pub fn try_decrement_hop_count(&mut self) -> bool {
+        if self.hop_count > 0 {
+            self.hop_count -= 1;
+            true
+        }
+        else {
+            false
+        }
+    }
+    
+    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
+        if self.origin == EndpointPair::default_socket() {
+            self.origin = origin;
+        }
+    }
+}
+
+impl Message<Self> for DiscoverPeerMessage {
+    fn dest(&self) -> SocketAddrV4 { self.dest }
+    fn id(&self) -> &String { &self.uuid }
+    fn is_heartbeat(&self) -> bool { true }
+
+    fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
+        self.dest = dest;
+        self.timestamp = datetime_to_timestamp(Utc::now());
+        self
+    }
+
+    fn check_expiry(self) -> Result<Self, ()> { Ok(self) }
+    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum MessageKind {
-    DiscoverPeerRequest,
-    DiscoverPeerResponse(String),
-    HttpRequest(String),
-    HttpResponse
-}
-
-impl MessageKind {
-    pub fn host_name(&self) -> &str {
-        if let Self::HttpRequest(host_name) = self {
-            host_name
-        }
-        else {
-            panic!()
-        }
-    }
+    Request,
+    Response
 }
 
 pub fn datetime_to_timestamp(datetime: DateTime<Utc>) -> String {

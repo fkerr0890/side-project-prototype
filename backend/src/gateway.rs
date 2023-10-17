@@ -1,3 +1,5 @@
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::net::UdpSocket;
 
@@ -8,13 +10,13 @@ use crate::message::Message;
 
 pub type EmptyResult = Result<(), ()>; 
 
-pub struct OutboundGateway {
+pub struct OutboundGateway<T> {
     socket: Arc<UdpSocket>,
-    ingress: mpsc::UnboundedReceiver<Message>
+    ingress: mpsc::UnboundedReceiver<T>
 }
 
-impl OutboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<Message>) -> Self 
+impl<T: Serialize + DeserializeOwned + Message<T>> OutboundGateway<T> {
+    pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<T>) -> Self 
     {
         Self {
             socket: socket.clone(),
@@ -24,19 +26,19 @@ impl OutboundGateway {
 
     pub async fn send(&mut self) -> Option<usize> {
         let outbound_message = self.ingress.recv().await?;
-        let dest = *outbound_message.dest();
+        let dest = outbound_message.dest();
         let bytes = &bincode::serialize(&outbound_message).unwrap();
         Some(self.socket.send_to(bytes, dest).await.unwrap_or_default())
     }
 }
 
-pub struct InboundGateway {
+pub struct InboundGateway<T> {
     socket: Arc<UdpSocket>,
-    egress: mpsc::UnboundedSender<Message>
+    egress: mpsc::UnboundedSender<T>
 }
 
-impl InboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<Message>) -> Self 
+impl<T: Serialize + DeserializeOwned + Message<T>> InboundGateway<T> {
+    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<T>) -> Self 
     {
         Self {
             socket: socket.clone(),
@@ -52,7 +54,7 @@ impl InboundGateway {
     }
     
     async fn handle_message(&self, message_bytes: &[u8]) -> EmptyResult {
-        let message = bincode::deserialize::<Message>(message_bytes).unwrap();
+        let message = bincode::deserialize::<T>(message_bytes).unwrap();
         if message.is_heartbeat() {
             Ok(log_debug(&serde_json::to_string(&message).unwrap()))
         }

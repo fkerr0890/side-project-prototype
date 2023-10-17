@@ -4,7 +4,7 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::message::Message;
+use crate::message::SearchMessage;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SerdeHttpRequest {
@@ -131,12 +131,12 @@ fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> HeaderMap {
 
 #[derive(Clone)]
 pub struct ServerContext {
-    egress: mpsc::UnboundedSender<Message>,
+    egress: mpsc::UnboundedSender<SearchMessage>,
     from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>
 }
 
 impl ServerContext {
-    pub fn new(egress: &mpsc::UnboundedSender<Message>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>) -> Self { Self { egress: egress.clone(), from_outbound_gateway } }
+    pub fn new(egress: &mpsc::UnboundedSender<SearchMessage>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>) -> Self { Self { egress: egress.clone(), from_outbound_gateway } }
 }
 
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
@@ -153,7 +153,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
                 .unwrap())
         }
     };
-    for message in Message::initial_http_request(String::from("example"), serde_request).chunked() {
+    for message in SearchMessage::initial_http_request(String::from("example"), serde_request).chunked() {
         context.egress.send(message).ok();
     }
     let mut rx = context.from_outbound_gateway.lock().await;

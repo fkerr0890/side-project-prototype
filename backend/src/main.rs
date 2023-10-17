@@ -1,6 +1,5 @@
-use p2p::{node::{EndpointPair, Node}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops, http::{self, ServerContext}};
+use p2p::{node::{EndpointPair, SearchRequestProcessor, MessageProcessor}, gateway::{self, OutboundGateway, InboundGateway}, peer::peer_ops, http::{self, ServerContext}};
 use tokio::{sync::{mpsc, Mutex}, time::sleep, net::UdpSocket};
-use uuid::Uuid;
 use std::{time::Duration, net::{SocketAddrV4, SocketAddr}, env, sync::Arc, panic, process, collections::HashMap};
 
 #[tokio::main]
@@ -14,19 +13,20 @@ async fn main() {
     let remote_endpoint_pair = EndpointPair::new(remote_public_endpoint, remote_private_endpoint);
     
     let socket = Arc::new(UdpSocket::bind(my_private_endpoint).await.unwrap());
-    let (gateway_egress, node_ingress) = mpsc::unbounded_channel();
-    let (node_egress, gateway_ingress) = mpsc::unbounded_channel();
-    let (to_http_handler, from_node) = mpsc::unbounded_channel();
+    let (in_gateway_tx, srp_rx) = mpsc::unbounded_channel();
+    let (srp_tx, out_gateway_rx) = mpsc::unbounded_channel();
+    let (heartbeat_tx, _) = mpsc::unbounded_channel();
+    let (to_http_handler, from_srp) = mpsc::unbounded_channel();
 
-    peer_ops::EGRESS.set(node_egress.clone()).unwrap();
+    peer_ops::HEARTBEAT_TX.set(heartbeat_tx).unwrap();
     peer_ops::add_initial_peer(remote_endpoint_pair);
     let mut local_hosts = HashMap::new();
     if args.len() > 3 {
         local_hosts.insert(args[3].to_owned(), SocketAddrV4::new(args[4].parse().unwrap(), args[5].parse().unwrap()));
     }
-    let mut my_node = Node::new(my_endpoint_pair, Uuid::new_v4(), node_ingress, node_egress, to_http_handler, local_hosts);
+    let mut srp = SearchRequestProcessor::new(MessageProcessor::new(my_endpoint_pair, srp_rx, srp_tx), to_http_handler, local_hosts);
 
-    let mut outbound_gateway = OutboundGateway::new(&socket, gateway_ingress);
+    let mut outbound_gateway = OutboundGateway::new(&socket, out_gateway_rx);
 
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
@@ -43,7 +43,7 @@ async fn main() {
     });
     
     for _ in 0..225 {
-        let mut inbound_gateway = InboundGateway::new(&socket, &gateway_egress);
+        let mut inbound_gateway = InboundGateway::new(&socket, &in_gateway_tx);
         tokio::spawn(async move {
             loop {
                 let Ok(_) = inbound_gateway.receive().await else { return };
@@ -53,7 +53,7 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            let Ok(_) = my_node.receive().await else { return };            
+            let Ok(_) = srp.receive().await else { return };            
         }
     });
 
@@ -64,7 +64,7 @@ async fn main() {
         }
     });
 
-    let server_context = ServerContext::new(&gateway_egress, Arc::new(Mutex::new(from_node)));
+    let server_context = ServerContext::new(&in_gateway_tx, Arc::new(Mutex::new(from_srp)));
     http::tcp_listen(SocketAddr::from(([127,0,0,1], 80)), server_context).await;
 
 }
