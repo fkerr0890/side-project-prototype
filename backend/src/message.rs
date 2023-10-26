@@ -121,7 +121,6 @@ impl SearchMessage {
 impl Message<Self> for SearchMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &String { &self.query }
-    fn is_heartbeat(&self) -> bool { true }
 
     fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
         self.dest = dest;
@@ -142,7 +141,7 @@ impl Message<Self> for SearchMessage {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DiscoverPeerMessage {
-    pub kind: MessageKind,
+    pub kind: DpMessageKind,
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
@@ -153,7 +152,7 @@ pub struct DiscoverPeerMessage {
 }
 
 impl DiscoverPeerMessage {
-    pub fn new(kind: MessageKind, dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String) -> Self {
+    pub fn new(kind: DpMessageKind, dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String) -> Self {
         Self {
             kind,
             dest,
@@ -168,7 +167,9 @@ impl DiscoverPeerMessage {
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn origin(&self) -> SocketAddrV4 { self.origin }
-    pub fn kind(&self) -> &MessageKind { &self.kind }
+    pub fn kind(&self) -> &DpMessageKind { &self.kind }
+    pub fn peer_list(&self) -> &Vec<EndpointPair> { &self.peer_list }
+    pub fn get_last_peer(&mut self) -> EndpointPair { self.peer_list.pop().unwrap() }
     pub fn into_peer_list(self) -> Vec<EndpointPair> { self.peer_list }
 
     pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
@@ -184,17 +185,19 @@ impl DiscoverPeerMessage {
         }
     }
     
-    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
+    pub fn set_origin_if_unset(mut self, origin: SocketAddrV4) -> Self {
         if self.origin == EndpointPair::default_socket() {
             self.origin = origin;
         }
+        self
     }
+
+    pub fn set_kind(mut self, kind: DpMessageKind) -> Self { self.kind = kind; self }
 }
 
 impl Message<Self> for DiscoverPeerMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &String { &self.uuid }
-    fn is_heartbeat(&self) -> bool { true }
 
     fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
         self.dest = dest;
@@ -211,6 +214,16 @@ pub enum MessageKind {
     Request,
     Response
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum DpMessageKind {
+    Request,
+    Response,
+    INeedSome,
+    IveGotSome
+}
+
+
 
 pub fn datetime_to_timestamp(datetime: DateTime<Utc>) -> String {
     datetime.to_rfc3339_opts(SecondsFormat::Micros, true)

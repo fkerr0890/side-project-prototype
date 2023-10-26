@@ -48,6 +48,8 @@ pub mod peer_ops {
     pub const MAX_PEERS: usize = 6;
     pub static HEARTBEAT_TX: OnceLock<mpsc::UnboundedSender<Heartbeat>> = OnceLock::new();
 
+    pub fn peers_len() -> usize { unsafe { PEERS.lock().unwrap().len() } }
+
     pub fn add_initial_peer(endpoint_pair: EndpointPair) {
         add_peer(endpoint_pair, 0);
     }

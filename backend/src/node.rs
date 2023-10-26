@@ -3,7 +3,7 @@ use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap, has
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{sync::{mpsc::{self, UnboundedSender}, oneshot}, time::sleep};
 
-use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage}, gateway::{self, EmptyResult}, peer::peer_ops, http::{SerdeHttpResponse, self}};
+use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind}, gateway::{self, EmptyResult}, peer::peer_ops, http::{SerdeHttpResponse, self}};
 
 pub static SEARCH_TIMEOUT: i64 = 30;
 
@@ -160,11 +160,12 @@ impl SearchRequestProcessor {
         }
         else {
             let query = message.id().clone();
-            let staged_messages= self.message_staging.entry(message.id().clone()).or_insert(HashMap::with_capacity(num_chunks));
+            let staged_messages= self.message_staging.entry(query.clone()).or_insert(HashMap::with_capacity(num_chunks));
             if staged_messages.len() == 0 {
                 self.message_processor.set_staging_ttl(&query, 30);
             }
-            else if !self.message_processor.check_staging_ttl(&query) {
+            if !self.message_processor.check_staging_ttl(&query) {
+                self.message_staging.remove(&query);
                 return None;
             }
             staged_messages.insert(index, message);
@@ -188,23 +189,26 @@ impl SearchRequestProcessor {
 }
 
 pub struct DiscoverPeerProcessor {
-    message_processor: MessageProcessor<DiscoverPeerMessage>
+    message_processor: MessageProcessor<DiscoverPeerMessage>,
+    message_staging: HashMap<String, Vec<DiscoverPeerMessage>>,
 }
 
 impl DiscoverPeerProcessor {
-    pub fn new(message_processor: MessageProcessor<DiscoverPeerMessage>) -> Self { Self { message_processor } }
+    pub fn new(message_processor: MessageProcessor<DiscoverPeerMessage>) -> Self { Self { message_processor, message_staging: HashMap::new() } }
 
     pub async fn receive(&mut self) -> EmptyResult  {
         let message = self.message_processor.ingress.recv().await.unwrap();
         match message {
-            DiscoverPeerMessage { kind: MessageKind::Request, ..} => return self.propogate_request(message),
-            DiscoverPeerMessage { kind: MessageKind::Response, .. } => return self.return_response(message),
-        };
+            DiscoverPeerMessage { kind: DpMessageKind::INeedSome, .. } => self.request_new_peers(message),
+            DiscoverPeerMessage { kind: DpMessageKind::Request, ..} => self.propogate_request(message),
+            DiscoverPeerMessage { kind: DpMessageKind::Response, .. } => self.return_response(message),
+            DiscoverPeerMessage { kind: DpMessageKind::IveGotSome, .. } => self.add_new_peers(message),
+        }
     }
 
     fn propogate_request(&mut self, mut request: DiscoverPeerMessage) -> EmptyResult {
         if !request.try_decrement_hop_count() {
-            let response = DiscoverPeerMessage::new(MessageKind::Response,
+            let response = DiscoverPeerMessage::new(DpMessageKind::Response,
                 request.sender(),
                 self.message_processor.endpoint_pair.public_endpoint,
                 request.origin(),
@@ -219,12 +223,45 @@ impl DiscoverPeerProcessor {
         Ok(())
     }
 
+    fn stage_message(&mut self, message: DiscoverPeerMessage) -> Option<Vec<DiscoverPeerMessage>> {
+        let uuid = message.id().clone();
+        let staged_messages= self.message_staging.entry(uuid.clone()).or_insert(Vec::new());
+        if staged_messages.len() == 0 {
+            self.message_processor.set_staging_ttl(&uuid, 30);
+        }
+        staged_messages.push(message);
+        if !self.message_processor.check_staging_ttl(&uuid) || staged_messages.len() == peer_ops::peers_len() {
+            Some(self.message_staging.remove(&uuid).unwrap())
+        }
+        else {
+            None
+        }
+    }
+
     fn return_response(&mut self, mut response: DiscoverPeerMessage) -> EmptyResult {
         response.add_peer(self.message_processor.endpoint_pair);
         if let Some(mut responses) = self.message_processor.return_responses(vec![response])? {
-            for peer in responses.pop().unwrap().into_peer_list() {
-                peer_ops::add_peer(peer, 0);
+            if let Some(mut results) = self.stage_message(responses.pop().unwrap()) {
+                let best_result = results.pop().unwrap();
+                let dest = best_result.origin();
+                self.message_processor.egress.send(best_result.set_kind(DpMessageKind::IveGotSome).replace_dest_and_timestamp(dest)).map_err(|_| { () })?;
             }
+        }
+        Ok(())
+    }
+
+    fn request_new_peers(&self, mut message: DiscoverPeerMessage) -> EmptyResult {
+        let introducer = message.get_last_peer();
+        self.message_processor.egress.send(message
+            .set_kind(DpMessageKind::Request)
+            .set_origin_if_unset(self.message_processor.endpoint_pair.public_endpoint)
+            .replace_dest_and_timestamp(introducer.public_endpoint))
+            .map_err(|_| { () })
+    }
+
+    fn add_new_peers(&self, message: DiscoverPeerMessage) -> EmptyResult {
+        for peer in message.into_peer_list() {
+            peer_ops::add_peer(peer, 0);
         }
         Ok(())
     }
