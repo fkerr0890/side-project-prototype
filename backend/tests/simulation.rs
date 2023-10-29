@@ -1,6 +1,6 @@
 use p2p;
 
-#[test]
-fn basic() {
+#[tokio::test]
+async fn basic() {
     assert!(true);
 }

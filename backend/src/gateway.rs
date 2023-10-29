@@ -6,9 +6,9 @@ use tokio::net::UdpSocket;
 use std::str;
 use std::sync::Arc;
 
-use crate::message::Message;
+use crate::message::{Message, SearchMessage, DiscoverPeerMessage, Heartbeat};
 
-pub type EmptyResult = Result<(), ()>; 
+pub type EmptyResult = Result<(), String>; 
 
 pub struct OutboundGateway<T> {
     socket: Arc<UdpSocket>,
@@ -32,34 +32,43 @@ impl<T: Serialize + DeserializeOwned + Message<T>> OutboundGateway<T> {
     }
 }
 
-pub struct InboundGateway<T> {
+pub struct InboundGateway {
     socket: Arc<UdpSocket>,
-    egress: mpsc::UnboundedSender<T>
+    to_srp: mpsc::UnboundedSender<SearchMessage>,
+    to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>
 }
 
-impl<T: Serialize + DeserializeOwned + Message<T>> InboundGateway<T> {
-    pub fn new(socket: &Arc<UdpSocket>, egress: &mpsc::UnboundedSender<T>) -> Self 
+impl InboundGateway {
+    pub fn new(socket: &Arc<UdpSocket>, to_srp: &mpsc::UnboundedSender<SearchMessage>, to_dpp: &mpsc::UnboundedSender<DiscoverPeerMessage>) -> Self 
     {
         Self {
             socket: socket.clone(),
-            egress: egress.clone(), 
+            to_srp: to_srp.clone(),
+            to_dpp: to_dpp.clone()
         }
     }
 
     pub async fn receive(&mut self)  -> EmptyResult {
         let mut buf = [0; 1024];
-        let Ok(result) = self.socket.recv_from(&mut buf).await else { return Ok(()) };
+        match  self.socket.recv_from(&mut buf).await {
+            Ok(result) => self.handle_message(&buf[..result.0]).await,
+            Err(e) => { log_debug(&e.to_string()); Ok(()) }
+        }
         // log_debug(&format!("Received {n} bytes"));
-        self.handle_message(&buf[..result.0]).await
     }
     
     async fn handle_message(&self, message_bytes: &[u8]) -> EmptyResult {
-        let message = bincode::deserialize::<T>(message_bytes).unwrap();
-        if message.is_heartbeat() {
+        if let Ok(message) = bincode::deserialize::<SearchMessage>(message_bytes) {
+            self.to_srp.send(message).map_err(|e| { e.to_string() } )
+        }
+        else if let Ok(message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
+            self.to_dpp.send(message).map_err(|e| { e.to_string() } )
+        }
+        else if let Ok(message) = bincode::deserialize::<Heartbeat>(message_bytes) {
             Ok(log_debug(&serde_json::to_string(&message).unwrap()))
         }
         else {
-            self.egress.send(message).map_err(|_| { () } )
+            Err(String::from("Unable to deserialize received message to a supported type"))
         }
     }
 }

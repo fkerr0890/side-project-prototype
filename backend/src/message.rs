@@ -4,7 +4,8 @@ use serde::{Serialize, Deserialize};
 use std::{str, net::SocketAddrV4, mem};
 use uuid::Uuid;
 
-use crate::{node::{EndpointPair, SEARCH_TIMEOUT}, http::{SerdeHttpRequest, SerdeHttpResponse}};
+use crate::{message_processing::SEARCH_TIMEOUT, http::{SerdeHttpRequest, SerdeHttpResponse}};
+use crate::node::EndpointPair;
 
 pub trait Message<T> {
     fn dest(&self) -> SocketAddrV4;
@@ -139,7 +140,7 @@ impl Message<Self> for SearchMessage {
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiscoverPeerMessage {
     pub kind: DpMessageKind,
     dest: SocketAddrV4,
@@ -152,7 +153,7 @@ pub struct DiscoverPeerMessage {
 }
 
 impl DiscoverPeerMessage {
-    pub fn new(kind: DpMessageKind, dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String) -> Self {
+    pub fn new(kind: DpMessageKind, dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String, target_peer_count: u16) -> Self {
         Self {
             kind,
             dest,
@@ -161,7 +162,7 @@ impl DiscoverPeerMessage {
             uuid,
             origin,
             peer_list: Vec::new(),
-            hop_count: 0
+            hop_count: target_peer_count
         }
     }
 
@@ -169,11 +170,13 @@ impl DiscoverPeerMessage {
     pub fn origin(&self) -> SocketAddrV4 { self.origin }
     pub fn kind(&self) -> &DpMessageKind { &self.kind }
     pub fn peer_list(&self) -> &Vec<EndpointPair> { &self.peer_list }
+    pub fn hop_count(&self) -> u16 { self.hop_count }
     pub fn get_last_peer(&mut self) -> EndpointPair { self.peer_list.pop().unwrap() }
     pub fn into_peer_list(self) -> Vec<EndpointPair> { self.peer_list }
 
     pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
     pub fn add_peer(&mut self, endpoint_pair: EndpointPair) { self.peer_list.push(endpoint_pair); }
+    pub fn increment_hop_count(&mut self) { self.hop_count += 1; }
 
     pub fn try_decrement_hop_count(&mut self) -> bool {
         if self.hop_count > 0 {

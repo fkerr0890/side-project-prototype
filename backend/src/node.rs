@@ -1,275 +1,133 @@
-use std::{net::{SocketAddrV4, Ipv4Addr}, fmt::Display, collections::HashMap, hash::Hash, time::Duration};
+use std::{net::{SocketAddrV4, Ipv4Addr, SocketAddr}, fmt::Display, sync::{Arc, Mutex}, collections::HashMap, time::Duration};
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use tokio::{sync::{mpsc::{self, UnboundedSender}, oneshot}, time::sleep};
+use serde::{Serialize, Deserialize};
+use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
+use uuid::Uuid;
 
-use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind}, gateway::{self, EmptyResult}, peer::peer_ops, http::{SerdeHttpResponse, self}};
+use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor}, peer::{PeerOps, self}, gateway::{OutboundGateway, InboundGateway, self}, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message}};
 
-pub static SEARCH_TIMEOUT: i64 = 30;
-
-pub struct MessageProcessor<T> {
+pub struct Node {
     endpoint_pair: EndpointPair,
-    breadcrumbs: HashMap<String, (SocketAddrV4, oneshot::Receiver<()>)>,
-    staging_ttls: HashMap<String, oneshot::Receiver<()>>,
-    ingress: mpsc::UnboundedReceiver<T>,
-    egress: mpsc::UnboundedSender<T>
+    uuid: String,
+    nat_kind: NatKind,
+    socket: Arc<UdpSocket>,
+    introducer: Option<EndpointPair>
 }
 
-impl<T: Serialize + DeserializeOwned + Message<T>> MessageProcessor<T> {
-    pub fn new(endpoint_pair: EndpointPair, ingress: mpsc::UnboundedReceiver<T>, egress: mpsc::UnboundedSender<T>) -> Self {
+impl Node {
+    pub async fn new(private_ip: &str, uuid: Uuid, introducer: Option<&EndpointPair>) -> Self {
+        let socket = Arc::new(UdpSocket::bind(private_ip).await.unwrap());
+        let public_endpoint = SocketAddrV4::new(private_ip[..private_ip.len() - 2].parse().unwrap(), socket.local_addr().unwrap().port());
+        let private_endpoint = SocketAddrV4::new(private_ip[..private_ip.len() - 2].parse().unwrap(), socket.local_addr().unwrap().port());
         Self {
-            endpoint_pair,
-            breadcrumbs: HashMap::new(),
-            staging_ttls: HashMap::new(),
-            ingress,
-            egress
-        }
-    } 
-
-    fn try_add_breadcrumb(&mut self, id: String, dest: SocketAddrV4) -> bool {
-        if self.breadcrumbs.contains_key(&id) {
-            gateway::log_debug("Already visited this node, not propagating message");
-            false
-        }
-        else {
-            let (tx, rx) = oneshot::channel();
-            self.breadcrumbs.insert(id, (dest, rx));
-            tokio::spawn(async move {
-                sleep(Duration::from_secs(30)).await;
-                tx.send(()).ok()
-            });
-            true
-        }
-    }
-
-    fn return_responses(&mut self, search_responses: Vec<T>) -> Result<Option<Vec<T>>, ()> {
-        let hash = search_responses[0].id().to_owned();
-        let Some(dest) = self.get_breadcrumb_ttl(&hash) else { return Ok(None) };
-        gateway::log_debug(&format!("Returning search responses to {dest}"));
-        if dest == EndpointPair::default_socket() {
-            return Ok(Some(search_responses));
-        }
-        else {
-            for response in search_responses {
-                self.egress.send(response.replace_dest_and_timestamp(dest)).map_err(|_| { () })?;
-            }
-        }
-        self.breadcrumbs.remove(&hash);
-        Ok(None)
-    }
-
-    fn get_breadcrumb_ttl(&mut self, query: &str) -> Option<SocketAddrV4> {
-        let Some((dest, rx)) = self.breadcrumbs.get_mut(query) else { return None };
-        if let Err(_) = rx.try_recv() {
-            Some(*dest)
-        }
-        else {
-            gateway::log_debug("Ttl for breadcrumb expired");
-            self.breadcrumbs.remove(query);
-            None
-        }
-    }
-
-    fn set_staging_ttl(&mut self, id: &String, ttl_secs: u64) {
-        let (tx, rx) = oneshot::channel();
-        self.staging_ttls.insert(id.clone(), rx);
-        tokio::spawn(async move {
-            sleep(Duration::from_secs(ttl_secs)).await;
-            tx.send(()).ok()
-        });
-    }
-
-    fn check_staging_ttl(&mut self, id: &str) -> bool {
-        let Some(rx) = self.staging_ttls.get_mut(id) else { return false };
-        if let Ok(_) = rx.try_recv() {
-            gateway::log_debug("Ttl for message staging expired");
-            self.staging_ttls.remove(id);
-            false
-        }
-        else {
-            true
-        }
-    }
-}
-
-pub struct SearchRequestProcessor {
-    message_processor: MessageProcessor<SearchMessage>,
-    to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>,
-    local_hosts: HashMap<String, SocketAddrV4>,
-    message_staging: HashMap<String, HashMap<usize, SearchMessage>>
-}
-
-impl SearchRequestProcessor {
-    pub fn new(message_processor: MessageProcessor<SearchMessage>, to_http_handler: UnboundedSender<SerdeHttpResponse>, local_hosts: HashMap<String, SocketAddrV4>) -> Self {
-        Self {
-            message_processor,
-            to_http_handler,
-            local_hosts,
-            message_staging: HashMap::new()
-        }
-    }
-
-    pub async fn send_search_response(&mut self, search_request_parts: Vec<SearchMessage>) -> EmptyResult {
-        let query = search_request_parts[0].id().to_owned();
-        if !self.message_processor.try_add_breadcrumb(query.clone(), search_request_parts[0].sender()) {
-            return Ok(())
-        }
-        gateway::log_debug("Checking for resource");
-        if let Some(socket) = self.local_hosts.get(&query) {
-            // gateway::log_debug(&format!("Hash at hairpin {hash}"));
-            let (dest, origin) = (search_request_parts[0].sender(), search_request_parts[0].origin());
-            let bytes = SearchMessage::reassemble_message_payload(search_request_parts);
-            let search_request = bincode::deserialize(&bytes).unwrap();
-            let response = http::make_request(search_request, String::from("http://") + &socket.to_string()).await;
-            return self.return_search_responses(self.construct_search_response(response, &query, dest, origin));
-        }
-        gateway::log_debug("Resource not found");
-        peer_ops::send_request(search_request_parts, self.message_processor.endpoint_pair.public_endpoint, &self.message_processor.egress)?;
-        Ok(())
-    }
-
-    fn return_search_responses(&mut self, search_responses: Vec<SearchMessage>) -> EmptyResult {
-        if let Some(search_responses) = self.message_processor.return_responses(search_responses)? {
-            let payload = SearchMessage::reassemble_message_payload(search_responses);
-            let response = bincode::deserialize(&payload).unwrap();
-            self.to_http_handler.send(response).map_err(|_| { () })?;
-        }
-        Ok(())
-    }
-    
-    fn construct_search_response(&self, response: SerdeHttpResponse, query: &str, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<SearchMessage> {
-        SearchMessage::initial_http_response(dest, self.message_processor.endpoint_pair.public_endpoint, origin, query.to_owned(), response).chunked()
-    }
-
-    pub async fn receive(&mut self) -> EmptyResult  {
-        let message = self.message_processor.ingress.recv().await.unwrap();
-        if let Some(messages) = self.stage_message(message) {
-            match messages[0] {
-                SearchMessage { kind: MessageKind::Request, ..} => return self.send_search_response(messages).await,
-                SearchMessage { kind: MessageKind::Response, .. } => return self.return_search_responses(messages)
-            };
-        };
-        Ok(())
-    }
-
-    fn stage_message(&mut self, message: SearchMessage) -> Option<Vec<SearchMessage>> {
-        let (index, num_chunks) = message.position();
-        if num_chunks == 1 {
-            // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
-            Some(vec![message])
-        }
-        else {
-            let query = message.id().clone();
-            let staged_messages= self.message_staging.entry(query.clone()).or_insert(HashMap::with_capacity(num_chunks));
-            if staged_messages.len() == 0 {
-                self.message_processor.set_staging_ttl(&query, 30);
-            }
-            if !self.message_processor.check_staging_ttl(&query) {
-                self.message_staging.remove(&query);
-                return None;
-            }
-            staged_messages.insert(index, message);
-            if self.message_staging.len() == num_chunks {
-                gateway::log_debug("Collected all messages");
-                let messages: Vec<SearchMessage> = self.message_staging.remove(&query).unwrap().into_values().collect();
-                return Some(messages);
-            }
-            None
-        }
-    }
-
-    pub fn to_node_info(&self) -> NodeInfo {
-        NodeInfo {
-            endpoint_pair: self.message_processor.endpoint_pair,
-            uuid: String::from("yah fuck ya"),
+            endpoint_pair: EndpointPair::new(public_endpoint, private_endpoint),
+            uuid: uuid.simple().to_string(),
             nat_kind: NatKind::Unknown,
-            max_peers: peer_ops::MAX_PEERS
-        }
-    }
-}
-
-pub struct DiscoverPeerProcessor {
-    message_processor: MessageProcessor<DiscoverPeerMessage>,
-    message_staging: HashMap<String, Vec<DiscoverPeerMessage>>,
-}
-
-impl DiscoverPeerProcessor {
-    pub fn new(message_processor: MessageProcessor<DiscoverPeerMessage>) -> Self { Self { message_processor, message_staging: HashMap::new() } }
-
-    pub async fn receive(&mut self) -> EmptyResult  {
-        let message = self.message_processor.ingress.recv().await.unwrap();
-        match message {
-            DiscoverPeerMessage { kind: DpMessageKind::INeedSome, .. } => self.request_new_peers(message),
-            DiscoverPeerMessage { kind: DpMessageKind::Request, ..} => self.propogate_request(message),
-            DiscoverPeerMessage { kind: DpMessageKind::Response, .. } => self.return_response(message),
-            DiscoverPeerMessage { kind: DpMessageKind::IveGotSome, .. } => self.add_new_peers(message),
+            socket,
+            introducer: introducer.copied()
         }
     }
 
-    fn propogate_request(&mut self, mut request: DiscoverPeerMessage) -> EmptyResult {
-        if !request.try_decrement_hop_count() {
-            let response = DiscoverPeerMessage::new(DpMessageKind::Response,
-                request.sender(),
-                self.message_processor.endpoint_pair.public_endpoint,
-                request.origin(),
-                request.id().clone());
-            request.add_peer(self.message_processor.endpoint_pair);
-            self.message_processor.return_responses(vec![response])?;
-            return Ok(())
-        }
-        if self.message_processor.try_add_breadcrumb(request.id().clone(), request.sender()) {
-            peer_ops::send_request(vec![request], self.message_processor.endpoint_pair.public_endpoint, &self.message_processor.egress)?
-        }
-        Ok(())
-    }
+    pub fn endpoint_pair(&self) -> EndpointPair { self.endpoint_pair }
 
-    fn stage_message(&mut self, message: DiscoverPeerMessage) -> Option<Vec<DiscoverPeerMessage>> {
-        let uuid = message.id().clone();
-        let staged_messages= self.message_staging.entry(uuid.clone()).or_insert(Vec::new());
-        if staged_messages.len() == 0 {
-            self.message_processor.set_staging_ttl(&uuid, 30);
+    pub async fn listen(&self) {
+        let (srm_to_srp, srm_from_gateway) = mpsc::unbounded_channel();
+        let (srm_to_gateway, srm_from_srp) = mpsc::unbounded_channel();
+        let (dpm_to_dpp, dpm_from_gateway) = mpsc::unbounded_channel();
+        let (dpm_to_gateway, dpm_from_dpp) = mpsc::unbounded_channel();
+        let (heartbeat_tx, heartbeat_rx) = mpsc::unbounded_channel();
+        let (to_http_handler, from_srp) = mpsc::unbounded_channel();
+    
+        let peer_ops = Arc::new(Mutex::new(PeerOps::new(heartbeat_tx, self.endpoint_pair)));
+        let peer_ops_clone = peer_ops.clone();
+        let local_hosts = HashMap::new();
+        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), to_http_handler, local_hosts, &peer_ops);
+        let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.endpoint_pair, dpm_from_gateway, dpm_to_gateway), &peer_ops);
+    
+        let mut outbound_srm_gateway = OutboundGateway::new(&self.socket, srm_from_srp);
+        let mut outbound_dpm_gateway = OutboundGateway::new(&self.socket, dpm_from_dpp);
+        let mut outbound_heartbeat_gateway = OutboundGateway::new(&self.socket, heartbeat_rx);
+    
+        tokio::spawn(async move {
+            loop {
+                let Some(_) = outbound_srm_gateway.send().await else { return };
+            }
+        });
+    
+        tokio::spawn(async move {
+            loop {
+                let Some(_) = outbound_dpm_gateway.send().await else { return };
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                let Some(_) = outbound_heartbeat_gateway.send().await else { return };
+            }
+        });
+    
+        for _ in 0..225 {
+            let mut inbound_gateway = InboundGateway::new(&self.socket, &srm_to_srp, &dpm_to_dpp);
+            tokio::spawn(async move {
+                loop {
+                    let Ok(_) = inbound_gateway.receive().await else { return };
+                }
+            });
         }
-        staged_messages.push(message);
-        if !self.message_processor.check_staging_ttl(&uuid) || staged_messages.len() == peer_ops::peers_len() {
-            Some(self.message_staging.remove(&uuid).unwrap())
+    
+        tokio::spawn(async move {
+            loop {
+                let Ok(_) = srp.receive().await else { return };            
+            }
+        });
+    
+        tokio::spawn(async move {
+            loop {
+                let Ok(_) = dpp.receive().await else { return };         
+            }
+        });    
+        
+        tokio::spawn(async move {
+            loop {
+                {
+                    let Ok(_) = peer_ops.lock().unwrap().send_heartbeats() else { return };
+                }
+                sleep(Duration::from_secs(29)).await;
+            }
+        });
+
+        if let Some(introducer) = self.introducer {
+            let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
+                self.endpoint_pair.public_endpoint,
+                EndpointPair::default_socket(),
+                EndpointPair::default_socket(),
+                Uuid::new_v4().simple().to_string(),
+                peer::MAX_PEERS);
+            message.add_peer(introducer);
+            self.socket.send_to(&bincode::serialize(&message).unwrap(), message.dest()).await.unwrap();
         }
         else {
-            None
+            gateway::log_debug("No introducer");
         }
+
+        sleep(Duration::from_secs(10)).await;
+        let node_info = self.as_node_info(peer_ops_clone);
+        fs::write(format!("../peer_info/{}.json", node_info.port), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
+    
+        let server_context = ServerContext::new(&srm_to_srp, Arc::new(tokio::sync::Mutex::new(from_srp)));
+        http::tcp_listen(SocketAddr::from(([127,0,0,1], 0)), server_context).await;
     }
 
-    fn return_response(&mut self, mut response: DiscoverPeerMessage) -> EmptyResult {
-        response.add_peer(self.message_processor.endpoint_pair);
-        if let Some(mut responses) = self.message_processor.return_responses(vec![response])? {
-            if let Some(mut results) = self.stage_message(responses.pop().unwrap()) {
-                let best_result = results.pop().unwrap();
-                let dest = best_result.origin();
-                self.message_processor.egress.send(best_result.set_kind(DpMessageKind::IveGotSome).replace_dest_and_timestamp(dest)).map_err(|_| { () })?;
-            }
+    pub fn as_node_info(&self, peer_ops: Arc<Mutex<PeerOps>>) -> NodeInfo {
+        NodeInfo {
+            port: self.endpoint_pair.public_endpoint.port(),
+            uuid: self.uuid.clone(),
+            peers: peer_ops.lock().unwrap().peers().iter().map(|p| p.public_endpoint.port()).collect()
         }
-        Ok(())
-    }
-
-    fn request_new_peers(&self, mut message: DiscoverPeerMessage) -> EmptyResult {
-        let introducer = message.get_last_peer();
-        self.message_processor.egress.send(message
-            .set_kind(DpMessageKind::Request)
-            .set_origin_if_unset(self.message_processor.endpoint_pair.public_endpoint)
-            .replace_dest_and_timestamp(introducer.public_endpoint))
-            .map_err(|_| { () })
-    }
-
-    fn add_new_peers(&self, message: DiscoverPeerMessage) -> EmptyResult {
-        for peer in message.into_peer_list() {
-            peer_ops::add_peer(peer, 0);
-        }
-        Ok(())
     }
 }
 
-// pub struct RendevousNode(Node);
-
-#[derive(Hash, Clone, Serialize, Deserialize, Copy, Eq, PartialEq)]
+#[derive(Hash, Clone, Serialize, Deserialize, Copy, Eq, PartialEq, Debug)]
 pub struct EndpointPair {
     pub public_endpoint: SocketAddrV4,
     pub private_endpoint: SocketAddrV4,
@@ -302,8 +160,7 @@ enum NatKind {
 
 #[derive(Serialize, Deserialize)]
 pub struct NodeInfo {
-    pub endpoint_pair: EndpointPair,
+    pub port: u16,
     uuid: String,
-    nat_kind: NatKind,
-    max_peers: usize
+    peers: Vec<u16>
 }
