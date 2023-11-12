@@ -1,4 +1,4 @@
-use p2p::{node::Node, gateway};
+use p2p::{node::Node, gateway, message_processing::TTL};
 use rand::Rng;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -20,7 +20,7 @@ async fn main() {
         let node = Node::new("127.0.0.1:0", Uuid::new_v4(), introducer).await;
         introducers.push(node.endpoint_pair());
         tokio::spawn(async move { node.listen().await });
-        sleep(Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(TTL*3)).await;
         println!()
     }
     loop {}

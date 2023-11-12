@@ -149,11 +149,11 @@ pub struct DiscoverPeerMessage {
     uuid: String,
     origin: SocketAddrV4,
     peer_list: Vec<EndpointPair>,
-    hop_count: u16
+    hop_count: (u16, u16)
 }
 
 impl DiscoverPeerMessage {
-    pub fn new(kind: DpMessageKind, dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String, target_peer_count: u16) -> Self {
+    pub fn new(kind: DpMessageKind, dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String, target_peer_count: (u16, u16)) -> Self {
         Self {
             kind,
             dest,
@@ -170,22 +170,17 @@ impl DiscoverPeerMessage {
     pub fn origin(&self) -> SocketAddrV4 { self.origin }
     pub fn kind(&self) -> &DpMessageKind { &self.kind }
     pub fn peer_list(&self) -> &Vec<EndpointPair> { &self.peer_list }
-    pub fn hop_count(&self) -> u16 { self.hop_count }
+    pub fn hop_count(&self) -> (u16, u16) { self.hop_count }
     pub fn get_last_peer(&mut self) -> EndpointPair { self.peer_list.pop().unwrap() }
     pub fn into_peer_list(self) -> Vec<EndpointPair> { self.peer_list }
 
     pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
     pub fn add_peer(&mut self, endpoint_pair: EndpointPair) { self.peer_list.push(endpoint_pair); }
-    pub fn increment_hop_count(&mut self) { self.hop_count += 1; }
+    pub fn increment_hop_count(&mut self) { self.hop_count.0 += 1; }
 
     pub fn try_decrement_hop_count(&mut self) -> bool {
-        if self.hop_count > 0 {
-            self.hop_count -= 1;
-            true
-        }
-        else {
-            false
-        }
+        self.hop_count.0 -= 1;
+        self.hop_count.0 != 0
     }
     
     pub fn set_origin_if_unset(mut self, origin: SocketAddrV4) -> Self {

@@ -102,7 +102,7 @@ impl Node {
                 EndpointPair::default_socket(),
                 EndpointPair::default_socket(),
                 Uuid::new_v4().simple().to_string(),
-                peer::MAX_PEERS);
+                (peer::MAX_PEERS, peer::MAX_PEERS));
             message.add_peer(introducer);
             self.socket.send_to(&bincode::serialize(&message).unwrap(), message.dest()).await.unwrap();
         }
@@ -122,7 +122,7 @@ impl Node {
         NodeInfo {
             port: self.endpoint_pair.public_endpoint.port(),
             uuid: self.uuid.clone(),
-            peers: peer_ops.lock().unwrap().peers().iter().map(|p| p.public_endpoint.port()).collect()
+            peers: peer_ops.lock().unwrap().peers().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect()
         }
     }
 }
@@ -162,5 +162,5 @@ enum NatKind {
 pub struct NodeInfo {
     pub port: u16,
     uuid: String,
-    peers: Vec<u16>
+    peers: Vec<(u16, i32)>
 }

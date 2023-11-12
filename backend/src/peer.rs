@@ -11,37 +11,13 @@ use crate::{message::{Message, self, Heartbeat}, gateway::{self, EmptyResult}};
 pub const MAX_PEERS: u16 = 6;
 
 #[derive(Hash, Serialize, Deserialize, Copy, Clone)]
-pub struct Peer {
-    pub endpoint_pair: EndpointPair,
-    status: PeerStatus,
-    score: i32
-}
-
-impl Peer {
-    fn new(endpoint_pair: EndpointPair, score: i32) -> Self {
-        Self {
-            endpoint_pair,
-            status: PeerStatus::Disconnected,
-            score
-        }
-    }
-}
-
-impl PartialEq for Peer {
-    fn eq(&self, other: &Self) -> bool {
-        self.endpoint_pair == other.endpoint_pair
-    }
-}
-impl Eq for Peer {}
-
-#[derive(Hash, Serialize, Deserialize, Copy, Clone)]
 pub enum PeerStatus {
     Disconnected,
     Connected
 }
 
 pub struct PeerOps {
-    peers: DoublePriorityQueue<Peer, i32>,
+    peers: DoublePriorityQueue<EndpointPair, i32>,
     heartbeat_tx: mpsc::UnboundedSender<Heartbeat>,
     endpoint_pair: EndpointPair
 }
@@ -49,7 +25,7 @@ pub struct PeerOps {
 impl PeerOps {
     pub fn new(heartbeat_tx: mpsc::UnboundedSender<Heartbeat>, endpoint_pair: EndpointPair) -> Self { Self { peers: DoublePriorityQueue::new(), heartbeat_tx, endpoint_pair } }
 
-    pub fn peers(&self) -> Vec<EndpointPair> { self.peers.iter().map(|(i, _)| i.endpoint_pair).collect() }
+    pub fn peers(&self) -> Vec<(EndpointPair, i32)> { self.peers.iter().map(|(i, score)| (*i, *score)).collect() }
     pub fn peers_len(&self) -> usize { self.peers.len() }
 
     pub fn add_initial_peer(&mut self, endpoint_pair: EndpointPair) {
@@ -57,6 +33,7 @@ impl PeerOps {
     }
 
     pub fn add_peer(&mut self, endpoint_pair: EndpointPair, score: i32) {
+        let None = self.peers.change_priority(&endpoint_pair, score) else { return };
         let peer_limit_reached = self.peers.len() >= MAX_PEERS as usize;
         let mut should_push = !peer_limit_reached;
         if let Some(worst_peer) = self.peers.peek_min() {
@@ -66,7 +43,7 @@ impl PeerOps {
             if peer_limit_reached {
                 self.peers.pop_min();
             }
-            self.peers.push(Peer::new(endpoint_pair, score), score);
+            self.peers.push(endpoint_pair, score);
         }
     }
 
@@ -76,7 +53,7 @@ impl PeerOps {
             for message in search_request_parts.clone() {
                 let result = message
                     .set_sender(self.endpoint_pair.public_endpoint)
-                    .replace_dest_and_timestamp(peer.0.endpoint_pair.public_endpoint)
+                    .replace_dest_and_timestamp(peer.0.public_endpoint)
                     .check_expiry();
                 if let Ok(message) = result {
                     tx.send(message).map_err(|e| { e.to_string() })?;
@@ -92,7 +69,7 @@ impl PeerOps {
 
     pub fn send_heartbeats(&self) -> EmptyResult {
         for peer in self.peers.iter() {
-            let heartbeat = Heartbeat::new(peer.0.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, message::datetime_to_timestamp(Utc::now()));
+            let heartbeat = Heartbeat::new(peer.0.public_endpoint, self.endpoint_pair.public_endpoint, message::datetime_to_timestamp(Utc::now()));
             self.heartbeat_tx.send(heartbeat).map_err(|e| { e.to_string() })?;
         }
         Ok(())
