@@ -3,10 +3,11 @@ use std::{net::SocketAddrV4, collections::HashMap, time::Duration, sync::{Arc, M
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::{oneshot, mpsc}, time::sleep};
 
-use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::{SerdeHttpResponse, self}, node::EndpointPair};
+use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::{SerdeHttpResponse, self, SerdeHttpRequest}, node::EndpointPair};
 
 pub static SEARCH_TIMEOUT: i64 = 30;
-pub static TTL: u64 = 100;
+pub static TTL: u64 = 200;
+const SRP_TTL: u64 = 30000;
 
 pub struct MessageProcessor<T> {
     endpoint_pair: EndpointPair,
@@ -40,13 +41,13 @@ impl<T: Serialize + DeserializeOwned + Message<T> + Clone + Send> MessageProcess
         }
     }
 
-    fn set_breadcrumb_ttl(&self, egress: Option<mpsc::UnboundedSender<DiscoverPeerMessage>>, early_return_message: Option<DiscoverPeerMessage>, id: String) {
+    fn set_breadcrumb_ttl(&self, egress: Option<mpsc::UnboundedSender<DiscoverPeerMessage>>, early_return_message: Option<DiscoverPeerMessage>, id: String, ttl: u64) {
         let breadcrumbs_clone = self.breadcrumbs.clone();
         // let early_return_tx = early_return_tx.clone();
         // let early_return_message = early_return_message.clone();
         let dest = self.endpoint_pair.public_endpoint;
         tokio::spawn(async move {
-            sleep(Duration::from_millis(TTL)).await;
+            sleep(Duration::from_millis(ttl)).await;
             // gateway::log_debug("Ttl for breadcrumb expired");
             if let Some(tx) = egress {
                 if let Some(message) = early_return_message {
@@ -63,7 +64,7 @@ impl<T: Serialize + DeserializeOwned + Message<T> + Clone + Send> MessageProcess
         let hash = search_responses[0].id().to_owned();
         let mut breadcrumbs = self.breadcrumbs.lock().unwrap();
         let Some(dest) = (if delete_breadcrumb { breadcrumbs.remove(&hash) } else { breadcrumbs.get(&hash).cloned() }) else { return Ok(None) };
-        // gateway::log_debug(&format!("Returning search responses to {dest}"));
+        gateway::log_debug(&format!("Returning search responses to {dest}"));
         if dest == EndpointPair::default_socket() {
             Ok(Some(search_responses))
         }
@@ -122,10 +123,10 @@ impl SearchRequestProcessor {
             return Ok(())
         }
         else {
-            self.message_processor.set_breadcrumb_ttl(None, None, query.clone());
+            self.message_processor.set_breadcrumb_ttl(None, None, query.clone(), SRP_TTL);
         }
-        gateway::log_debug("Checking for resource");
-        if let Some(socket) = self.local_hosts.get(&query) {
+        println!("Checking for resource {}", bincode::deserialize::<SerdeHttpRequest>(&search_request_parts[0].payload).unwrap().uri());
+        if let Some(socket) = self.local_hosts.get(query.split_once("/").unwrap().0) {
             // gateway::log_debug(&format!("Hash at hairpin {hash}"));
             let (dest, origin) = (search_request_parts[0].sender(), search_request_parts[0].origin());
             let bytes = SearchMessage::reassemble_message_payload(search_request_parts);
@@ -133,7 +134,6 @@ impl SearchRequestProcessor {
             let response = http::make_request(search_request, String::from("http://") + &socket.to_string()).await;
             return self.return_search_responses(self.construct_search_response(response, &query, dest, origin));
         }
-        gateway::log_debug("Resource not found");
         self.peer_ops.lock().unwrap().send_request(search_request_parts, &self.message_processor.egress)?;
         Ok(())
     }
@@ -172,15 +172,15 @@ impl SearchRequestProcessor {
             let query = message.id().clone();
             let staged_messages= self.message_staging.entry(query.clone()).or_insert(HashMap::with_capacity(num_chunks));
             if staged_messages.len() == 0 {
-                self.message_processor.set_staging_ttl(&query, TTL);
+                self.message_processor.set_staging_ttl(&query, SRP_TTL);
             }
             if !self.message_processor.check_staging_ttl(&query) {
                 self.message_staging.remove(&query);
                 return None;
             }
             staged_messages.insert(index, message);
-            if self.message_staging.len() == num_chunks {
-                gateway::log_debug("Collected all messages");
+            if staged_messages.len() == num_chunks {
+                // gateway::log_debug("Collected all messages");
                 let messages: Vec<SearchMessage> = self.message_staging.remove(&query).unwrap().into_values().collect();
                 return Some(messages);
             }
@@ -228,7 +228,7 @@ impl DiscoverPeerProcessor {
                 self.return_response(hairpin_response)?;
                 return Ok(())
             }
-            self.message_processor.set_breadcrumb_ttl(Some(self.message_processor.egress.clone()), Some(hairpin_response), request.id().clone());
+            self.message_processor.set_breadcrumb_ttl(Some(self.message_processor.egress.clone()), Some(hairpin_response), request.id().clone(), TTL);
             // gateway::log_debug("Propogating request");
             self.peer_ops.lock().unwrap().send_request(vec![request], &self.message_processor.egress)?;
         }
@@ -269,7 +269,6 @@ impl DiscoverPeerProcessor {
 
         let target_num_peers = message.hop_count().1;
         let peers_len = message.peer_list().len();
-        gateway::log_debug(&format!("Staging message with {} peers, target = {:?}", peers_len, message.hop_count()));
         if peers_len > staged_peers_len {
             message_staging.insert(message.id().clone(), Some(message));
         }
@@ -305,7 +304,7 @@ impl DiscoverPeerProcessor {
     }
 
     fn request_new_peers(&self, mut message: DiscoverPeerMessage) -> EmptyResult {
-        gateway::log_debug(&format!("Got INeedSome, introducer = {}", message.peer_list()[0].public_endpoint));
+        // gateway::log_debug(&format!("Got INeedSome, introducer = {}", message.peer_list()[0].public_endpoint));
         let introducer = message.get_last_peer();
         self.message_processor.egress.send(message
             .set_kind(DpMessageKind::Request)
@@ -316,7 +315,6 @@ impl DiscoverPeerProcessor {
 
     fn add_new_peers(&self, message: DiscoverPeerMessage) -> EmptyResult {
         // gateway::log_debug("Got IveGotSome");
-        println!("My endpoint: {}, peers: {:?}", message.origin(), message.peer_list());
         for peer in message.into_peer_list() {
             self.peer_ops.lock().unwrap().add_peer(peer, self.get_score(peer.public_endpoint));
         }

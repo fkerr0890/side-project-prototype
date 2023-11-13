@@ -1,4 +1,4 @@
-use std::{net::{SocketAddrV4, Ipv4Addr, SocketAddr}, fmt::Display, sync::{Arc, Mutex}, collections::HashMap, time::Duration};
+use std::{net::{SocketAddrV4, Ipv4Addr, SocketAddr}, fmt::Display, sync::{Arc, Mutex}, collections::HashMap, time::Duration, future};
 
 use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
@@ -30,7 +30,7 @@ impl Node {
 
     pub fn endpoint_pair(&self) -> EndpointPair { self.endpoint_pair }
 
-    pub async fn listen(&self) {
+    pub async fn listen(&self, is_start: bool, is_end: bool) {
         let (srm_to_srp, srm_from_gateway) = mpsc::unbounded_channel();
         let (srm_to_gateway, srm_from_srp) = mpsc::unbounded_channel();
         let (dpm_to_dpp, dpm_from_gateway) = mpsc::unbounded_channel();
@@ -40,7 +40,10 @@ impl Node {
     
         let peer_ops = Arc::new(Mutex::new(PeerOps::new(heartbeat_tx, self.endpoint_pair)));
         let peer_ops_clone = peer_ops.clone();
-        let local_hosts = HashMap::new();
+        let mut local_hosts = HashMap::new();
+        if is_end {
+            local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
+        }
         let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), to_http_handler, local_hosts, &peer_ops);
         let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.endpoint_pair, dpm_from_gateway, dpm_to_gateway), &peer_ops);
     
@@ -87,14 +90,14 @@ impl Node {
             }
         });    
         
-        tokio::spawn(async move {
-            loop {
-                {
-                    let Ok(_) = peer_ops.lock().unwrap().send_heartbeats() else { return };
-                }
-                sleep(Duration::from_secs(29)).await;
-            }
-        });
+        // tokio::spawn(async move {
+        //     loop {
+        //         {
+        //             let Ok(_) = peer_ops.lock().unwrap().send_heartbeats() else { return };
+        //         }
+        //         sleep(Duration::from_secs(29)).await;
+        //     }
+        // });
 
         if let Some(introducer) = self.introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
@@ -111,15 +114,22 @@ impl Node {
         }
 
         sleep(Duration::from_secs(10)).await;
-        let node_info = self.as_node_info(peer_ops_clone);
-        fs::write(format!("../peer_info/{}.json", node_info.port), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
-    
-        let server_context = ServerContext::new(&srm_to_srp, Arc::new(tokio::sync::Mutex::new(from_srp)));
-        http::tcp_listen(SocketAddr::from(([127,0,0,1], 0)), server_context).await;
+        let node_info = self.as_node_info(peer_ops_clone, is_start, is_end);
+        fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
+        
+        if is_start {
+            let server_context = ServerContext::new(&srm_to_srp, Arc::new(tokio::sync::Mutex::new(from_srp)));
+            http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
+        }
+        else {
+            future::pending::<()>().await;
+        }
     }
 
-    pub fn as_node_info(&self, peer_ops: Arc<Mutex<PeerOps>>) -> NodeInfo {
+    pub fn as_node_info(&self, peer_ops: Arc<Mutex<PeerOps>>, is_start: bool, is_end: bool) -> NodeInfo {
+        let name = if is_start { String::from("START") } else if is_end { String::from("END") } else { self.endpoint_pair.public_endpoint.port().to_string() };
         NodeInfo {
+            name,
             port: self.endpoint_pair.public_endpoint.port(),
             uuid: self.uuid.clone(),
             peers: peer_ops.lock().unwrap().peers().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect()
@@ -160,7 +170,8 @@ enum NatKind {
 
 #[derive(Serialize, Deserialize)]
 pub struct NodeInfo {
-    pub port: u16,
+    pub name: String,
+    port: u16,
     uuid: String,
     peers: Vec<(u16, i32)>
 }

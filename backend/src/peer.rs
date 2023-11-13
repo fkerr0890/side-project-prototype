@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::{message::{Message, self, Heartbeat}, gateway::{self, EmptyResult}};
 
-pub const MAX_PEERS: u16 = 6;
+pub const MAX_PEERS: u16 = 10;
 
 #[derive(Hash, Serialize, Deserialize, Copy, Clone)]
 pub enum PeerStatus {

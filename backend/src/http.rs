@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::message::SearchMessage;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
     method: String,
     uri: String,
@@ -35,6 +35,8 @@ impl SerdeHttpRequest {
         *request.headers_mut() = reconstruct_header_map(self.headers);
         request
     }
+
+    pub fn uri(&self) -> &str { &self.uri }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -188,15 +190,17 @@ pub async fn make_request(request: SerdeHttpRequest, socket: String) -> SerdeHtt
     let client = Client::new();
     let request_version = request.version.clone();
     let hyper_request = request.to_hyper_request(socket);
-    let response = client.request(hyper_request).await.unwrap();
+    let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => { println!("{}", e); return construct_error_response(e.to_string(), request_version) } };
     match SerdeHttpResponse::from_hyper_response(response).await {
         Ok(response) => response,
-        Err(e) => {
-            let body = e.to_string();
-            SerdeHttpResponse::builder(500, request_version)
-                .header("Content-Type", "text/plain")
-                .header("Content-Length", &body.len().to_string())
-                .body(format!("<h1>{}</h1>", body).into_bytes())
-        }
+        Err(e) => construct_error_response(e, request_version)
     }
+}
+
+fn construct_error_response(e: String, request_version: String) -> SerdeHttpResponse {
+    let body = e.to_string();
+    SerdeHttpResponse::builder(500, request_version)
+        .header("Content-Type", "text/plain")
+        .header("Content-Length", &body.len().to_string())
+        .body(format!("<h1>{}</h1>", body).into_bytes())
 }

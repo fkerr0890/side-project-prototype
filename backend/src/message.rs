@@ -45,7 +45,7 @@ pub struct SearchMessage {
     timestamp: String,
     query: String,
     origin: SocketAddrV4,
-    payload: Vec<u8>,
+    pub payload: Vec<u8>,
     expiry: String,
     position: (usize, usize)
 }
@@ -69,7 +69,7 @@ impl SearchMessage {
 
     pub fn initial_http_request(query: String, request: SerdeHttpRequest) -> Self {
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
-            query, MessageKind::Request, bincode::serialize(&request).unwrap())
+            query + request.uri(), MessageKind::Request, bincode::serialize(&request).unwrap())
     }
 
     pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, response: SerdeHttpResponse) -> Self {
