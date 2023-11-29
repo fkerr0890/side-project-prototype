@@ -3,7 +3,7 @@ use std::{net::SocketAddrV4, collections::HashMap, time::Duration, sync::{Arc, M
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::{oneshot, mpsc}, time::sleep};
 
-use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::{SerdeHttpResponse, self, SerdeHttpRequest}, node::EndpointPair};
+use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::{SerdeHttpResponse, self}, node::EndpointPair};
 
 pub static SEARCH_TIMEOUT: i64 = 30;
 pub static TTL: u64 = 200;
@@ -125,8 +125,9 @@ impl SearchRequestProcessor {
         else {
             self.message_processor.set_breadcrumb_ttl(None, None, query.clone(), SRP_TTL);
         }
-        println!("Checking for resource {}", bincode::deserialize::<SerdeHttpRequest>(&search_request_parts[0].payload).unwrap().uri());
-        if let Some(socket) = self.local_hosts.get(query.split_once("/").unwrap().0) {
+        let (host, uri) = query.split_once("/").unwrap();
+        println!("Checking for resource {}", uri);
+        if let Some(socket) = self.local_hosts.get(host) {
             // gateway::log_debug(&format!("Hash at hairpin {hash}"));
             let (dest, origin) = (search_request_parts[0].sender(), search_request_parts[0].origin());
             let bytes = SearchMessage::reassemble_message_payload(search_request_parts);
