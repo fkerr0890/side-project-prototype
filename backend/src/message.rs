@@ -37,44 +37,15 @@ impl Message<Self> for Heartbeat {
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SearchMessage {
-    pub kind: MessageKind,
-    dest: SocketAddrV4,
-    sender: SocketAddrV4,
-    timestamp: String,
-    query: String,
-    origin: SocketAddrV4,
-    pub payload: Vec<u8>,
-    expiry: String,
-    position: (usize, usize)
+#[derive(Serialize, Clone)]
+pub struct SearchPayload {
+    position: (usize, usize),
+    pub payload: Vec<u8>
 }
-impl SearchMessage {
-    const NO_POSITION: (usize, usize) = (0, 1);
-
-    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, kind: MessageKind, payload: Vec<u8>) -> Self {
-        let datetime = Utc::now();
-        Self {
-            dest,
-            sender,
-            timestamp: datetime_to_timestamp(datetime),
-            query,
-            kind,
-            origin,
-            payload,
-            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
-            position: Self::NO_POSITION
-        }
-    }
-
-    pub fn initial_http_request(query: String, request: SerdeHttpRequest) -> Self {
-        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
-            query + request.uri(), MessageKind::Request, bincode::serialize(&request).unwrap())
-    }
-
-    pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, response: SerdeHttpResponse) -> Self {
-        Self::new(dest, sender, origin, query, MessageKind::Response, bincode::serialize(&response).unwrap())
-    }
+impl SearchPayload {
+    pub fn into_payload(self) -> Vec<u8> { self.payload }
+    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
+    pub fn position(&self) -> (usize, usize) { self.position }
 
     pub fn chunked(self) -> Vec<Self> {
         let (payload, empty_message) = self.extract_payload();
@@ -88,26 +59,12 @@ impl SearchMessage {
         messages
     }
 
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
-    pub fn into_payload(self) -> Vec<u8> { self.payload }
-    pub fn origin(&self) -> SocketAddrV4 { self.origin }
-    pub fn kind(&self) -> &MessageKind { &self.kind }
-    pub fn position(&self) -> (usize, usize) { self.position }
-    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
-    
-    pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
-    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
-
-    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
-        if self.origin == EndpointPair::default_socket() {
-            self.origin = origin;
-        }
-    }
-
     pub fn set_payload(mut self, bytes: Vec<u8>) -> Self {
         self.payload = bytes;
         self
     }
+
+    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
 
     pub fn reassemble_message_payload(mut messages: Vec<Self>) -> Vec<u8> {
         messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
@@ -116,6 +73,54 @@ impl SearchMessage {
             bytes.append(&mut message.into_payload());
         }
         bytes
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SearchMessage {
+    pub kind: MessageKind,
+    dest: SocketAddrV4,
+    sender: SocketAddrV4,
+    timestamp: String,
+    query: String,
+    origin: SocketAddrV4,
+    expiry: String
+}
+impl SearchMessage {
+    const NO_POSITION: (usize, usize) = (0, 1);
+
+    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, kind: MessageKind) -> Self {
+        let datetime = Utc::now();
+        Self {
+            dest,
+            sender,
+            timestamp: datetime_to_timestamp(datetime),
+            query,
+            kind,
+            origin,
+            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT))
+        }
+    }
+
+    pub fn initial_http_request(query: String, request: SerdeHttpRequest) -> Self {
+        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
+            query + request.uri(), MessageKind::Request)
+    }
+
+    pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, response: SerdeHttpResponse) -> Self {
+        Self::new(dest, sender, origin, query, MessageKind::Response)
+    }
+
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn origin(&self) -> SocketAddrV4 { self.origin }
+    pub fn kind(&self) -> &MessageKind { &self.kind }
+    
+    pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+
+    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
+        if self.origin == EndpointPair::default_socket() {
+            self.origin = origin;
+        }
     }
 }
 

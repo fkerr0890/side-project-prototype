@@ -5,3 +5,4 @@ pub mod gateway;
 pub mod peer;
 pub mod http;
 pub mod node;
+pub mod crypto;
