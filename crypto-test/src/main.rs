@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::net::SocketAddrV4;
+
 use ring::aead::{UnboundKey, AES_256_GCM, LessSafeKey, NONCE_LEN, Aad, Nonce};
 use ring::hkdf::{Salt, HKDF_SHA256, KeyType};
 use ring::rand::{SystemRandom, SecureRandom};
@@ -21,6 +24,7 @@ fn main() {
     println!("{:?}", secret);
     println!("{:?}", nonce_bytes);
     println!("{:?}", nonce_bytes2);
+    let yo = HashMap::<SocketAddrV4, String>::new();
     // let mut nonce_bytes = vec!(0u8; NONCE_LEN);
     // // let mut nonce_bytes2 = vec!(0u8; NONCE_LEN);
     // rng.fill(&mut nonce_bytes).unwrap();

@@ -2,8 +2,9 @@ use std::{net::SocketAddrV4, collections::HashMap, time::Duration, sync::{Arc, M
 
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::{oneshot, mpsc}, time::sleep};
+use uuid::Uuid;
 
-use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::{SerdeHttpResponse, self}, node::EndpointPair};
+use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind, StreamMessage, StreamMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::{SerdeHttpResponse, self}, node::EndpointPair, crypto::KeyStore};
 
 pub static SEARCH_TIMEOUT: i64 = 30;
 pub static TTL: u64 = 200;
@@ -12,16 +13,18 @@ const SRP_TTL: u64 = 30000;
 pub struct MessageProcessor<T> {
     endpoint_pair: EndpointPair,
     breadcrumbs: Arc<Mutex<HashMap<String, SocketAddrV4>>>,
+    message_staging: HashMap<String, HashMap<usize, T>>,
     staging_ttls: HashMap<String, oneshot::Receiver<()>>,
     ingress: mpsc::UnboundedReceiver<T>,
     egress: mpsc::UnboundedSender<T>
 }
 
-impl<T: Serialize + DeserializeOwned + Message<T> + Clone + Send> MessageProcessor<T> {
+impl<T: Serialize + DeserializeOwned + Message + Clone + Send> MessageProcessor<T> {
     pub fn new(endpoint_pair: EndpointPair, ingress: mpsc::UnboundedReceiver<T>, egress: mpsc::UnboundedSender<T>) -> Self {
         Self {
             endpoint_pair,
             breadcrumbs: Arc::new(Mutex::new(HashMap::new())),
+            message_staging: HashMap::new(),
             staging_ttls: HashMap::new(),
             ingress,
             egress
@@ -76,6 +79,32 @@ impl<T: Serialize + DeserializeOwned + Message<T> + Clone + Send> MessageProcess
         }
     }
 
+    fn stage_message(&mut self, message: T) -> Option<Vec<T>> {
+        let (index, num_chunks) = message.position();
+        if num_chunks == 1 {
+            // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
+            Some(vec![message])
+        }
+        else {
+            let query = message.id().clone();
+            let staged_messages= self.message_staging.entry(query.clone()).or_insert(HashMap::with_capacity(num_chunks));
+            if staged_messages.len() == 0 {
+                self.set_staging_ttl(&query, SRP_TTL);
+            }
+            if !self.check_staging_ttl(&query) {
+                self.message_staging.remove(&query);
+                return None;
+            }
+            staged_messages.insert(index, message);
+            if staged_messages.len() == num_chunks {
+                // gateway::log_debug("Collected all messages");
+                let messages: Vec<T> = self.message_staging.remove(&query).unwrap().into_values().collect();
+                return Some(messages);
+            }
+            None
+        }
+    }
+
     fn set_staging_ttl(&mut self, id: &String, ttl_secs: u64) {
         let (tx, rx) = oneshot::channel();
         self.staging_ttls.insert(id.clone(), rx);
@@ -102,18 +131,18 @@ pub struct SearchRequestProcessor {
     message_processor: MessageProcessor<SearchMessage>,
     to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>,
     local_hosts: HashMap<String, SocketAddrV4>,
-    message_staging: HashMap<String, HashMap<usize, SearchMessage>>,
-    peer_ops: Arc<Mutex<PeerOps>>
+    peer_ops: Arc<Mutex<PeerOps>>,
+    key_store: Arc<Mutex<KeyStore>>
 }
 
 impl SearchRequestProcessor {
-    pub fn new(message_processor: MessageProcessor<SearchMessage>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>, local_hosts: HashMap<String, SocketAddrV4>, peer_ops: &Arc<Mutex<PeerOps>>) -> Self {
+    pub fn new(message_processor: MessageProcessor<SearchMessage>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>, local_hosts: HashMap<String, SocketAddrV4>, peer_ops: &Arc<Mutex<PeerOps>>, key_store: &Arc<Mutex<KeyStore>>) -> Self {
         Self {
             message_processor,
             to_http_handler,
             local_hosts,
-            message_staging: HashMap::new(),
-            peer_ops: peer_ops.clone()
+            peer_ops: peer_ops.clone(),
+            key_store: key_store.clone()
         }
     }
 
@@ -130,63 +159,45 @@ impl SearchRequestProcessor {
         if let Some(socket) = self.local_hosts.get(host) {
             // gateway::log_debug(&format!("Hash at hairpin {hash}"));
             let (dest, origin) = (search_request_parts[0].sender(), search_request_parts[0].origin());
-            let bytes = SearchMessage::reassemble_message_payload(search_request_parts);
-            let search_request = bincode::deserialize(&bytes).unwrap();
-            let response = http::make_request(search_request, String::from("http://") + &socket.to_string()).await;
-            return self.return_search_responses(self.construct_search_response(response, &query, dest, origin));
+            // let bytes = SearchMessage::reassemble_message_payload(search_request_parts);
+            // let search_request = bincode::deserialize(&bytes).unwrap();
+            // let response = http::make_request(search_request, String::from("http://") + &socket.to_string()).await;
+            // return self.return_search_responses(self.construct_search_response(response, &query, dest, origin));
+            return self.return_search_responses(self.construct_search_response(query, dest, origin))
         }
         self.peer_ops.lock().unwrap().send_request(search_request_parts, &self.message_processor.egress)?;
         Ok(())
     }
 
     fn return_search_responses(&mut self, search_responses: Vec<SearchMessage>) -> EmptyResult {
-        if let Some(search_responses) = self.message_processor.return_responses(search_responses, true)? {
-            let payload = SearchMessage::reassemble_message_payload(search_responses);
-            let response = bincode::deserialize(&payload).unwrap();
-            self.to_http_handler.send(response).map_err(|e| { e.to_string() })?;
+        if let Some(mut search_responses) = self.message_processor.return_responses(search_responses, true)? {
+            let message = search_responses.pop().unwrap();
+            let origin = message.origin();
+            let peer_public_key = message.into_public_key().unwrap();
+            let key_store = self.key_store.lock().unwrap();
+            let my_public_key = key_store.requester_public_key(origin);
+            key_store.agree(origin, peer_public_key);
+            self.message_processor.egress
+                .send(StreamMessage::new(origin, self.message_processor.endpoint_pair.public_endpoint, StreamMessageKind::KeyAgreement, my_public_key))
+                .map_err(|e| { e.to_string() })?;
         }
         Ok(())
     }
     
-    fn construct_search_response(&self, response: SerdeHttpResponse, query: &str, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<SearchMessage> {
-        SearchMessage::initial_http_response(dest, self.message_processor.endpoint_pair.public_endpoint, origin, query.to_owned(), response).chunked()
+    fn construct_search_response(&self, query: String, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<SearchMessage> {
+        let public_key = self.key_store.lock().unwrap().host_public_key(origin, self.peer_ops.lock().unwrap().heartbeat_tx(), self.message_processor.endpoint_pair.public_endpoint);
+        vec![SearchMessage::initial_http_response(dest, self.message_processor.endpoint_pair.public_endpoint, self.message_processor.endpoint_pair.public_endpoint, query, public_key)]
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
         let message = self.message_processor.ingress.recv().await.unwrap();
-        if let Some(messages) = self.stage_message(message) {
+        if let Some(messages) = self.message_processor.stage_message(message) {
             match messages[0] {
                 SearchMessage { kind: MessageKind::Request, ..} => return self.send_search_response(messages).await,
                 SearchMessage { kind: MessageKind::Response, .. } => return self.return_search_responses(messages)
             };
         };
         Ok(())
-    }
-
-    fn stage_message(&mut self, message: SearchMessage) -> Option<Vec<SearchMessage>> {
-        let (index, num_chunks) = message.position();
-        if num_chunks == 1 {
-            // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
-            Some(vec![message])
-        }
-        else {
-            let query = message.id().clone();
-            let staged_messages= self.message_staging.entry(query.clone()).or_insert(HashMap::with_capacity(num_chunks));
-            if staged_messages.len() == 0 {
-                self.message_processor.set_staging_ttl(&query, SRP_TTL);
-            }
-            if !self.message_processor.check_staging_ttl(&query) {
-                self.message_staging.remove(&query);
-                return None;
-            }
-            staged_messages.insert(index, message);
-            if staged_messages.len() == num_chunks {
-                // gateway::log_debug("Collected all messages");
-                let messages: Vec<SearchMessage> = self.message_staging.remove(&query).unwrap().into_values().collect();
-                return Some(messages);
-            }
-            None
-        }
     }
 }
 
@@ -320,5 +331,36 @@ impl DiscoverPeerProcessor {
             self.peer_ops.lock().unwrap().add_peer(peer, self.get_score(peer.public_endpoint));
         }
         Ok(())
+    }
+}
+
+pub struct StreamProcessor {
+    message_processor: MessageProcessor<StreamMessage>,
+    key_store: Arc<Mutex<KeyStore>>,
+    is_host: bool
+}
+impl StreamProcessor {
+    pub fn new(message_processor: MessageProcessor<StreamMessage>, key_store: &Arc<Mutex<KeyStore>>, is_host: bool) -> Self {
+        Self
+        {
+            message_processor,
+            key_store: key_store.clone(),
+            is_host
+        }
+    }
+
+    pub async fn receive(&mut self) -> EmptyResult  {
+        let message = self.message_processor.ingress.recv().await.unwrap();
+        match message {
+            StreamMessage { kind: StreamMessageKind::KeyAgreement, ..} => self.handle_key_agreement(message),
+            StreamMessage { kind: StreamMessageKind::Data, .. } => {}
+        };
+        Ok(())
+    }
+
+    fn handle_key_agreement(&self, message: StreamMessage) {
+        let sender = message.sender();
+        let peer_public_key = message.into_payload();
+        self.key_store.lock().unwrap().agree(sender, peer_public_key);
     }
 }

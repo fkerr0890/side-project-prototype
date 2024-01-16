@@ -1,3 +1,4 @@
+use crate::message::Message;
 use crate::message_processing::SearchRequestProcessor;
 
 use std::io;
@@ -7,20 +8,15 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use stun::{Error, client, message, agent, xoraddr};
 use stun::message::Getter;
+use tokio::sync::mpsc;
 
-impl SearchRequestProcessor {
-    pub async fn connect_peer(&self, remote_public_endpoint: SocketAddrV4, arc_socket: UdpSocket) -> io::Result<()> {
-        loop {
-            arc_socket.send_to(b"Hello" , remote_public_endpoint).await?;
-            let mut buf = [0; 1024];
-            let (len, addr) = arc_socket.recv_from(&mut buf).await.unwrap_or_else(|_error| {
-                (0 as usize, SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
-            });
-            if len != 0 as usize && addr.to_string() == remote_public_endpoint.to_string() {
-                break
-            }
-        }
-        Ok(())
+pub struct NatTraversal<T> {
+    to_gateway: mpsc::UnboundedSender<T>,
+    from_gateway: mpsc::UnboundedReceiver<T>
+}
+impl<T: Message> NatTraversal<T>{
+    pub async fn connect(peer_addr: SocketAddrV4, message: T) {
+        
     }
 }
 

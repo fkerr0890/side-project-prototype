@@ -7,13 +7,15 @@ use uuid::Uuid;
 use crate::{message_processing::SEARCH_TIMEOUT, http::{SerdeHttpRequest, SerdeHttpResponse}};
 use crate::node::EndpointPair;
 
-pub trait Message<T> {
+const NO_POSITION: (usize, usize) = (0, 1);
+
+pub trait Message {
     fn dest(&self) -> SocketAddrV4;
     fn id(&self) -> &String;
-    fn is_heartbeat(&self) -> bool { false }
-    fn replace_dest_and_timestamp(self, dest: SocketAddrV4) -> T;
-    fn check_expiry(self) -> Result<T, ()>;
+    fn replace_dest_and_timestamp(self, dest: SocketAddrV4) -> Self;
+    fn check_expiry(self) -> bool;
     fn set_sender(self, sender: SocketAddrV4) -> Self;
+    fn position(&self) -> (usize, usize);
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -28,24 +30,39 @@ impl Heartbeat {
     pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, timestamp: String) -> Self { Self { dest, sender, timestamp, uuid: Uuid::new_v4().simple().to_string() } }
 }
 
-impl Message<Self> for Heartbeat {
+impl Message for Heartbeat {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &String { &self.uuid }
-    fn is_heartbeat(&self) -> bool { true }
     fn replace_dest_and_timestamp(self, _dest: SocketAddrV4) -> Self { self }
-    fn check_expiry(self) -> Result<Self, ()> { Ok(self) }
+    fn check_expiry(self) -> bool { false }
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+    fn position(&self) -> (usize, usize) { NO_POSITION }
 }
 
-#[derive(Serialize, Clone)]
-pub struct SearchPayload {
+#[derive(Serialize, Deserialize, Clone)]
+pub struct StreamMessage {
+    dest: SocketAddrV4,
+    sender: SocketAddrV4,
+    timestamp: String,
     position: (usize, usize),
-    pub payload: Vec<u8>
+    pub kind: StreamMessageKind,
+    payload: Vec<u8>
 }
-impl SearchPayload {
+impl StreamMessage {
+    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
+        Self {
+            dest,
+            sender,
+            timestamp: datetime_to_timestamp(Utc::now()),
+            position: NO_POSITION,
+            kind,
+            payload
+        }
+    }
+
     pub fn into_payload(self) -> Vec<u8> { self.payload }
     pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
-    pub fn position(&self) -> (usize, usize) { self.position }
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
 
     pub fn chunked(self) -> Vec<Self> {
         let (payload, empty_message) = self.extract_payload();
@@ -75,6 +92,14 @@ impl SearchPayload {
         bytes
     }
 }
+impl Message for StreamMessage {
+    fn dest(&self) -> SocketAddrV4 { self.dest }
+    fn id(&self) -> &String { &self.dest.to_string() }
+    fn replace_dest_and_timestamp(self, dest: SocketAddrV4) -> Self { self }
+    fn check_expiry(self) -> bool { false }
+    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+    fn position(&self) -> (usize, usize) { self.position }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMessage {
@@ -82,51 +107,64 @@ pub struct SearchMessage {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
-    query: String,
+    query: Vec<u8>,
     origin: SocketAddrV4,
-    expiry: String
+    expiry: String,
+    public_key: Option<Vec<u8>>,
+    position: (usize, usize)
 }
 impl SearchMessage {
-    const NO_POSITION: (usize, usize) = (0, 1);
-
-    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, kind: MessageKind) -> Self {
+    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, kind: MessageKind, public_key: Option<Vec<u8>>) -> Self {
         let datetime = Utc::now();
         Self {
             dest,
             sender,
             timestamp: datetime_to_timestamp(datetime),
-            query,
+            query: query.into_bytes(),
             kind,
             origin,
-            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT))
+            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
+            public_key,
+            position: NO_POSITION
         }
     }
 
     pub fn initial_http_request(query: String, request: SerdeHttpRequest) -> Self {
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
-            query + request.uri(), MessageKind::Request)
+            query + request.uri(), MessageKind::Request, None)
     }
 
-    pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, response: SerdeHttpResponse) -> Self {
-        Self::new(dest, sender, origin, query, MessageKind::Response)
+    pub fn initial_http_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, query: String, public_key: Vec<u8>) -> Self {
+        Self::new(dest, sender, origin, query, MessageKind::Response, Some(public_key))
+    }
+
+    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
+    fn set_query(mut self, bytes: Vec<u8>) -> Self { self.query = bytes; self }
+    pub fn extract_query(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.query), self) }
+
+    pub fn chunked(self) -> Vec<Self> {
+        let (query, empty_message) = self.extract_query();
+        let chunks = query.chunks(1024 - (bincode::serialized_size(&empty_message).unwrap() as usize));
+        let num_chunks = chunks.len();
+        let mut messages: Vec<Self> = chunks
+            .enumerate()
+            .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_query(chunk.to_vec()))
+            .collect();
+        messages.shuffle(&mut SmallRng::from_entropy());
+        messages
     }
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn origin(&self) -> SocketAddrV4 { self.origin }
     pub fn kind(&self) -> &MessageKind { &self.kind }
+    pub fn into_public_key(self) -> Option<Vec<u8>> { self.public_key }
     
     pub fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
-
-    pub fn set_origin_if_unset(&mut self, origin: SocketAddrV4) {
-        if self.origin == EndpointPair::default_socket() {
-            self.origin = origin;
-        }
-    }
 }
 
-impl Message<Self> for SearchMessage {
+impl Message for SearchMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.query }
+    fn id(&self) -> &String { &String::from_utf8(self.query).unwrap() }
 
     fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
         self.dest = dest;
@@ -134,15 +172,13 @@ impl Message<Self> for SearchMessage {
         self
     }
 
-    fn check_expiry(self) -> Result<Self, ()> {
+    fn check_expiry(self) -> bool {
         let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&self.expiry).unwrap().into();
-        if expiry >= Utc::now() {
-            return Ok(self);
-        }
-        Err(())
+        return expiry >= Utc::now()
     }
 
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+    fn position(&self) -> (usize, usize) { self.position }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -198,7 +234,7 @@ impl DiscoverPeerMessage {
     pub fn set_kind(mut self, kind: DpMessageKind) -> Self { self.kind = kind; self }
 }
 
-impl Message<Self> for DiscoverPeerMessage {
+impl Message for DiscoverPeerMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &String { &self.uuid }
 
@@ -208,8 +244,9 @@ impl Message<Self> for DiscoverPeerMessage {
         self
     }
 
-    fn check_expiry(self) -> Result<Self, ()> { Ok(self) }
+    fn check_expiry(self) -> bool { false }
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
+    fn position(&self) -> (usize, usize) { NO_POSITION }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -226,7 +263,11 @@ pub enum DpMessageKind {
     IveGotSome
 }
 
-
+#[derive(Serialize, Deserialize, Clone)]
+pub enum StreamMessageKind {
+    KeyAgreement,
+    Data
+}
 
 pub fn datetime_to_timestamp(datetime: DateTime<Utc>) -> String {
     datetime.to_rfc3339_opts(SecondsFormat::Micros, true)

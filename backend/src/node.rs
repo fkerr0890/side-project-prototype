@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
 use uuid::Uuid;
 
-use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor}, peer::{PeerOps, self}, gateway::{OutboundGateway, InboundGateway, self}, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message}};
+use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor}, peer::{PeerOps, self}, gateway::{OutboundGateway, InboundGateway, self}, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message}, crypto::KeyStore};
 
 pub struct Node {
     endpoint_pair: EndpointPair,
@@ -39,12 +39,13 @@ impl Node {
         let (to_http_handler, from_srp) = mpsc::unbounded_channel();
     
         let peer_ops = Arc::new(Mutex::new(PeerOps::new(heartbeat_tx, self.endpoint_pair)));
+        let key_store = Arc::new(Mutex::new(KeyStore::new()));
         let peer_ops_clone = peer_ops.clone();
         let mut local_hosts = HashMap::new();
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
-        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), to_http_handler, local_hosts, &peer_ops);
+        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), to_http_handler, local_hosts, &peer_ops, &key_store);
         let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.endpoint_pair, dpm_from_gateway, dpm_to_gateway), &peer_ops);
     
         let mut outbound_srm_gateway = OutboundGateway::new(&self.socket, srm_from_srp);

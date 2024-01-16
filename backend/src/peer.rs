@@ -27,6 +27,7 @@ impl PeerOps {
 
     pub fn peers(&self) -> Vec<(EndpointPair, i32)> { self.peers.iter().map(|(i, score)| (*i, *score)).collect() }
     pub fn peers_len(&self) -> usize { self.peers.len() }
+    pub fn heartbeat_tx(&self) -> mpsc::UnboundedSender<Heartbeat> { return self.heartbeat_tx.clone() }
 
     pub fn add_initial_peer(&mut self, endpoint_pair: EndpointPair) {
         self.add_peer(endpoint_pair, 0);
@@ -47,15 +48,14 @@ impl PeerOps {
         }
     }
 
-    pub fn send_request<T: Message<T> + Clone>(&self, search_request_parts: Vec<T>, tx: &mpsc::UnboundedSender<T>) -> EmptyResult {
+    pub fn send_request<T: Message + Clone>(&self, search_request_parts: Vec<T>, tx: &mpsc::UnboundedSender<T>) -> EmptyResult {
         // gateway::log_debug(&format!("Peers len: {}", self.peers.len()));
         for peer in self.peers.iter() {
             for message in search_request_parts.clone() {
                 let result = message
                     .set_sender(self.endpoint_pair.public_endpoint)
-                    .replace_dest_and_timestamp(peer.0.public_endpoint)
-                    .check_expiry();
-                if let Ok(message) = result {
+                    .replace_dest_and_timestamp(peer.0.public_endpoint);
+                if !message.check_expiry() {
                     tx.send(message).map_err(|e| { e.to_string() })?;
                 }
                 else {

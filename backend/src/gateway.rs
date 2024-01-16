@@ -15,7 +15,7 @@ pub struct OutboundGateway<T> {
     ingress: mpsc::UnboundedReceiver<T>
 }
 
-impl<T: Serialize + DeserializeOwned + Message<T>> OutboundGateway<T> {
+impl<T: Serialize + DeserializeOwned + Message> OutboundGateway<T> {
     pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<T>) -> Self 
     {
         Self {
