@@ -52,7 +52,7 @@ impl PeerOps {
         // gateway::log_debug(&format!("Peers len: {}", self.peers.len()));
         for peer in self.peers.iter() {
             for message in search_request_parts.clone() {
-                let result = message
+                let message = message
                     .set_sender(self.endpoint_pair.public_endpoint)
                     .replace_dest_and_timestamp(peer.0.public_endpoint);
                 if !message.check_expiry() {

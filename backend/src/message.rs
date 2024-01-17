@@ -4,16 +4,16 @@ use serde::{Serialize, Deserialize};
 use std::{str, net::SocketAddrV4, mem};
 use uuid::Uuid;
 
-use crate::{message_processing::SEARCH_TIMEOUT, http::{SerdeHttpRequest, SerdeHttpResponse}};
+use crate::{message_processing::SEARCH_TIMEOUT, http::SerdeHttpRequest};
 use crate::node::EndpointPair;
 
 const NO_POSITION: (usize, usize) = (0, 1);
 
 pub trait Message {
     fn dest(&self) -> SocketAddrV4;
-    fn id(&self) -> &String;
+    fn id(&self) -> &str;
     fn replace_dest_and_timestamp(self, dest: SocketAddrV4) -> Self;
-    fn check_expiry(self) -> bool;
+    fn check_expiry(&self) -> bool;
     fn set_sender(self, sender: SocketAddrV4) -> Self;
     fn position(&self) -> (usize, usize);
 }
@@ -32,9 +32,9 @@ impl Heartbeat {
 
 impl Message for Heartbeat {
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.uuid }
+    fn id(&self) -> &str { &self.uuid }
     fn replace_dest_and_timestamp(self, _dest: SocketAddrV4) -> Self { self }
-    fn check_expiry(self) -> bool { false }
+    fn check_expiry(&self) -> bool { false }
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
     fn position(&self) -> (usize, usize) { NO_POSITION }
 }
@@ -94,9 +94,9 @@ impl StreamMessage {
 }
 impl Message for StreamMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.dest.to_string() }
-    fn replace_dest_and_timestamp(self, dest: SocketAddrV4) -> Self { self }
-    fn check_expiry(self) -> bool { false }
+    fn id(&self) -> &str { "" }
+    fn replace_dest_and_timestamp(self, _dest: SocketAddrV4) -> Self { self }
+    fn check_expiry(&self) -> bool { false }
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
     fn position(&self) -> (usize, usize) { self.position }
 }
@@ -107,6 +107,7 @@ pub struct SearchMessage {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
+    uuid: String,
     query: Vec<u8>,
     origin: SocketAddrV4,
     expiry: String,
@@ -121,6 +122,7 @@ impl SearchMessage {
             sender,
             timestamp: datetime_to_timestamp(datetime),
             query: query.into_bytes(),
+            uuid: Uuid::new_v4().simple().to_string(),
             kind,
             origin,
             expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
@@ -164,7 +166,7 @@ impl SearchMessage {
 
 impl Message for SearchMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &String::from_utf8(self.query).unwrap() }
+    fn id(&self) -> &str { &self.uuid }
 
     fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
         self.dest = dest;
@@ -172,7 +174,7 @@ impl Message for SearchMessage {
         self
     }
 
-    fn check_expiry(self) -> bool {
+    fn check_expiry(&self) -> bool {
         let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&self.expiry).unwrap().into();
         return expiry >= Utc::now()
     }
@@ -236,7 +238,7 @@ impl DiscoverPeerMessage {
 
 impl Message for DiscoverPeerMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.uuid }
+    fn id(&self) -> &str { &self.uuid }
 
     fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
         self.dest = dest;
@@ -244,7 +246,7 @@ impl Message for DiscoverPeerMessage {
         self
     }
 
-    fn check_expiry(self) -> bool { false }
+    fn check_expiry(&self) -> bool { false }
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
     fn position(&self) -> (usize, usize) { NO_POSITION }
 }

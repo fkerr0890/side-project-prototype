@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
 use uuid::Uuid;
 
-use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor}, peer::{PeerOps, self}, gateway::{OutboundGateway, InboundGateway, self}, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message}, crypto::KeyStore};
+use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor, StreamProcessor}, peer::{PeerOps, self}, gateway::{OutboundGateway, InboundGateway, self}, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message}, crypto::KeyStore};
 
 pub struct Node {
     endpoint_pair: EndpointPair,
@@ -37,6 +37,8 @@ impl Node {
         let (dpm_to_gateway, dpm_from_dpp) = mpsc::unbounded_channel();
         let (heartbeat_tx, heartbeat_rx) = mpsc::unbounded_channel();
         let (to_http_handler, from_srp) = mpsc::unbounded_channel();
+        let (sm_to_gateway, sm_from_smp) = mpsc::unbounded_channel();
+        let (sm_to_smp, sm_from_gateway) = mpsc::unbounded_channel();
     
         let peer_ops = Arc::new(Mutex::new(PeerOps::new(heartbeat_tx, self.endpoint_pair)));
         let key_store = Arc::new(Mutex::new(KeyStore::new()));
@@ -45,12 +47,14 @@ impl Node {
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
-        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), to_http_handler, local_hosts, &peer_ops, &key_store);
+        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), sm_to_gateway.clone(), to_http_handler, local_hosts, &peer_ops, &key_store);
         let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.endpoint_pair, dpm_from_gateway, dpm_to_gateway), &peer_ops);
+        let mut smp = StreamProcessor::new(MessageProcessor::new(self.endpoint_pair, sm_from_gateway, sm_to_gateway), &key_store);
     
         let mut outbound_srm_gateway = OutboundGateway::new(&self.socket, srm_from_srp);
         let mut outbound_dpm_gateway = OutboundGateway::new(&self.socket, dpm_from_dpp);
         let mut outbound_heartbeat_gateway = OutboundGateway::new(&self.socket, heartbeat_rx);
+        let mut outbound_stream_gateway = OutboundGateway::new(&self.socket, sm_from_smp);
     
         tokio::spawn(async move {
             loop {
@@ -69,9 +73,13 @@ impl Node {
                 let Some(_) = outbound_heartbeat_gateway.send().await else { return };
             }
         });
+
+        tokio::spawn(async move {
+            while let Some(_) = outbound_stream_gateway.send().await {}
+        });
     
         for _ in 0..225 {
-            let mut inbound_gateway = InboundGateway::new(&self.socket, &srm_to_srp, &dpm_to_dpp);
+            let mut inbound_gateway = InboundGateway::new(&self.socket, &srm_to_srp, &dpm_to_dpp, &sm_to_smp);
             tokio::spawn(async move {
                 loop {
                     let Ok(_) = inbound_gateway.receive().await else { return };
@@ -89,7 +97,11 @@ impl Node {
             loop {
                 let Ok(_) = dpp.receive().await else { return };         
             }
-        });    
+        });
+
+        tokio::spawn(async move {
+            while let Ok(_) = smp.receive().await {}
+        });
         
         // tokio::spawn(async move {
         //     loop {

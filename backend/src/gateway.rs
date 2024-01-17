@@ -6,7 +6,7 @@ use tokio::net::UdpSocket;
 use std::str;
 use std::sync::Arc;
 
-use crate::message::{Message, SearchMessage, DiscoverPeerMessage, Heartbeat};
+use crate::message::{Message, SearchMessage, DiscoverPeerMessage, Heartbeat, StreamMessage};
 
 pub type EmptyResult = Result<(), String>; 
 
@@ -35,16 +35,18 @@ impl<T: Serialize + DeserializeOwned + Message> OutboundGateway<T> {
 pub struct InboundGateway {
     socket: Arc<UdpSocket>,
     to_srp: mpsc::UnboundedSender<SearchMessage>,
-    to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>
+    to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
+    to_smp: mpsc::UnboundedSender<StreamMessage>
 }
 
 impl InboundGateway {
-    pub fn new(socket: &Arc<UdpSocket>, to_srp: &mpsc::UnboundedSender<SearchMessage>, to_dpp: &mpsc::UnboundedSender<DiscoverPeerMessage>) -> Self 
+    pub fn new(socket: &Arc<UdpSocket>, to_srp: &mpsc::UnboundedSender<SearchMessage>, to_dpp: &mpsc::UnboundedSender<DiscoverPeerMessage>, to_smp: &mpsc::UnboundedSender<StreamMessage>) -> Self 
     {
         Self {
             socket: socket.clone(),
             to_srp: to_srp.clone(),
-            to_dpp: to_dpp.clone()
+            to_dpp: to_dpp.clone(),
+            to_smp: to_smp.clone()
         }
     }
 
@@ -66,6 +68,9 @@ impl InboundGateway {
         }
         else if let Ok(message) = bincode::deserialize::<Heartbeat>(message_bytes) {
             Ok(log_debug(&serde_json::to_string(&message).unwrap()))
+        }
+        else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
+            self.to_smp.send(message).map_err(|e| { e.to_string() } )
         }
         else {
             Err(String::from("Unable to deserialize received message to a supported type"))

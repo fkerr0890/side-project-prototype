@@ -1,24 +1,8 @@
-use crate::message::Message;
-use crate::message_processing::SearchRequestProcessor;
-
-use std::io;
-use std::net::{SocketAddr, IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 use stun::{Error, client, message, agent, xoraddr};
 use stun::message::Getter;
-use tokio::sync::mpsc;
-
-pub struct NatTraversal<T> {
-    to_gateway: mpsc::UnboundedSender<T>,
-    from_gateway: mpsc::UnboundedReceiver<T>
-}
-impl<T: Message> NatTraversal<T>{
-    pub async fn connect(peer_addr: SocketAddrV4, message: T) {
-        
-    }
-}
 
 pub async fn stun() -> Result<(), Error> {
     let server = String::from("stun.l.google.com:19302");
