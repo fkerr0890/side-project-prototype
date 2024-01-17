@@ -75,7 +75,7 @@ impl KeyStore {
     }
 }
 
-pub struct KeySet { opening_key: aead::OpeningKey<CurrentNonce>, sealing_key: aead::SealingKey<CurrentNonce> }
+struct KeySet { opening_key: aead::OpeningKey<CurrentNonce>, sealing_key: aead::SealingKey<CurrentNonce> }
 
 struct CurrentNonce(u128);
 impl aead::NonceSequence for CurrentNonce {
