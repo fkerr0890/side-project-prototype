@@ -3,7 +3,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::net::UdpSocket;
 
-use std::str;
+use std::{str, fmt::Debug};
 use std::sync::Arc;
 
 use crate::message::{Message, SearchMessage, DiscoverPeerMessage, Heartbeat, StreamMessage};
@@ -15,7 +15,7 @@ pub struct OutboundGateway<T> {
     ingress: mpsc::UnboundedReceiver<T>
 }
 
-impl<T: Serialize + DeserializeOwned + Message> OutboundGateway<T> {
+impl<T: Serialize + DeserializeOwned + Message + Debug> OutboundGateway<T> {
     pub fn new(socket: &Arc<UdpSocket>, ingress: mpsc::UnboundedReceiver<T>) -> Self 
     {
         Self {
@@ -26,6 +26,7 @@ impl<T: Serialize + DeserializeOwned + Message> OutboundGateway<T> {
 
     pub async fn send(&mut self) -> Option<usize> {
         let outbound_message = self.ingress.recv().await?;
+        println!("Sending message {:?}", outbound_message);
         let dest = outbound_message.dest();
         let bytes = &bincode::serialize(&outbound_message).unwrap();
         Some(self.socket.send_to(bytes, dest).await.unwrap_or_default())
@@ -67,9 +68,10 @@ impl InboundGateway {
             self.to_dpp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(message) = bincode::deserialize::<Heartbeat>(message_bytes) {
-            Ok(log_debug(&serde_json::to_string(&message).unwrap()))
+            Ok(println!("{:?}", message))
         }
         else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
+            println!("Received stream message");
             self.to_smp.send(message).map_err(|e| { e.to_string() } )
         }
         else {

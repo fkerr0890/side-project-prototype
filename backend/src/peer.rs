@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use serde::{Serialize, Deserialize};
 
 use crate::node::EndpointPair;
@@ -6,7 +8,7 @@ use chrono::Utc;
 use priority_queue::DoublePriorityQueue;
 use tokio::sync::mpsc;
 
-use crate::{message::{Message, self, Heartbeat}, gateway::{self, EmptyResult}};
+use crate::{message::{Message, self, Heartbeat}, gateway::EmptyResult};
 
 pub const MAX_PEERS: u16 = 10;
 
@@ -48,18 +50,18 @@ impl PeerOps {
         }
     }
 
-    pub fn send_request<T: Message + Clone>(&self, search_request_parts: Vec<T>, tx: &mpsc::UnboundedSender<T>) -> EmptyResult {
+    pub fn send_request<T: Message + Clone + Debug>(&self, search_request_parts: Vec<T>, tx: &mpsc::UnboundedSender<T>) -> EmptyResult {
         // gateway::log_debug(&format!("Peers len: {}", self.peers.len()));
         for peer in self.peers.iter() {
             for message in search_request_parts.clone() {
                 let message = message
                     .set_sender(self.endpoint_pair.public_endpoint)
                     .replace_dest_and_timestamp(peer.0.public_endpoint);
-                if !message.check_expiry() {
+                if message.check_expiry() {
                     tx.send(message).map_err(|e| { e.to_string() })?;
                 }
                 else {
-                    gateway::log_debug("Message expired");
+                    println!("PeerOps: Message expired: {:?}", message);
                     return Ok(());
                 }
             }

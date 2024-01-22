@@ -3,7 +3,7 @@ use std::{net::SocketAddrV4, collections::HashMap, time::Duration, sync::{Arc, M
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::{oneshot, mpsc}, time::sleep};
 
-use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind, StreamMessage, StreamMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::SerdeHttpResponse, node::EndpointPair, crypto::KeyStore};
+use crate::{message::{MessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind, StreamMessage, StreamMessageKind}, gateway::{self, EmptyResult}, peer::PeerOps, http::{SerdeHttpResponse, self, SerdeHttpRequest}, node::EndpointPair, crypto::{KeyStore, Direction}};
 
 pub static SEARCH_TIMEOUT: i64 = 30;
 pub static TTL: u64 = 200;
@@ -131,43 +131,36 @@ impl<T: Serialize + DeserializeOwned + Message + Clone + Send> MessageProcessor<
 
 pub struct SearchRequestProcessor {
     message_processor: MessageProcessor<SearchMessage>,
-    egress: mpsc::UnboundedSender<StreamMessage>,
-    to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>,
+    to_smp: mpsc::UnboundedSender<StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
     peer_ops: Arc<Mutex<PeerOps>>,
     key_store: Arc<Mutex<KeyStore>>
 }
 
 impl SearchRequestProcessor {
-    pub fn new(message_processor: MessageProcessor<SearchMessage>, egress: mpsc::UnboundedSender<StreamMessage>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>, local_hosts: HashMap<String, SocketAddrV4>, peer_ops: &Arc<Mutex<PeerOps>>, key_store: &Arc<Mutex<KeyStore>>) -> Self {
+    pub fn new(message_processor: MessageProcessor<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, peer_ops: &Arc<Mutex<PeerOps>>, key_store: &Arc<Mutex<KeyStore>>) -> Self {
         Self {
             message_processor,
-            egress,
-            to_http_handler,
+            to_smp,
             local_hosts,
             peer_ops: peer_ops.clone(),
             key_store: key_store.clone()
         }
     }
 
-    pub async fn send_search_response(&mut self, search_request_parts: Vec<SearchMessage>) -> EmptyResult {
-        let query = search_request_parts[0].id();
-        if !self.message_processor.try_add_breadcrumb(query, search_request_parts[0].sender()) {
+    pub async fn handle_search_request(&mut self, search_request_parts: Vec<SearchMessage>) -> EmptyResult {
+        let uuid = search_request_parts[0].id();
+        if !self.message_processor.try_add_breadcrumb(uuid, search_request_parts[0].sender()) {
             return Ok(())
         }
         else {
-            self.message_processor.set_breadcrumb_ttl(None, None, query, SRP_TTL);
+            self.message_processor.set_breadcrumb_ttl(None, None, uuid, SRP_TTL);
         }
-        let (host, uri) = query.split_once("/").unwrap();
-        println!("Checking for resource {}", uri);
-        if let Some(socket) = self.local_hosts.get(host) {
-            // gateway::log_debug(&format!("Hash at hairpin {hash}"));
+        let host = std::str::from_utf8(search_request_parts[0].payload()).unwrap();
+        println!("Checking for host {}", host);
+        if let Some(_) = self.local_hosts.get(host) {
             let (dest, origin) = (search_request_parts[0].sender(), search_request_parts[0].origin());
-            // let bytes = SearchMessage::reassemble_message_payload(search_request_parts);
-            // let search_request = bincode::deserialize(&bytes).unwrap();
-            // let response = http::make_request(search_request, String::from("http://") + &socket.to_string()).await;
-            // return self.return_search_responses(self.construct_search_response(response, &query, dest, origin));
-            return self.return_search_responses(self.construct_search_response(query.to_owned(), dest, origin))
+            return self.return_search_responses(self.construct_search_response(uuid.to_owned(), dest, origin))
         }
         self.peer_ops.lock().unwrap().send_request(search_request_parts, &self.message_processor.egress)?;
         Ok(())
@@ -177,27 +170,31 @@ impl SearchRequestProcessor {
         if let Some(mut search_responses) = self.message_processor.return_responses(search_responses, true)? {
             let message = search_responses.pop().unwrap();
             let origin = message.origin();
-            let peer_public_key = message.into_public_key().unwrap();
+            let uuid = message.id().to_owned();
+            let peer_public_key = message.into_payload();
             let mut key_store = self.key_store.lock().unwrap();
             let my_public_key = key_store.requester_public_key(origin);
             key_store.agree(origin, peer_public_key).unwrap();
-            self.egress
-                .send(StreamMessage::new(origin, self.message_processor.endpoint_pair.public_endpoint, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec()))
+            self.to_smp
+                .send(StreamMessage::new(origin, EndpointPair::default_socket(), uuid, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec()))
                 .map_err(|e| { e.to_string() })?;
         }
         Ok(())
     }
     
-    fn construct_search_response(&self, query: String, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<SearchMessage> {
+    fn construct_search_response(&self, uuid: String, dest: SocketAddrV4, origin: SocketAddrV4) -> Vec<SearchMessage> {
         let public_key = self.key_store.lock().unwrap().host_public_key(origin, self.peer_ops.lock().unwrap().heartbeat_tx(), self.message_processor.endpoint_pair.public_endpoint);
-        vec![SearchMessage::initial_http_response(dest, self.message_processor.endpoint_pair.public_endpoint, self.message_processor.endpoint_pair.public_endpoint, query, public_key.as_ref().to_vec())]
+        vec![SearchMessage::key_response(dest, self.message_processor.endpoint_pair.public_endpoint, self.message_processor.endpoint_pair.public_endpoint, uuid, public_key.as_ref().to_vec())]
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
-        let message = self.message_processor.ingress.recv().await.unwrap();
+        let mut message = self.message_processor.ingress.recv().await.unwrap();
+        if message.origin() == EndpointPair::default_socket() {
+            message.set_origin(self.message_processor.endpoint_pair.public_endpoint)
+        }
         if let Some(messages) = self.message_processor.stage_message(message) {
             match messages[0] {
-                SearchMessage { kind: MessageKind::Request, ..} => return self.send_search_response(messages).await,
+                SearchMessage { kind: MessageKind::Request, ..} => return self.handle_search_request(messages).await,
                 SearchMessage { kind: MessageKind::Response, .. } => return self.return_search_responses(messages)
             };
         };
@@ -338,16 +335,22 @@ impl DiscoverPeerProcessor {
     }
 }
 
-pub struct StreamProcessor {
+pub struct StreamMessageProcessor {
     message_processor: MessageProcessor<StreamMessage>,
-    key_store: Arc<Mutex<KeyStore>>
+    key_store: Arc<Mutex<KeyStore>>,
+    cached_messages: HashMap<String, StreamMessage>,
+    local_hosts: HashMap<String, SocketAddrV4>,
+    to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>,
 }
-impl StreamProcessor {
-    pub fn new(message_processor: MessageProcessor<StreamMessage>, key_store: &Arc<Mutex<KeyStore>>) -> Self {
+impl StreamMessageProcessor {
+    pub fn new(message_processor: MessageProcessor<StreamMessage>, key_store: &Arc<Mutex<KeyStore>>, local_hosts: HashMap<String, SocketAddrV4>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>) -> Self {
         Self
         {
             message_processor,
-            key_store: key_store.clone()
+            key_store: key_store.clone(),
+            cached_messages: HashMap::new(),
+            local_hosts,
+            to_http_handler
         }
     }
 
@@ -355,14 +358,72 @@ impl StreamProcessor {
         let message = self.message_processor.ingress.recv().await.unwrap();
         match message {
             StreamMessage { kind: StreamMessageKind::KeyAgreement, ..} => self.handle_key_agreement(message),
-            StreamMessage { kind: StreamMessageKind::Data, .. } => {}
-        };
+            StreamMessage { kind: StreamMessageKind::Request, .. } => self.handle_request(message).await,
+            StreamMessage { kind: StreamMessageKind::Response, ..} => self.handle_response(message)
+        }
+    }
+
+    fn handle_key_agreement(&mut self, message: StreamMessage) -> EmptyResult {
+        let sender = message.sender();
+        if sender == EndpointPair::default_socket() {
+            let (dest, uuid) = (message.dest(), message.id().to_owned());
+            self.message_processor.egress.send(message.set_sender(self.message_processor.endpoint_pair.public_endpoint)).ok();
+            self.send_cached_request(dest, &uuid)
+        }
+        else {
+            println!("Received key from requester");
+            let peer_public_key = message.into_payload();
+            self.key_store.lock().unwrap().agree(sender, peer_public_key).unwrap();
+            Ok(())
+        }
+    }
+
+    fn send_cached_request(&mut self, dest: SocketAddrV4, uuid: &str) -> EmptyResult {
+        let mut cached_message = self.cached_messages.remove(uuid).unwrap();
+        self.key_store.lock().unwrap().transform(dest, cached_message.payload_mut(), Direction::Encode).unwrap();
+        for message in cached_message.chunked() {
+            self.message_processor.egress.send(message.set_sender(self.message_processor.endpoint_pair.public_endpoint).replace_dest_and_timestamp(dest)).ok();
+        }
         Ok(())
     }
 
-    fn handle_key_agreement(&self, message: StreamMessage) {
-        let sender = message.sender();
-        let peer_public_key = message.into_payload();
-        self.key_store.lock().unwrap().agree(sender, peer_public_key).unwrap();
+    async fn handle_request(&mut self, message: StreamMessage) -> EmptyResult {
+        let (dest, uuid) = (message.sender(), message.id().to_owned());
+        if message.sender() == EndpointPair::default_socket() {
+            println!("StreamProcessor: cached a message: {:?}", message);
+            self.cached_messages.insert(message.id().to_owned(), message);
+        }
+        else if let Some(request_parts) = self.message_processor.stage_message(message) {
+            let mut request_bytes = StreamMessage::reassemble_message_payload(request_parts);
+            self.key_store.lock().unwrap().transform(dest, &mut request_bytes, Direction::Decode).unwrap();
+            let mut request: SerdeHttpRequest = bincode::deserialize(&request_bytes).unwrap();
+            let uri_parts = request.uri().split("/").collect::<Vec<&str>>();
+            let socket = self.local_hosts.get(uri_parts[1]).unwrap();
+            request.set_uri(String::from("/") + &uri_parts[2..].join("/"));
+            let response = http::make_request(request, &socket.to_string()).await;
+            let mut response_bytes = bincode::serialize(&response).unwrap();
+            self.key_store.lock().unwrap().transform(dest, &mut response_bytes, Direction::Encode).unwrap();
+            let response = StreamMessage::new(
+                dest,
+                self.message_processor.endpoint_pair.public_endpoint,
+                uuid,
+                StreamMessageKind::Response,
+                response_bytes);
+            for message in response.chunked() {
+                self.message_processor.egress.send(message).ok();
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_response(&mut self, message: StreamMessage) -> EmptyResult {
+        if let Some(response_parts) = self.message_processor.stage_message(message) {
+            let peer_addr = response_parts[0].sender();
+            let mut bytes = StreamMessage::reassemble_message_payload(response_parts);
+            self.key_store.lock().unwrap().transform(peer_addr, &mut bytes, Direction::Decode).unwrap();
+            let response = bincode::deserialize(&bytes).unwrap();
+            self.to_http_handler.send(response).ok();
+        }
+        Ok(())
     }
 }

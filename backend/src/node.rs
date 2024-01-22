@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
 use uuid::Uuid;
 
-use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor, StreamProcessor}, peer::{PeerOps, self}, gateway::{OutboundGateway, InboundGateway, self}, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message}, crypto::KeyStore};
+use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor, StreamMessageProcessor}, peer::{PeerOps, self}, gateway::{OutboundGateway, InboundGateway, self}, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message}, crypto::KeyStore};
 
 pub struct Node {
     endpoint_pair: EndpointPair,
@@ -45,11 +45,11 @@ impl Node {
         let peer_ops_clone = peer_ops.clone();
         let mut local_hosts = HashMap::new();
         if is_end {
-            local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
+            local_hosts.insert(String::new(), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
-        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), sm_to_gateway.clone(), to_http_handler, local_hosts, &peer_ops, &key_store);
+        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), sm_to_smp.clone(), local_hosts.clone(), &peer_ops, &key_store);
         let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.endpoint_pair, dpm_from_gateway, dpm_to_gateway), &peer_ops);
-        let mut smp = StreamProcessor::new(MessageProcessor::new(self.endpoint_pair, sm_from_gateway, sm_to_gateway), &key_store);
+        let mut smp = StreamMessageProcessor::new(MessageProcessor::new(self.endpoint_pair, sm_from_gateway, sm_to_gateway), &key_store, local_hosts, to_http_handler);
     
         let mut outbound_srm_gateway = OutboundGateway::new(&self.socket, srm_from_srp);
         let mut outbound_dpm_gateway = OutboundGateway::new(&self.socket, dpm_from_dpp);
@@ -126,12 +126,13 @@ impl Node {
             gateway::log_debug("No introducer");
         }
 
-        sleep(Duration::from_secs(10)).await;
+        sleep(Duration::from_secs(2)).await;
         let node_info = self.as_node_info(peer_ops_clone, is_start, is_end);
         fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
         
         if is_start {
-            let server_context = ServerContext::new(&srm_to_srp, Arc::new(tokio::sync::Mutex::new(from_srp)));
+            println!("Tcp listening");
+            let server_context = ServerContext::new(&srm_to_srp, Arc::new(tokio::sync::Mutex::new(from_srp)), sm_to_smp);
             http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
         }
         else {

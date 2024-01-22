@@ -37,7 +37,7 @@ impl KeyStore {
 
     pub fn host_public_key(&mut self, peer_addr: SocketAddrV4, egress: mpsc::UnboundedSender<Heartbeat>, sender: SocketAddrV4) -> agreement::PublicKey {
         let (tx, rx) = oneshot::channel();
-        send_rapid_heartbeats(rx, egress, sender, peer_addr);
+        // send_rapid_heartbeats(rx, egress, sender, peer_addr);
         self.generate_key_pair(peer_addr, Some(tx))
     }
 
@@ -45,11 +45,11 @@ impl KeyStore {
         self.generate_key_pair(peer_addr, None)
     }
 
-    pub fn transform(&mut self, peer_addr: SocketAddrV4, mut payload: Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
+    pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, payload: &'a mut Vec<u8>, mode: Direction) -> Result<(), Error> {
         let (aad, key_set) = self.get_key_aad(peer_addr)?;
         match mode {
-            Direction::Encode => { if let Ok(_) = key_set.sealing_key.seal_in_place_append_tag(aad, &mut payload) { Ok(payload) } else { Err(Error::Unspecified) } },
-            Direction::Decode => key_set.opening_key.open_in_place(aad, &mut payload).map(|payload| payload.to_owned()).or(Err(Error::Unspecified))
+            Direction::Encode => key_set.sealing_key.seal_in_place_append_tag(aad, payload).map(|_| ()).or(Err(Error::Unspecified)),
+            Direction::Decode => key_set.opening_key.open_in_place(aad, payload).map(|_| ()).or(Err(Error::Unspecified))
         }
     }
 
@@ -66,6 +66,7 @@ impl KeyStore {
         let mut initial_nonce = vec![0u8; HKDF_SHA256.len()];
         symmetric_key.expand(&[b"sym"], HKDF_SHA256).unwrap().fill(&mut symmetric_key_bytes).unwrap();
         symmetric_key.expand(&[b"nonce_0"], HKDF_SHA256).unwrap().fill(&mut initial_nonce).unwrap();
+        initial_nonce.truncate(16);
         let initial_value = u128::from_be_bytes(initial_nonce.try_into().unwrap());
         let opening_key = aead::OpeningKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value));
         let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value));
@@ -98,9 +99,11 @@ pub enum Direction {
 }
 
 fn send_rapid_heartbeats(mut rx: oneshot::Receiver<()>, egress: mpsc::UnboundedSender<Heartbeat>, sender: SocketAddrV4, dest: SocketAddrV4) {
+    println!("send_rapid_heartbeats called: dest: {dest}, sender: {sender}");
     tokio::spawn(async move {
         while let Err(_) = rx.try_recv() {
             let message = Heartbeat::new(dest, sender, message::datetime_to_timestamp(Utc::now()));
+            println!("Sending heartbeat {:?}", message);
             egress.send(message).ok();
             sleep(Duration::from_millis(500)).await;
         }

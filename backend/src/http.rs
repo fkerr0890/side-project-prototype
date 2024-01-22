@@ -4,7 +4,7 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::message::SearchMessage;
+use crate::{message::{SearchMessage, StreamMessage, StreamMessageKind, Message}, node::EndpointPair};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -37,6 +37,7 @@ impl SerdeHttpRequest {
     }
 
     pub fn uri(&self) -> &str { &self.uri }
+    pub fn set_uri(&mut self, uri: String) { self.uri = uri; }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -133,15 +134,17 @@ fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> HeaderMap {
 
 #[derive(Clone)]
 pub struct ServerContext {
-    egress: mpsc::UnboundedSender<SearchMessage>,
-    from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>
+    to_srp: mpsc::UnboundedSender<SearchMessage>,
+    from_smp: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>,
+    to_smp: mpsc::UnboundedSender<StreamMessage>
 }
 
 impl ServerContext {
-    pub fn new(egress: &mpsc::UnboundedSender<SearchMessage>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>) -> Self { Self { egress: egress.clone(), from_outbound_gateway } }
+    pub fn new(to_srp: &mpsc::UnboundedSender<SearchMessage>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>, to_smp: mpsc::UnboundedSender<StreamMessage>) -> Self { Self { to_srp: to_srp.clone(), from_smp: from_outbound_gateway, to_smp } }
 }
 
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
+    println!("http: Received request from browser");
     let request_version = request.version().clone();
     let serde_request = match SerdeHttpRequest::from_hyper_request(request).await {
         Ok(request) => request,
@@ -155,13 +158,20 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
                 .unwrap())
         }
     };
-    for message in SearchMessage::initial_http_request(String::from("example"), serde_request).chunked() {
-        context.egress.send(message).ok();
-    }
-    let mut rx = context.from_outbound_gateway.lock().await;
+    println!("http: Request uri is {}", serde_request.uri());
+    let search_request = SearchMessage::initial_search_request(serde_request.uri().split("/").collect::<Vec<&str>>()[1].to_owned());
+    context.to_smp.send(StreamMessage::new(
+        EndpointPair::default_socket(),
+        EndpointPair::default_socket(),
+        search_request.id().to_owned(),
+        StreamMessageKind::Request,
+        bincode::serialize(&serde_request).unwrap())).ok();
+    context.to_srp.send(search_request).ok();
+    let mut rx = context.from_smp.lock().await;
     let response = match rx.recv().await {
         Some(response) => response,
         None => {
+            println!("Sending error response");
             return Ok(Response::builder()
                 .status(500)
                 .version(request_version)
@@ -186,10 +196,10 @@ pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
     Server::bind(&socket).serve(make_service).await.unwrap();
 }
 
-pub async fn make_request(request: SerdeHttpRequest, socket: String) -> SerdeHttpResponse {
+pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpResponse {
     let client = Client::new();
     let request_version = request.version.clone();
-    let hyper_request = request.to_hyper_request(socket);
+    let hyper_request = request.to_hyper_request(String::from("http://") + socket);
     let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => { println!("{}", e); return construct_error_response(e.to_string(), request_version) } };
     match SerdeHttpResponse::from_hyper_response(response).await {
         Ok(response) => response,
