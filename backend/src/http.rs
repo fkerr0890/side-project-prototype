@@ -146,7 +146,7 @@ impl ServerContext {
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
     println!("http: Received request from browser");
     let request_version = request.version().clone();
-    let serde_request = match SerdeHttpRequest::from_hyper_request(request).await {
+    let mut serde_request = match SerdeHttpRequest::from_hyper_request(request).await {
         Ok(request) => request,
         Err(e) => {
             return Ok(Response::builder()
@@ -159,10 +159,13 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         }
     };
     println!("http: Request uri is {}", serde_request.uri());
-    let search_request = SearchMessage::initial_search_request(serde_request.uri().split("/").collect::<Vec<&str>>()[1].to_owned());
+    let (host_name, path) = get_host_name_and_path(serde_request.uri());
+    serde_request.set_uri(path);
+    let search_request = SearchMessage::initial_search_request(host_name.to_owned());
     context.to_smp.send(StreamMessage::new(
         EndpointPair::default_socket(),
         EndpointPair::default_socket(),
+        host_name.to_owned(),
         search_request.id().to_owned(),
         StreamMessageKind::Request,
         bincode::serialize(&serde_request).unwrap())).ok();
@@ -200,6 +203,7 @@ pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpR
     let client = Client::new();
     let request_version = request.version.clone();
     let hyper_request = request.to_hyper_request(String::from("http://") + socket);
+    println!("{:?}", hyper_request);
     let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => { println!("{}", e); return construct_error_response(e.to_string(), request_version) } };
     match SerdeHttpResponse::from_hyper_response(response).await {
         Ok(response) => response,
@@ -213,4 +217,21 @@ fn construct_error_response(e: String, request_version: String) -> SerdeHttpResp
         .header("Content-Type", "text/plain")
         .header("Content-Length", &body.len().to_string())
         .body(format!("<h1>{}</h1>", body).into_bytes())
+}
+
+fn get_host_name_and_path(uri: &str) -> (String, String) {
+    let mut path = String::new();
+    let mut host_name = String::new();
+    for (i, part) in uri.split("/").enumerate() {
+        if let Some(c) = part.chars().nth(0) {
+            if c == '~' && i == 1 {
+                host_name = part.to_owned().drain(1..).collect();
+                continue;
+            }
+        }
+        path += part;
+        path += "/";
+    }
+    path.pop();
+    return (host_name, path)
 }

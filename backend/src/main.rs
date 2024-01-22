@@ -21,8 +21,8 @@ async fn main() {
     fs::create_dir("../peer_info").await.unwrap();
 
     let mut introducers = Vec::new();
-    let num_hosts = 1;
-    let num_nodes: u16 = 2;
+    let num_hosts = 10;
+    let num_nodes: u16 = 100;
     let mut rng = rand::thread_rng();
     let mut indices = (0..num_nodes).choose_multiple(&mut rng, num_hosts + 1);
     let start = indices.pop().unwrap();
@@ -34,7 +34,7 @@ async fn main() {
         let is_end = host_indices.contains(&i);
         let is_start = start == i;
         tokio::spawn(async move { node.listen(is_start, is_end).await });
-        sleep(Duration::from_millis(TTL*3)).await;
+        sleep(Duration::from_millis(TTL*6)).await;
         println!();
     }
     future::pending::<()>().await;

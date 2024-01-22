@@ -45,7 +45,7 @@ impl Node {
         let peer_ops_clone = peer_ops.clone();
         let mut local_hosts = HashMap::new();
         if is_end {
-            local_hosts.insert(String::new(), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
+            local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
         let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.endpoint_pair, srm_from_gateway, srm_to_gateway), sm_to_smp.clone(), local_hosts.clone(), &peer_ops, &key_store);
         let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.endpoint_pair, dpm_from_gateway, dpm_to_gateway), &peer_ops);
@@ -141,7 +141,7 @@ impl Node {
     }
 
     pub fn as_node_info(&self, peer_ops: Arc<Mutex<PeerOps>>, is_start: bool, is_end: bool) -> NodeInfo {
-        let name = if is_start { String::from("START") } else if is_end { String::from("END") } else { self.endpoint_pair.public_endpoint.port().to_string() };
+        let name = if is_start { String::from("START") } else if is_end { String::from("END") + &self.endpoint_pair.public_endpoint.port().to_string() } else { self.endpoint_pair.public_endpoint.port().to_string() };
         NodeInfo {
             name,
             port: self.endpoint_pair.public_endpoint.port(),

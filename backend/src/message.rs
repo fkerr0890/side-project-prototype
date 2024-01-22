@@ -45,16 +45,18 @@ pub struct StreamMessage {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
+    host_name: String,
     uuid: String,
     position: (usize, usize),
     payload: Vec<u8>
 }
 impl StreamMessage {
-    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, uuid: String, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
+    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, host_name: String, uuid: String, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
         Self {
             dest,
             sender,
             timestamp: datetime_to_timestamp(Utc::now()),
+            host_name,
             uuid,
             position: NO_POSITION,
             kind,
@@ -66,6 +68,7 @@ impl StreamMessage {
     pub fn into_payload(self) -> Vec<u8> { self.payload }
     pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn host_name(&self) -> &str { &self.host_name }
 
     pub fn chunked(self) -> Vec<Self> {
         let (payload, empty_message) = self.extract_payload();
@@ -110,24 +113,24 @@ impl Message for StreamMessage {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMessage {
-    pub kind: MessageKind,
+    pub kind: SearchMessageKind,
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
     uuid: String,
-    payload: Vec<u8>,
+    host_name: String,
     origin: SocketAddrV4,
     expiry: String,
     position: (usize, usize)
 }
 impl SearchMessage {
-    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, payload: Vec<u8>, uuid: String, kind: MessageKind) -> Self {
+    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, host_name: String, uuid: String, kind: SearchMessageKind) -> Self {
         let datetime = Utc::now();
         Self {
             dest,
             sender,
             timestamp: datetime_to_timestamp(datetime),
-            payload,
+            host_name,
             uuid,
             kind,
             origin,
@@ -136,18 +139,18 @@ impl SearchMessage {
         }
     }
 
-    pub fn initial_search_request(query: String) -> Self {
+    pub fn initial_search_request(host_name: String) -> Self {
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
-            query.into_bytes(), Uuid::new_v4().simple().to_string(), MessageKind::Request)
+            host_name, Uuid::new_v4().simple().to_string(), SearchMessageKind::Request)
     }
 
-    pub fn key_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String, public_key: Vec<u8>) -> Self {
-        Self::new(dest, sender, origin, public_key, uuid, MessageKind::Response)
+    pub fn key_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String, host_name: String, public_key: Vec<u8>) -> Self {
+        Self::new(dest, sender, origin, host_name, uuid, SearchMessageKind::Response(public_key))
     }
 
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
     pub fn set_origin(&mut self, origin: SocketAddrV4) { self.origin = origin; }        
-    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
+    // pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.host_name), self) }
 
     // pub fn chunked(self) -> Vec<Self> {
     //     let (payload, empty_message) = self.extract_payload();
@@ -172,9 +175,9 @@ impl SearchMessage {
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn origin(&self) -> SocketAddrV4 { self.origin }
-    pub fn kind(&self) -> &MessageKind { &self.kind }
-    pub fn payload(&self) -> &[u8] { &self.payload }
-    pub fn into_payload(self) -> Vec<u8> { self.payload }
+    pub fn kind(&self) -> &SearchMessageKind { &self.kind }
+    pub fn into_public_key(self) -> Vec<u8> { if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() } }
+    pub fn host_name(&self) -> &str { &self.host_name }
 }
 
 impl Message for SearchMessage {
@@ -259,15 +262,18 @@ impl Message for DiscoverPeerMessage {
         self
     }
 
-    fn check_expiry(&self) -> bool { false }
+    fn check_expiry(&self) -> bool { true }
     fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
     fn position(&self) -> (usize, usize) { NO_POSITION }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum MessageKind {
+pub enum SearchMessageKind {
     Request,
-    Response
+    Response(Vec<u8>)
+}
+impl SearchMessageKind {
+    pub fn public_key(&self) {}
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

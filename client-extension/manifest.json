@@ -3,8 +3,8 @@
     "name": "p2p-client",
     "version": "1.0",  
     "description": "p2p client app",
-    "permissions": ["nativeMessaging", "webRequest", "webRequestBlocking", "activeTab", "scripting"],
-    "host_permissions": ["http://localhost/*"],
+    "permissions": ["webRequest", "webRequestBlocking", "activeTab", "scripting"],
+    "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
     "background": {
       "scripts": ["background.js"]
     },
@@ -13,11 +13,5 @@
     },
     "icons": {
       "48": "icons/hub_FILL0_wght400_GRAD0_opsz48.png"
-    },
-    "browser_specific_settings": {
-      "gecko": {
-        "id": "p2pclient@test.com",
-        "strict_min_version": "50.0"
-      }
     }
   }
