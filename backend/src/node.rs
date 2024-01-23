@@ -58,55 +58,84 @@ impl Node {
     
         tokio::spawn(async move {
             loop {
-                let Some(_) = outbound_srm_gateway.send().await else { return };
+                if let Err(e) = outbound_srm_gateway.send().await {
+                    println!("Outbound srm gateway stopped: {}", e);
+                    return;
+                }
             }
         });
     
         tokio::spawn(async move {
             loop {
-                let Some(_) = outbound_dpm_gateway.send().await else { return };
+                if let Err(e) = outbound_dpm_gateway.send().await {
+                    println!("Outbound dpm gateway stopped: {}", e);
+                    return;
+                }
             }
         });
 
         tokio::spawn(async move {
             loop {
-                let Some(_) = outbound_heartbeat_gateway.send().await else { return };
+                if let Err(e) = outbound_heartbeat_gateway.send().await {
+                    println!("Outbound heartbeat gateway stopped: {}", e);
+                    return;
+                }
             }
         });
 
         tokio::spawn(async move {
-            while let Some(_) = outbound_stream_gateway.send().await {}
+            loop {
+                if let Err(e) = outbound_stream_gateway.send().await {
+                    println!("Outbound stream gateway stopped: {}", e);
+                    return;
+                }
+            }
         });
     
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&self.socket, &srm_to_srp, &dpm_to_dpp, &sm_to_smp);
             tokio::spawn(async move {
                 loop {
-                    let Ok(_) = inbound_gateway.receive().await else { return };
+                    if let Err(e) = inbound_gateway.receive().await {
+                        println!("Inbound gateway stopped: {}", e);
+                        return;
+                    }
                 }
             });
         }
     
         tokio::spawn(async move {
             loop {
-                let Ok(_) = srp.receive().await else { return };            
+                if let Err(e) = srp.receive().await {
+                    println!("Search request processor stopped: {}", e);
+                    return;
+                }
             }
         });
     
         tokio::spawn(async move {
             loop {
-                let Ok(_) = dpp.receive().await else { return };         
+                if let Err(e) = dpp.receive().await {
+                    println!("Discover peer processor stopped: {}", e);
+                    return;
+                }
             }
         });
 
         tokio::spawn(async move {
-            while let Ok(_) = smp.receive().await {}
+            if let Err(e) = smp.receive().await {
+                println!("Stream message processor stopped: {}", e);
+                return;
+            }
         });
         
         tokio::spawn(async move {
             loop {
                 {
-                    let Ok(_) = peer_ops.lock().unwrap().send_heartbeats() else { return };
+                    if let Err(e) = peer_ops.lock().unwrap().send_heartbeats() {
+                        println!("Heartbeats stopped: {}", e);
+                        return;
+                    }
                 }
                 sleep(Duration::from_secs(29)).await;
             }

@@ -53,7 +53,7 @@ impl<T: Serialize + DeserializeOwned + Message + Clone + Send> MessageProcessor<
             sleep(Duration::from_millis(ttl)).await;
             if let Some(tx) = egress {
                 if let Some(message) = early_return_message {
-                    tx.send(message.replace_dest_and_timestamp(dest)).unwrap();
+                    tx.send(message.replace_dest_and_timestamp(dest)).ok();
                 }
             }
             else {
@@ -191,7 +191,7 @@ impl SearchRequestProcessor {
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
-        let mut message = self.message_processor.ingress.recv().await.unwrap();
+        let Some(mut message) = self.message_processor.ingress.recv().await else { return Err(String::from("SearchRequestProcessor: failed to receive message from gateway")) };
         if message.origin() == EndpointPair::default_socket() {
             if self.active_sessions.contains(message.host_name()) {
                 return Ok(());
@@ -368,7 +368,7 @@ impl StreamMessageProcessor {
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
-        let message = self.message_processor.ingress.recv().await.unwrap();
+        let Some(message) = self.message_processor.ingress.recv().await else { return Err(String::from("StreamMessageProcessor: failed to receive message from gateway")) };
         match message {
             StreamMessage { kind: StreamMessageKind::KeyAgreement, ..} => self.handle_key_agreement(message),
             StreamMessage { kind: StreamMessageKind::Request, .. } => self.handle_request(message).await,
@@ -414,11 +414,12 @@ impl StreamMessageProcessor {
         }
         else if let Some(request_parts) = self.message_processor.stage_message(message) {
             let mut request_bytes = StreamMessage::reassemble_message_payload(request_parts);
+            //here
             self.key_store.lock().unwrap().transform(dest, &host_name, &mut request_bytes, Direction::Decode(nonce.unwrap())).unwrap();
-            let request: SerdeHttpRequest = bincode::deserialize(&request_bytes).unwrap();
+            let Ok(request) = bincode::deserialize(&request_bytes) else { return Ok(()) };
             let socket = self.local_hosts.get(&host_name).unwrap();
             let response = http::make_request(request, &socket.to_string()).await;
-            let mut response_bytes = bincode::serialize(&response).unwrap();
+            let Ok(mut response_bytes) = bincode::serialize(&response) else { return Ok(()) };
             let nonce = self.key_store.lock().unwrap().transform(dest, &host_name, &mut response_bytes, Direction::Encode).unwrap();
             let response = StreamMessage::new(
                 dest,
@@ -446,7 +447,7 @@ impl StreamMessageProcessor {
             let (peer_addr, nonce) = (response_parts[0].sender(), response_parts[0].nonce().clone());
             let mut bytes = StreamMessage::reassemble_message_payload(response_parts);
             self.key_store.lock().unwrap().transform(peer_addr, &host_name, &mut bytes, Direction::Decode(nonce.unwrap())).unwrap();
-            let response = bincode::deserialize(&bytes).unwrap();
+            let response = bincode::deserialize(&bytes).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
             self.to_http_handler.send(response).ok();
         }
         Ok(())

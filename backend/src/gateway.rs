@@ -24,12 +24,12 @@ impl<T: Serialize + DeserializeOwned + Message + Debug> OutboundGateway<T> {
         }
     }
 
-    pub async fn send(&mut self) -> Option<usize> {
-        let outbound_message = self.ingress.recv().await?;
+    pub async fn send(&mut self) -> Result<usize, String> {
+        let Some(outbound_message) = self.ingress.recv().await else { return Err(String::from("Gateway: failed to receive from message processing")) };
         // println!("Sending message {:?}", outbound_message);
         let dest = outbound_message.dest();
-        let bytes = &bincode::serialize(&outbound_message).unwrap();
-        Some(self.socket.send_to(bytes, dest).await.unwrap_or_default())
+        let Ok(bytes) = &bincode::serialize(&outbound_message) else { return Ok(0) };
+        self.socket.send_to(bytes, dest).await.map_err(|e| e.to_string())
     }
 }
 

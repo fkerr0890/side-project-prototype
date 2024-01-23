@@ -27,13 +27,13 @@ impl SerdeHttpRequest {
         })
     }
 
-    fn to_hyper_request(self, uri_prefix: String) -> Request<Body> {
+    fn to_hyper_request(self, uri_prefix: String) -> Result<Request<Body>, String> {
         let mut request = Request::new(Body::from(self.body));
-        *request.method_mut() = Method::from_str(&self.method).unwrap();
-        *request.uri_mut() = Uri::from_str(&(uri_prefix + &self.uri)).unwrap();
+        *request.method_mut() = Method::from_str(&self.method).map_err(|e| e.to_string())?;
+        *request.uri_mut() = Uri::from_str(&(uri_prefix + &self.uri)).map_err(|e| e.to_string())?;
         *request.version_mut() = string_to_version(self.version);
-        *request.headers_mut() = reconstruct_header_map(self.headers);
-        request
+        *request.headers_mut() = reconstruct_header_map(self.headers)?;
+        Ok(request)
     }
 
     pub fn uri(&self) -> &str { &self.uri }
@@ -61,9 +61,15 @@ impl SerdeHttpResponse {
 
     fn to_hyper_response(self) -> Response<Body> {
         let mut response = Response::new(Body::from(self.body));
-        *response.status_mut() = StatusCode::from_u16(self.status_code).unwrap();
-        *response.version_mut() = string_to_version(self.version);
-        *response.headers_mut() = reconstruct_header_map(self.headers);
+        *response.status_mut() = match StatusCode::from_u16(self.status_code) {
+            Ok(status_code) => status_code,
+            Err(e) => return construct_error_response(e.to_string(), self.version.clone()).to_hyper_response()
+        };
+        *response.version_mut() = string_to_version(self.version.clone());
+        *response.headers_mut() = match reconstruct_header_map(self.headers) {
+            Ok(headers) => headers,
+            Err(e) => return construct_error_response(e.to_string(), self.version).to_hyper_response()
+        };
         response
     }
 
@@ -122,14 +128,14 @@ fn drain_headers(mut header_map: HeaderMap) -> Result<HashMap<String, Vec<String
     Ok(headers)
 }
 
-fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> HeaderMap {
+fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> Result<HeaderMap, String> {
     let mut header_map = HeaderMap::new();
     for (header_name, header_values) in headers {
         for header_value in header_values {
-            header_map.append(HeaderName::from_str(&header_name).unwrap(), HeaderValue::from_str(&header_value).unwrap());
+            header_map.append(HeaderName::from_str(&header_name).map_err(|e| { e.to_string() })?, HeaderValue::from_str(&header_value).map_err(|e| { e.to_string() })?);
         }
     }
-    header_map
+    Ok(header_map)
 }
 
 #[derive(Clone)]
@@ -161,13 +167,26 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     let (host_name, path) = get_host_name_and_path(serde_request.uri());
     serde_request.set_uri(path);
     let search_request = SearchMessage::initial_search_request(host_name.to_owned());
+    let payload = match bincode::serialize(&serde_request) {
+        Ok(request) => request,
+        Err(e) => {
+            let e = (*e).to_string();
+            return Ok(Response::builder()
+                .status(400)
+                .version(request_version)
+                .header("Content-Type", "text/plain")
+                .header("Content-Length", e.len().to_string())
+                .body(Body::from(e))
+                .unwrap())
+        }
+    };
     context.to_smp.send(StreamMessage::new(
         EndpointPair::default_socket(),
         EndpointPair::default_socket(),
         host_name.to_owned(),
         search_request.id().to_owned(),
         StreamMessageKind::Request,
-        bincode::serialize(&serde_request).unwrap(),
+        payload,
         None)).ok();
     context.to_srp.send(search_request).ok();
     let mut rx = context.from_smp.lock().await;
@@ -202,21 +221,22 @@ pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
 pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpResponse {
     let client = Client::new();
     let request_version = request.version.clone();
-    let hyper_request = request.to_hyper_request(String::from("http://") + socket);
+    let hyper_request = match request.to_hyper_request(String::from("http://") + socket) { Ok(request) => request, Err(e) => return construct_error_response(e.to_string(), request_version) };
     println!("{:?}", hyper_request);
-    let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => { println!("{}", e); return construct_error_response(e.to_string(), request_version) } };
+    let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => return construct_error_response(e.to_string(), request_version) };
     match SerdeHttpResponse::from_hyper_response(response).await {
         Ok(response) => response,
         Err(e) => construct_error_response(e, request_version)
     }
 }
 
-fn construct_error_response(e: String, request_version: String) -> SerdeHttpResponse {
-    let body = e.to_string();
+pub fn construct_error_response(e: String, request_version: String) -> SerdeHttpResponse {
+    println!("http error: {}", e);
+    let body = format!("<h1>{}</h1>", e);
     SerdeHttpResponse::builder(500, request_version)
         .header("Content-Type", "text/plain")
         .header("Content-Length", &body.len().to_string())
-        .body(format!("<h1>{}</h1>", body).into_bytes())
+        .body(body.into_bytes())
 }
 
 fn get_host_name_and_path(uri: &str) -> (String, String) {

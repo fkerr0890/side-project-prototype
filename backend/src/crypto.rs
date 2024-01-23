@@ -50,12 +50,12 @@ impl KeyStore {
         let (aad, key_set) = self.get_key_aad(&(peer_addr.to_string() + host_name), host_name)?;
         match mode {
             Direction::Encode => {
-                key_set.sealing_key.seal_in_place_append_tag(aad, payload).or(Err(Error::Unspecified))?;
-                Ok(key_set.nonce_rx.recv().unwrap().as_ref().to_vec())
+                key_set.sealing_key.seal_in_place_append_tag(aad, payload)?;
+                key_set.nonce_rx.recv().and_then(|nonce| Ok(nonce.as_ref().to_vec())).or_else(|e| Err(Error::Generic(e.to_string())))
             },
             Direction::Decode(nonce_bytes) => {
-                let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes).or(Err(Error::Unspecified))?;
-                key_set.opening_key.open_in_place(nonce, aad, payload).map(|_| ()).or(Err(Error::Unspecified))?;
+                let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)?;
+                key_set.opening_key.open_in_place(nonce, aad, payload)?;
                 Ok(Vec::with_capacity(0))
             }
         }
@@ -70,7 +70,7 @@ impl KeyStore {
         }
         let symmetric_key = agreement::agree_ephemeral(my_private_key, &peer_public_key, |key_material| {
             hkdf::Salt::new(HKDF_SHA256, &INITIAL_SALT).extract(key_material)
-        }).or(Err(Error::Unspecified))?;
+        })?;
         let mut symmetric_key_bytes = vec![0u8; HKDF_SHA256.len()];
         let mut initial_nonce = vec![0u8; HKDF_SHA256.len()];
         symmetric_key.expand(&[b"sym"], HKDF_SHA256).unwrap().fill(&mut symmetric_key_bytes).unwrap();
@@ -96,7 +96,7 @@ impl aead::NonceSequence for CurrentNonce {
         let bytes = self.0.to_be_bytes();
         let nonce = aead::Nonce::try_assume_unique_for_key(&bytes[bytes.len() - aead::NONCE_LEN..])?;
         let nonce_copy = aead::Nonce::try_assume_unique_for_key(&bytes[bytes.len() - aead::NONCE_LEN..])?;
-        self.1.send(nonce_copy).unwrap();
+        self.1.send(nonce_copy).ok();
         Ok(nonce)
     }
 }
@@ -104,7 +104,13 @@ impl aead::NonceSequence for CurrentNonce {
 #[derive(Debug)]
 pub enum Error {
     NoKey,
-    Unspecified
+    Unspecified,
+    Generic(String)
+}
+impl From<ring::error::Unspecified> for Error {
+    fn from(_value: ring::error::Unspecified) -> Self {
+        Error::Unspecified
+    }
 }
 
 pub enum Direction {
