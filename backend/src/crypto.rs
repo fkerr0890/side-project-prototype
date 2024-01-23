@@ -38,7 +38,7 @@ impl KeyStore {
 
     pub fn host_public_key(&mut self, peer_addr: SocketAddrV4, egress: tokio::sync::mpsc::UnboundedSender<Heartbeat>, sender: SocketAddrV4, host_name: &str) -> agreement::PublicKey {
         let (tx, rx) = oneshot::channel();
-        // send_rapid_heartbeats(rx, egress, sender, peer_addr);
+        send_rapid_heartbeats(rx, egress, sender, peer_addr);
         self.generate_key_pair(peer_addr.to_string() + host_name, Some(tx))
     }
 

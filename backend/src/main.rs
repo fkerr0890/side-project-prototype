@@ -22,7 +22,7 @@ async fn main() {
 
     let mut introducers = Vec::new();
     let num_hosts = 1;
-    let num_nodes: u16 = 100;
+    let num_nodes: u16 = 2;
     let mut rng = rand::thread_rng();
     let mut indices = (0..num_nodes).choose_multiple(&mut rng, num_hosts + 1);
     let start = indices.pop().unwrap();

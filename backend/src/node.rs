@@ -103,14 +103,14 @@ impl Node {
             while let Ok(_) = smp.receive().await {}
         });
         
-        // tokio::spawn(async move {
-        //     loop {
-        //         {
-        //             let Ok(_) = peer_ops.lock().unwrap().send_heartbeats() else { return };
-        //         }
-        //         sleep(Duration::from_secs(29)).await;
-        //     }
-        // });
+        tokio::spawn(async move {
+            loop {
+                {
+                    let Ok(_) = peer_ops.lock().unwrap().send_heartbeats() else { return };
+                }
+                sleep(Duration::from_secs(29)).await;
+            }
+        });
 
         if let Some(introducer) = self.introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
