@@ -26,7 +26,7 @@ impl<T: Serialize + DeserializeOwned + Message + Debug> OutboundGateway<T> {
 
     pub async fn send(&mut self) -> Option<usize> {
         let outbound_message = self.ingress.recv().await?;
-        println!("Sending message {:?}", outbound_message);
+        // println!("Sending message {:?}", outbound_message);
         let dest = outbound_message.dest();
         let bytes = &bincode::serialize(&outbound_message).unwrap();
         Some(self.socket.send_to(bytes, dest).await.unwrap_or_default())
@@ -55,7 +55,7 @@ impl InboundGateway {
         let mut buf = [0; 1024];
         match  self.socket.recv_from(&mut buf).await {
             Ok(result) => self.handle_message(&buf[..result.0]).await,
-            Err(e) => { log_debug(&e.to_string()); Ok(()) }
+            Err(e) => { println!("Inbound gateway: receive error {}", e.to_string()); Ok(()) }
         }
         // log_debug(&format!("Received {n} bytes"));
     }
@@ -71,7 +71,6 @@ impl InboundGateway {
             Ok(println!("{:?}", message))
         }
         else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
-            println!("Received stream message");
             self.to_smp.send(message).map_err(|e| { e.to_string() } )
         }
         else {

@@ -48,10 +48,11 @@ pub struct StreamMessage {
     host_name: String,
     uuid: String,
     position: (usize, usize),
-    payload: Vec<u8>
+    payload: Vec<u8>,
+    nonce: Option<Vec<u8>>
 }
 impl StreamMessage {
-    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, host_name: String, uuid: String, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
+    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, host_name: String, uuid: String, kind: StreamMessageKind, payload: Vec<u8>, nonce: Option<Vec<u8>>) -> Self {
         Self {
             dest,
             sender,
@@ -60,7 +61,8 @@ impl StreamMessage {
             uuid,
             position: NO_POSITION,
             kind,
-            payload
+            payload,
+            nonce
         }
     }
 
@@ -69,6 +71,7 @@ impl StreamMessage {
     pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn host_name(&self) -> &str { &self.host_name }
+    pub fn nonce(&self) -> &Option<Vec<u8>> { &self.nonce }
 
     pub fn chunked(self) -> Vec<Self> {
         let (payload, empty_message) = self.extract_payload();
@@ -88,6 +91,7 @@ impl StreamMessage {
     }
 
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
+    pub fn set_nonce(&mut self, nonce: Vec<u8>) { self.nonce = Some(nonce); }
 
     pub fn reassemble_message_payload(mut messages: Vec<Self>) -> Vec<u8> {
         messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));

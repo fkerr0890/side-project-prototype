@@ -144,7 +144,6 @@ impl ServerContext {
 }
 
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
-    println!("http: Received request from browser");
     let request_version = request.version().clone();
     let mut serde_request = match SerdeHttpRequest::from_hyper_request(request).await {
         Ok(request) => request,
@@ -168,7 +167,8 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         host_name.to_owned(),
         search_request.id().to_owned(),
         StreamMessageKind::Request,
-        bincode::serialize(&serde_request).unwrap())).ok();
+        bincode::serialize(&serde_request).unwrap(),
+        None)).ok();
     context.to_srp.send(search_request).ok();
     let mut rx = context.from_smp.lock().await;
     let response = match rx.recv().await {
