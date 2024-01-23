@@ -54,10 +54,9 @@ impl InboundGateway {
     pub async fn receive(&mut self)  -> EmptyResult {
         let mut buf = [0; 1024];
         match  self.socket.recv_from(&mut buf).await {
-            Ok(result) => self.handle_message(&buf[..result.0]).await,
+            Ok((n, _)) => self.handle_message(&buf[..n]).await,
             Err(e) => { println!("Inbound gateway: receive error {}", e.to_string()); Ok(()) }
         }
-        // log_debug(&format!("Received {n} bytes"));
     }
     
     async fn handle_message(&self, message_bytes: &[u8]) -> EmptyResult {
