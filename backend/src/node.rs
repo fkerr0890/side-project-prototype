@@ -123,9 +123,11 @@ impl Node {
         });
 
         tokio::spawn(async move {
-            if let Err(e) = smp.receive().await {
-                println!("Stream message processor stopped: {}", e);
-                return;
+            loop {
+                if let Err(e) = smp.receive().await {
+                    println!("Stream message processor stopped: {}", e);
+                    return;
+                }
             }
         });
         
