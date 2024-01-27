@@ -1,4 +1,4 @@
-use std::{net::{SocketAddrV4, Ipv4Addr, SocketAddr}, fmt::Display, sync::{Arc, Mutex}, collections::HashMap, time::Duration, future};
+use std::{net::{SocketAddrV4, Ipv4Addr, SocketAddr}, fmt::Display, sync::{Arc, Mutex}, collections::HashMap, time::Duration, future, str::FromStr};
 
 use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
@@ -11,20 +11,23 @@ pub struct Node {
     uuid: String,
     nat_kind: NatKind,
     socket: Arc<UdpSocket>,
-    introducer: Option<EndpointPair>
+    introducer: Option<EndpointPair>,
+    initial_peers: Option<Vec<String>>
 }
 
 impl Node {
-    pub async fn new(private_ip: &str, uuid: Uuid, introducer: Option<&EndpointPair>) -> Self {
-        let socket = Arc::new(UdpSocket::bind(private_ip).await.unwrap());
-        let public_endpoint = SocketAddrV4::new(private_ip[..private_ip.len() - 2].parse().unwrap(), socket.local_addr().unwrap().port());
-        let private_endpoint = SocketAddrV4::new(private_ip[..private_ip.len() - 2].parse().unwrap(), socket.local_addr().unwrap().port());
+    pub async fn new(private_ip: String, port: String, uuid: Uuid, introducer: Option<&EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
+        let socket = Arc::new(UdpSocket::bind(private_ip.clone() + ":" + &port).await.unwrap());
+        let public_endpoint = SocketAddrV4::new(private_ip.parse().unwrap(), socket.local_addr().unwrap().port());
+        let private_endpoint = SocketAddrV4::new(private_ip.parse().unwrap(), socket.local_addr().unwrap().port());
+        println!("public: {:?}", public_endpoint);
         Self {
             endpoint_pair: EndpointPair::new(public_endpoint, private_endpoint),
             uuid: uuid.simple().to_string(),
             nat_kind: NatKind::Unknown,
             socket,
-            introducer: introducer.copied()
+            introducer: introducer.copied(),
+            initial_peers
         }
     }
 
@@ -152,6 +155,13 @@ impl Node {
                 (peer::MAX_PEERS, peer::MAX_PEERS));
             message.add_peer(introducer);
             self.socket.send_to(&bincode::serialize(&message).unwrap(), message.dest()).await.unwrap();
+        }
+        else if let Some(initial_peers) = &self.initial_peers {
+            for peer in initial_peers {
+                let public_endpoint = SocketAddrV4::from_str(peer).unwrap();
+                let private_endpoint = SocketAddrV4::from_str(peer).unwrap();
+                peer_ops_clone.lock().unwrap().add_initial_peer(EndpointPair::new(public_endpoint, private_endpoint));
+            }
         }
         else {
             gateway::log_debug("No introducer");
