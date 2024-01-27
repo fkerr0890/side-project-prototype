@@ -66,12 +66,18 @@ impl StreamMessage {
         }
     }
 
+    pub fn payload(&self) -> &Vec<u8> { &self.payload }
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn into_payload(self) -> Vec<u8> { self.payload }
+    pub fn into_payload_host_name(self) -> (Vec<u8>, String) { (self.payload, self.host_name) }
     pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn nonce(&self) -> &Option<Vec<u8>> { &self.nonce }
+    pub fn into_host_name_uuid_nonce_payload(self) -> (String, String, Vec<u8>, Vec<u8>) {
+        let nonce = if let Some(nonce) = self.nonce { nonce } else { panic!() };
+        (self.host_name, self.uuid, nonce, self.payload)
+    }
 
     pub fn chunked(self) -> Vec<Self> {
         let (payload, empty_message) = self.extract_payload();
@@ -93,13 +99,16 @@ impl StreamMessage {
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
     pub fn set_nonce(&mut self, nonce: Vec<u8>) { self.nonce = Some(nonce); }
 
-    pub fn reassemble_message_payload(mut messages: Vec<Self>) -> Vec<u8> {
+    pub fn reassemble_message(mut messages: Vec<Self>) -> Self {
         messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
+        let last = messages.pop().unwrap();
+        let (mut last_bytes, base_message) = last.extract_payload();
         let mut bytes = Vec::new();
         for message in messages {
             bytes.append(&mut message.into_payload());
         }
-        bytes
+        bytes.append(&mut last_bytes);
+        base_message.set_payload(bytes)
     }
 }
 impl Message for StreamMessage {
@@ -153,7 +162,7 @@ impl SearchMessage {
     }
 
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
-    pub fn set_origin(&mut self, origin: SocketAddrV4) { self.origin = origin; }        
+    pub fn set_origin(&mut self, origin: SocketAddrV4) { self.origin = origin; }
     // pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.host_name), self) }
 
     // pub fn chunked(self) -> Vec<Self> {
@@ -180,8 +189,12 @@ impl SearchMessage {
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn origin(&self) -> SocketAddrV4 { self.origin }
     pub fn kind(&self) -> &SearchMessageKind { &self.kind }
-    pub fn into_public_key(self) -> Vec<u8> { if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() } }
+    pub fn into_uuid_host_name_public_key(self) -> (String, String, Vec<u8>) {
+        let public_key = if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() };
+        (self.uuid, self.host_name, public_key)
+    }
     pub fn host_name(&self) -> &str { &self.host_name }
+    pub fn into_uuid_host_name(self) -> (String, String) { (self.uuid, self.host_name) }
 }
 
 impl Message for SearchMessage {

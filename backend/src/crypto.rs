@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddrV4, time::Duration, sync::mpsc};
+use std::{collections::HashMap, net::SocketAddrV4, time::Duration, sync::mpsc, fmt::Display};
 
 use chrono::Utc;
 use ring::{aead::{self, AES_256_GCM, BoundKey}, rand::SystemRandom, agreement, hkdf::{self, HKDF_SHA256, KeyType}};
@@ -110,6 +110,15 @@ pub enum Error {
 impl From<ring::error::Unspecified> for Error {
     fn from(_value: ring::error::Unspecified) -> Self {
         Error::Unspecified
+    }
+}
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoKey => write!(f, "crypto: Failed to find key"),
+            Self::Unspecified => write!(f, "crypto: Unspecified error"),
+            Self::Generic(e) => write!(f, "crypto: {}", e)
+        }
     }
 }
 
