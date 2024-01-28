@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use serde::{Serialize, Deserialize};
 
-use crate::node::EndpointPair;
+use crate::{node::EndpointPair, message_processing::send_error_response};
 
 use chrono::Utc;
 use priority_queue::DoublePriorityQueue;
@@ -58,7 +58,7 @@ impl PeerOps {
                     .set_sender(self.endpoint_pair.public_endpoint)
                     .replace_dest_and_timestamp(peer.0.public_endpoint);
                 if message.check_expiry() {
-                    tx.send(message).map_err(|e| { e.to_string() })?;
+                    tx.send(message).map_err(|e| send_error_response(e, file!(), line!()))?;
                 }
                 else {
                     println!("PeerOps: Message expired: {:?}", message);
@@ -72,7 +72,7 @@ impl PeerOps {
     pub fn send_heartbeats(&self) -> EmptyResult {
         for peer in self.peers.iter() {
             let heartbeat = Heartbeat::new(peer.0.public_endpoint, self.endpoint_pair.public_endpoint, message::datetime_to_timestamp(Utc::now()));
-            self.heartbeat_tx.send(heartbeat).map_err(|e| { e.to_string() })?;
+            self.heartbeat_tx.send(heartbeat).map_err(|e| send_error_response(e, file!(), line!()))?;
         }
         Ok(())
     }

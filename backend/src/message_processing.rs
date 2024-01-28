@@ -9,6 +9,10 @@ pub static SEARCH_TIMEOUT: i64 = 30;
 pub static TTL: u64 = 200;
 const SRP_TTL: u64 = 30000;
 
+pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str, line: u32) -> String {
+    format!("{} {} {}", send_error.to_string(), file, line)
+}
+
 pub struct MessageProcessor<T> {
     endpoint_pair: EndpointPair,
     breadcrumbs: Arc<Mutex<HashMap<String, SocketAddrV4>>>,
@@ -45,8 +49,6 @@ impl<T: Serialize + DeserializeOwned + Message + Clone + Send> MessageProcessor<
 
     fn set_breadcrumb_ttl(&self, egress: Option<mpsc::UnboundedSender<DiscoverPeerMessage>>, early_return_message: Option<DiscoverPeerMessage>, id: &str, ttl: u64) {
         let breadcrumbs_clone = self.breadcrumbs.clone();
-        // let early_return_tx = early_return_tx.clone();
-        // let early_return_message = early_return_message.clone();
         let dest = self.endpoint_pair.public_endpoint;
         let id = id.to_owned();
         tokio::spawn(async move {
@@ -63,16 +65,16 @@ impl<T: Serialize + DeserializeOwned + Message + Clone + Send> MessageProcessor<
         });
     }
 
-    fn return_responses(&mut self, search_responses: Vec<T>, delete_breadcrumb: bool) -> Result<Option<Vec<T>>, String> {
+    fn return_responses(&mut self, search_responses: Vec<T>) -> Result<Option<Vec<T>>, String> {
         let breadcrumbs = self.breadcrumbs.lock().unwrap();
-        let Some(dest) = (if delete_breadcrumb { breadcrumbs.get(search_responses[0].id()).cloned() } else { breadcrumbs.get(search_responses[0].id()).cloned() }) else { return Ok(None) };
+        let Some(dest) = breadcrumbs.get(search_responses[0].id()).cloned() else { return Ok(None) };
         // gateway::log_debug(&format!("Returning search responses to {dest}"));
         if dest == EndpointPair::default_socket() {
             Ok(Some(search_responses))
         }
         else {
             for response in search_responses {
-                self.egress.send(response.replace_dest_and_timestamp(dest)).map_err(|e| { e.to_string() })?;
+                self.egress.send(response.replace_dest_and_timestamp(dest)).map_err(|e| send_error_response(e, file!(), line!()))?;
             }
             Ok(None)
         }
@@ -168,7 +170,7 @@ impl SearchRequestProcessor {
     }
 
     fn return_search_responses(&mut self, search_responses: Vec<SearchMessage>) -> EmptyResult {
-        if let Some(mut search_responses) = self.message_processor.return_responses(search_responses, true)? {
+        if let Some(mut search_responses) = self.message_processor.return_responses(search_responses)? {
             let message = search_responses.pop().unwrap();
             let origin = message.origin();
             let (uuid, host_name, peer_public_key) = message.into_uuid_host_name_public_key();
@@ -177,7 +179,7 @@ impl SearchRequestProcessor {
             key_store.agree(origin, &host_name, peer_public_key).unwrap();
             self.to_smp
                 .send(StreamMessage::new(origin, EndpointPair::default_socket(), host_name, uuid, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec(), None))
-                .map_err(|e| { e.to_string() })?;
+                .map_err(|e| send_error_response(e, file!(), line!()))?;
         }
         Ok(())
     }
@@ -188,9 +190,10 @@ impl SearchRequestProcessor {
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
-        let Some(mut message) = self.message_processor.ingress.recv().await else { return Err(String::from("SearchRequestProcessor: failed to receive message from gateway")) };
+        let mut message = self.message_processor.ingress.recv().await.ok_or("SearchRequestProcessor: failed to receive message from gateway")?;
         if message.origin() == EndpointPair::default_socket() {
             if self.active_sessions.contains(message.host_name()) {
+                println!("SearchMessageProcessor: Blocked search request for {}, reason: active session exists", message.host_name());
                 return Ok(());
             }
             self.active_sessions.insert(message.host_name().to_owned());
@@ -222,7 +225,7 @@ impl DiscoverPeerProcessor {
     }
 
     pub async fn receive(&mut self) -> EmptyResult {
-        let message = self.message_processor.ingress.recv().await.ok_or("Channel closed")?;
+        let message = self.message_processor.ingress.recv().await.ok_or("DiscoverPeerProcessor: failed to receive message from gateway")?;
         match message {
             DiscoverPeerMessage { kind: DpMessageKind::INeedSome, .. } => self.request_new_peers(message),
             DiscoverPeerMessage { kind: DpMessageKind::Request, ..} => self.propogate_request(message),
@@ -298,12 +301,7 @@ impl DiscoverPeerProcessor {
 
     fn return_response(&mut self, mut response: DiscoverPeerMessage) -> EmptyResult {
         response.add_peer(self.message_processor.endpoint_pair);
-        // if response.sender() != self.message_processor.endpoint_pair.public_endpoint {
-        //     response.increment_hop_count();
-        // }
-        // gateway::log_debug(&format!("Peers along the way: {:?}", response.peer_list()));
-        let delete_breadcrumb = response.peer_list().len() == response.hop_count().1 as usize;
-        if let Some(mut responses) = self.message_processor.return_responses(vec![response], delete_breadcrumb)? {
+        if let Some(mut responses) = self.message_processor.return_responses(vec![response])? {
             let to_be_staged = responses.pop().unwrap();
             let uuid = to_be_staged.id().to_owned();
             if self.stage_message(to_be_staged) {
@@ -331,7 +329,7 @@ impl DiscoverPeerProcessor {
             .set_kind(DpMessageKind::Request)
             .set_origin_if_unset(self.message_processor.endpoint_pair.public_endpoint)
             .replace_dest_and_timestamp(introducer.public_endpoint))
-            .map_err(|e| { e.to_string() })
+            .map_err(|e| send_error_response(e, file!(), line!()))
     }
 
     fn add_new_peers(&self, message: DiscoverPeerMessage) -> EmptyResult {
@@ -367,7 +365,7 @@ impl StreamMessageProcessor {
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
-        let Some(message) = self.message_processor.ingress.recv().await else { return Err(String::from("StreamMessageProcessor: failed to receive message from gateway")) };
+        let message = self.message_processor.ingress.recv().await.ok_or("StreamMessageProcessor: failed to receive message from gateway")?;
         match message {
             StreamMessage { kind: StreamMessageKind::KeyAgreement, ..} => self.handle_key_agreement(message).await,
             StreamMessage { kind: StreamMessageKind::Request, .. } => self.handle_request(message).await,
@@ -378,19 +376,24 @@ impl StreamMessageProcessor {
     async fn handle_key_agreement(&mut self, message: StreamMessage) -> EmptyResult {
         let (sender, dest, uuid) = (message.sender(), message.dest(), message.id().to_owned());
         if sender == EndpointPair::default_socket() {
-            self.message_processor.egress.send(message.set_sender(self.message_processor.endpoint_pair.public_endpoint)).ok();
-            let Some(cached_message) = self.cached_messages.get(&uuid) else { return Ok(()) };
+            let Some(cached_message) = self.cached_messages.get(&uuid) else {
+                println!("StreamMessageProcessor: blocked key agreement/initial request from client to host {:?}, reason: request expired for resource {}", dest, uuid);
+                return Ok(())
+            };
             if let StreamMessageKind::Request = cached_message.kind {
-                self.send_cached_request(cached_message.clone(), dest)?;
+                self.message_processor.egress.send(message.set_sender(self.message_processor.endpoint_pair.public_endpoint)).map_err(|e| send_error_response(e, file!(), line!()))?;
+                self.send_cached_request(cached_message.clone(), dest)
             }
-            Ok(())
+            else {
+                Ok(println!("StreamMessageProcessor: blocked key agreement/initial request from client to host {:?}, reason: already received resource {}", dest, uuid))
+            }
         }
         else {
             let (peer_public_key, host_name) = message.into_payload_host_name();
             self.key_store.lock().unwrap().agree(sender, &host_name, peer_public_key).unwrap();
             if let Some(cached_message) = self.cached_messages.remove(&uuid) {
                 let (host_name, uuid, nonce, mut payload) = cached_message.into_host_name_uuid_nonce_payload();
-                self.key_store.lock().unwrap().transform(sender, &host_name, &mut payload, Direction::Decode(nonce)).map_err(|e| format!("{} {} {}", e.to_string(), file!(), line!()))?;
+                self.key_store.lock().unwrap().transform(sender, &host_name, &mut payload, Direction::Decode(nonce)).map_err(|e| e.error_response(file!(), line!()))?;
                 self.send_response(&payload, sender, host_name, uuid).await?;
             }
             Ok(())
@@ -398,10 +401,10 @@ impl StreamMessageProcessor {
     }
 
     fn send_cached_request(&self, mut cached_message: StreamMessage, dest: SocketAddrV4) -> EmptyResult {
-        let nonce = self.key_store.lock().unwrap().transform(dest, &cached_message.host_name().to_owned(), cached_message.payload_mut(), Direction::Encode).unwrap();
+        let nonce = self.key_store.lock().unwrap().transform(dest, &cached_message.host_name().to_owned(), cached_message.payload_mut(), Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
         cached_message.set_nonce(nonce.clone());
         for message in cached_message.set_sender(self.message_processor.endpoint_pair.public_endpoint).replace_dest_and_timestamp(dest).chunked() {
-            self.message_processor.egress.send(message).ok();
+            self.message_processor.egress.send(message).map_err(|e| send_error_response(e, file!(), line!()))?;
         }
         Ok(())
     }
@@ -423,7 +426,7 @@ impl StreamMessageProcessor {
             return match crypto_result {
                 Ok(_) => self.send_response(message.payload(), dest, host_name, uuid).await,
                 Err(Error::NoKey) => { self.cached_messages.insert(uuid, message); Ok(()) }
-                Err(e) => Err(e.to_string())
+                Err(e) => Err(e.error_response(file!(), line!()))
             };
         }
         Ok(())
@@ -434,7 +437,7 @@ impl StreamMessageProcessor {
         let socket = self.local_hosts.get(&host_name).unwrap();
         let response = http::make_request(request, &socket.to_string()).await;
         let Ok(mut response_bytes) = bincode::serialize(&response) else { return Ok(()) };
-        let nonce = self.key_store.lock().unwrap().transform(dest, &host_name, &mut response_bytes, Direction::Encode).map_err(|e| format!("{} {} {}", e.to_string(), file!(), line!()))?;
+        let nonce = self.key_store.lock().unwrap().transform(dest, &host_name, &mut response_bytes, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
         let response = StreamMessage::new(
             dest,
             self.message_processor.endpoint_pair.public_endpoint,
@@ -444,7 +447,7 @@ impl StreamMessageProcessor {
             response_bytes,
             Some(nonce));
         for message in response.chunked() {
-            self.message_processor.egress.send(message).ok();
+            self.message_processor.egress.send(message).map_err(|e| send_error_response(e, file!(), line!()))?;
         }
         Ok(())
     }
@@ -452,7 +455,10 @@ impl StreamMessageProcessor {
     fn handle_response(&mut self, message: StreamMessage) -> EmptyResult {
         if let Some(response_parts) = self.message_processor.stage_message(message) {
             let message = StreamMessage::reassemble_message(response_parts);
-            let Some(cached_message) = self.cached_messages.remove(message.id()) else { return Ok(()) };
+            let Some(cached_message) = self.cached_messages.remove(message.id()) else {
+                println!("StreamMessageProcessor: blocked response from host {:?}, reason: unsolicited response for resource {}", message.sender(), message.id());
+                return Ok(())
+            };
             let Some(resource_queue) = self.resource_queues.get_mut(message.host_name()) else {
                 self.active_sessions.insert(message.host_name().to_owned(), message.sender());
                 return self.return_resource(message);
@@ -472,8 +478,8 @@ impl StreamMessageProcessor {
     fn return_resource(&self, message: StreamMessage) -> EmptyResult {
         let sender = message.sender();
         let (host_name, .., nonce, mut payload) = message.into_host_name_uuid_nonce_payload();
-        self.key_store.lock().unwrap().transform(sender, &host_name, &mut payload, Direction::Decode(nonce)).map_err(|e| format!("{} {} {}", e.to_string(), file!(), line!()))?;
+        self.key_store.lock().unwrap().transform(sender, &host_name, &mut payload, Direction::Decode(nonce)).map_err(|e| e.error_response(file!(), line!()))?;
         let response = bincode::deserialize(&payload).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
-        self.to_http_handler.send(response).map_err(|e| e.to_string())
+        self.to_http_handler.send(response).map_err(|e| send_error_response(e, file!(), line!()))
     }
 }

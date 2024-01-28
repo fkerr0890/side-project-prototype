@@ -107,6 +107,11 @@ pub enum Error {
     Unspecified,
     Generic(String)
 }
+impl Error {
+    pub fn error_response(&self, file: &str, line: u32) -> String {
+        format!("{} {} {}", self.to_string(), file, line)
+    }
+}
 impl From<ring::error::Unspecified> for Error {
     fn from(_value: ring::error::Unspecified) -> Self {
         Error::Unspecified
