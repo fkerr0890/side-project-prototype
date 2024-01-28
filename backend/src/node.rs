@@ -16,9 +16,9 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(private_ip: String, port: String, uuid: Uuid, introducer: Option<&EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
-        let socket = Arc::new(UdpSocket::bind(private_ip.clone() + ":" + &port).await.unwrap());
-        let public_endpoint = SocketAddrV4::new(private_ip.parse().unwrap(), socket.local_addr().unwrap().port());
+    pub async fn new(private_ip: String, private_port: String, public_ip: &str, uuid: Uuid, introducer: Option<&EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
+        let socket = Arc::new(UdpSocket::bind(private_ip.clone() + ":" + &private_port).await.unwrap());
+        let public_endpoint = SocketAddrV4::new(public_ip.parse().unwrap(), socket.local_addr().unwrap().port());
         let private_endpoint = SocketAddrV4::new(private_ip.parse().unwrap(), socket.local_addr().unwrap().port());
         println!("public: {:?}", public_endpoint);
         Self {

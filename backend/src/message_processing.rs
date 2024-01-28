@@ -1,4 +1,4 @@
-use std::{net::SocketAddrV4, collections::{HashMap, HashSet}, time::Duration, sync::{Arc, Mutex}};
+use std::{net::SocketAddrV4, collections::{HashMap, HashSet, VecDeque}, time::Duration, sync::{Arc, Mutex}};
 
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{sync::{oneshot, mpsc}, time::sleep};
@@ -349,7 +349,8 @@ pub struct StreamMessageProcessor {
     cached_messages: HashMap<String, StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
     to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>,
-    active_sessions: HashMap<String, (SocketAddrV4, HashSet<String>)>
+    active_sessions: HashMap<String, SocketAddrV4>,
+    resource_queues: HashMap<String, VecDeque<String>>
 }
 impl StreamMessageProcessor {
     pub fn new(message_processor: MessageProcessor<StreamMessage>, key_store: &Arc<Mutex<KeyStore>>, local_hosts: HashMap<String, SocketAddrV4>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>) -> Self {
@@ -360,7 +361,8 @@ impl StreamMessageProcessor {
             cached_messages: HashMap::new(),
             local_hosts,
             to_http_handler,
-            active_sessions: HashMap::new()
+            active_sessions: HashMap::new(),
+            resource_queues: HashMap::new()
         }
     }
 
@@ -377,8 +379,11 @@ impl StreamMessageProcessor {
         let (sender, dest, uuid) = (message.sender(), message.dest(), message.id().to_owned());
         if sender == EndpointPair::default_socket() {
             self.message_processor.egress.send(message.set_sender(self.message_processor.endpoint_pair.public_endpoint)).ok();
-            let cached_message = self.cached_messages.get(&uuid).unwrap();
-            self.send_cached_request(cached_message.clone(), dest)
+            let Some(cached_message) = self.cached_messages.get(&uuid) else { return Ok(()) };
+            if let StreamMessageKind::Request = cached_message.kind {
+                self.send_cached_request(cached_message.clone(), dest)?;
+            }
+            Ok(())
         }
         else {
             let (peer_public_key, host_name) = message.into_payload_host_name();
@@ -404,12 +409,12 @@ impl StreamMessageProcessor {
     async fn handle_request(&mut self, message: StreamMessage) -> EmptyResult {
         let (dest, uuid, host_name, nonce) = (message.sender(), message.id().to_owned(), message.host_name().to_owned(), message.nonce().clone());
         if message.sender() == EndpointPair::default_socket() {
-            if let Some((dest, _)) = self.active_sessions.get(&host_name) {
-                println!("Found active session for {}", &host_name);
+            self.cached_messages.insert(uuid.clone(), message.clone());
+            if let Some(dest) = self.active_sessions.get(&host_name) {
+                println!("Found active session for {}, pushed: {}", host_name, uuid);
+                let resource_queue = self.resource_queues.entry(host_name).or_default();
+                resource_queue.push_back(uuid);
                 return self.send_cached_request(message, *dest);
-            }
-            else {
-                self.cached_messages.insert(uuid, message);
             }
         }
         else if let Some(request_parts) = self.message_processor.stage_message(message) {
@@ -446,18 +451,29 @@ impl StreamMessageProcessor {
 
     fn handle_response(&mut self, message: StreamMessage) -> EmptyResult {
         if let Some(response_parts) = self.message_processor.stage_message(message) {
-            let sender = response_parts[0].sender();
             let message = StreamMessage::reassemble_message(response_parts);
-            let (host_name, uuid, nonce, mut payload) = message.into_host_name_uuid_nonce_payload();
-            self.key_store.lock().unwrap().transform(sender, &host_name, &mut payload, Direction::Decode(nonce)).unwrap();
-            let (_socket, active_session_ids) = self.active_sessions.entry(host_name).or_insert((sender, HashSet::new()));
-            if active_session_ids.contains(&uuid) {
-                return Ok(());
+            let Some(cached_message) = self.cached_messages.remove(message.id()) else { return Ok(()) };
+            let Some(resource_queue) = self.resource_queues.get_mut(message.host_name()) else {
+                self.active_sessions.insert(message.host_name().to_owned(), message.sender());
+                return self.return_resource(message);
+            };
+            if resource_queue.front().unwrap() == message.id() {
+                println!("Popped: {}", resource_queue.pop_front().unwrap());
+                let cached_message = if let StreamMessageKind::Response = cached_message.kind { cached_message } else { message };
+                return self.return_resource(cached_message)
             }
-            active_session_ids.insert(uuid);
-            let response = bincode::deserialize(&payload).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
-            self.to_http_handler.send(response).ok();
+            else {
+                self.cached_messages.insert( message.id().to_owned(), message);
+            }
         }
         Ok(())
+    }
+
+    fn return_resource(&self, message: StreamMessage) -> EmptyResult {
+        let sender = message.sender();
+        let (host_name, .., nonce, mut payload) = message.into_host_name_uuid_nonce_payload();
+        self.key_store.lock().unwrap().transform(sender, &host_name, &mut payload, Direction::Decode(nonce)).map_err(|e| format!("{} {} {}", e.to_string(), file!(), line!()))?;
+        let response = bincode::deserialize(&payload).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
+        self.to_http_handler.send(response).map_err(|e| e.to_string())
     }
 }

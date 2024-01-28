@@ -61,6 +61,7 @@ impl InboundGateway {
     
     async fn handle_message(&self, message_bytes: &[u8]) -> EmptyResult {
         if let Ok(message) = bincode::deserialize::<SearchMessage>(message_bytes) {
+            println!("Received search message, uuid: {}", message.id());
             self.to_srp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
@@ -70,6 +71,7 @@ impl InboundGateway {
             Ok(println!("{:?}", message))
         }
         else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
+            println!("Received stream message, uuid: {}", message.id());
             self.to_smp.send(message).map_err(|e| { e.to_string() } )
         }
         else {
