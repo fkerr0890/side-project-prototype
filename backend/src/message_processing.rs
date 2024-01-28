@@ -399,9 +399,9 @@ impl StreamMessageProcessor {
 
     fn send_cached_request(&self, mut cached_message: StreamMessage, dest: SocketAddrV4) -> EmptyResult {
         let nonce = self.key_store.lock().unwrap().transform(dest, &cached_message.host_name().to_owned(), cached_message.payload_mut(), Direction::Encode).unwrap();
-        for mut message in cached_message.chunked() {
-            message.set_nonce(nonce.clone());
-            self.message_processor.egress.send(message.set_sender(self.message_processor.endpoint_pair.public_endpoint).replace_dest_and_timestamp(dest)).ok();
+        cached_message.set_nonce(nonce.clone());
+        for message in cached_message.set_sender(self.message_processor.endpoint_pair.public_endpoint).replace_dest_and_timestamp(dest).chunked() {
+            self.message_processor.egress.send(message).ok();
         }
         Ok(())
     }
