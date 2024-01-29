@@ -1,10 +1,7 @@
-use std::{collections::HashMap, net::SocketAddrV4, time::Duration, sync::mpsc, fmt::Display};
+use std::{collections::HashMap, net::SocketAddrV4, sync::mpsc, fmt::Display};
 
-use chrono::Utc;
 use ring::{aead::{self, AES_256_GCM, BoundKey}, rand::SystemRandom, agreement, hkdf::{self, HKDF_SHA256, KeyType}};
-use tokio::{sync::oneshot, time::sleep};
-
-use crate::message::{Heartbeat, self};
+use tokio::sync::oneshot;
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
@@ -36,14 +33,12 @@ impl KeyStore {
         public_key
     }
 
-    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4, egress: tokio::sync::mpsc::UnboundedSender<Heartbeat>, sender: SocketAddrV4, host_name: &str) -> agreement::PublicKey {
-        let (tx, rx) = oneshot::channel();
-        send_rapid_heartbeats(rx, egress, sender, peer_addr);
-        self.generate_key_pair(peer_addr.to_string() + host_name, Some(tx))
+    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4, tx: oneshot::Sender<()>) -> agreement::PublicKey {
+        self.generate_key_pair(peer_addr.to_string(), Some(tx))
     }
 
-    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4, host_name: &str) -> agreement::PublicKey {
-        self.generate_key_pair(peer_addr.to_string() + host_name, None)
+    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> agreement::PublicKey {
+        self.generate_key_pair(peer_addr.to_string(), None)
     }
 
     pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
@@ -62,6 +57,7 @@ impl KeyStore {
     }
 
     pub fn agree(&mut self, peer_addr: SocketAddrV4, peer_public_key: Vec<u8>) -> Result<(), Error> {
+        // println!("{:?}, finding: {}", self.private_keys, peer_addr.to_string());
         let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let index = peer_addr.to_string();
         let Some((my_private_key, stop_heartbeats)) = self.private_keys.remove(&index) else { return Err(Error::NoKey) };
@@ -130,14 +126,4 @@ impl Display for Error {
 pub enum Direction {
     Encode,
     Decode(Vec<u8>)
-}
-
-fn send_rapid_heartbeats(mut rx: oneshot::Receiver<()>, egress: tokio::sync::mpsc::UnboundedSender<Heartbeat>, sender: SocketAddrV4, dest: SocketAddrV4) {
-    tokio::spawn(async move {
-        while let Err(_) = rx.try_recv() {
-            let message = Heartbeat::new(dest, sender, message::datetime_to_timestamp(Utc::now()));
-            egress.send(message).ok();
-            sleep(Duration::from_millis(500)).await;
-        }
-    });
 }

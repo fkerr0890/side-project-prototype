@@ -1,13 +1,11 @@
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::net::UdpSocket;
 
 use std::net::SocketAddr;
-use std::{str, net::SocketAddrV4};
+use std::net::SocketAddrV4;
 use std::sync::Arc;
 
-use crate::{message::{Message, SearchMessage, DiscoverPeerMessage, Heartbeat, StreamMessage, InboundMessage}, message_processing::send_error_response};
+use crate::{message::InboundMessage, message_processing::send_error_response};
 
 pub type EmptyResult = Result<(), String>;
 
@@ -48,33 +46,4 @@ impl InboundGateway {
             panic!("Not v4 oh no");
         }
     }
-    
-    // async fn handle_message(&self, message_bytes: &[u8]) -> EmptyResult {
-    //     if let Ok(message) = bincode::deserialize::<SearchMessage>(message_bytes) {
-    //         println!("Received search message, uuid: {} at {:?}", message.id(), self.socket.local_addr().unwrap());
-    //         self.to_srp.send(message).map_err(|e| { e.to_string() } )
-    //     }
-    //     else if let Ok(message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
-    //         self.to_dpp.send(message).map_err(|e| { e.to_string() } )
-    //     }
-    //     else if let Ok(message) = bincode::deserialize::<Heartbeat>(message_bytes) {
-    //         Ok(println!("{:?}", message))
-    //     }
-    //     else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
-    //         println!("Received stream message, uuid: {} at {:?}", message.id(), self.socket.local_addr().unwrap());
-    //         self.to_smp.send(message).map_err(|e| { e.to_string() } )
-    //     }
-    //     else {
-    //         Err(String::from("Unable to deserialize received message to a supported type"))
-    //     }
-    // }
-}
-
-pub fn log_debug(message: &str) {
-    // if *IS_NM_HOST.get().unwrap() {
-    //     send_to_frontend(message);
-    // }
-    // else {
-        println!("{}", message);
-    // }
 }

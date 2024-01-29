@@ -146,7 +146,7 @@ pub struct ServerContext {
 }
 
 impl ServerContext {
-    pub fn new(to_srp: &mpsc::UnboundedSender<SearchMessage>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>, to_smp: mpsc::UnboundedSender<StreamMessage>) -> Self { Self { to_srp: to_srp.clone(), from_smp: from_outbound_gateway, to_smp } }
+    pub fn new(to_srp: mpsc::UnboundedSender<SearchMessage>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>, to_smp: mpsc::UnboundedSender<StreamMessage>) -> Self { Self { to_srp, from_smp: from_outbound_gateway, to_smp } }
 }
 
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {

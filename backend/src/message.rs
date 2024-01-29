@@ -27,18 +27,23 @@ impl InboundMessage {
     pub fn new(payload: Vec<u8>, uuid: String, is_encrypted: IsEncrypted, position: (usize, usize)) -> Self { Self { payload, uuid, is_encrypted, position } }
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
     pub fn set_payload(mut self, payload: Vec<u8>) -> Self { self.payload = payload; self }
+    pub fn payload(&self) -> &Vec<u8> { &self.payload }
+    pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn uuid(&self) -> &str { &self.uuid }
+    pub fn is_encrypted(&self) -> &IsEncrypted { &self.is_encrypted }
     pub fn position(&self) -> (usize, usize) { self.position }
-    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
-    pub fn into_uuid_is_encrypted(self) -> (String, IsEncrypted) { (self.uuid, self.is_encrypted) }
+    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { (mem::take(&mut self.payload), self) }
+    pub fn into_payload(self) -> Vec<u8> { self.payload }
+    pub fn into_payload_is_encrypted(self) -> (Vec<u8>, IsEncrypted) { (self.payload, self.is_encrypted) }
 
-    pub fn reassemble_message(mut messages: Vec<Self>) -> (Self, Vec<u8>) {
+    pub fn reassemble_message(mut messages: Vec<Self>) -> Self {
         messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
         let last = messages.pop().unwrap();
-        let (last_bytes, base_message) = last.extract_payload();
+        let (last_bytes, mut base_message) = last.extract_payload();
         let mut bytes = messages.into_iter().map(|m| m.payload).collect::<Vec<Vec<u8>>>();
         bytes.push(last_bytes);
-        return (base_message, bytes.concat())
+        base_message.payload = bytes.concat();
+        base_message
     }
 }
 
@@ -46,6 +51,9 @@ impl InboundMessage {
 pub enum IsEncrypted {
     True(Vec<u8>),
     False
+}
+impl IsEncrypted {
+    pub fn nonce(self) -> Vec<u8> { if let Self::True(nonce) = self { nonce } else { panic!() } }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -57,7 +65,7 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, timestamp: String) -> Self { Self { dest, sender, timestamp, uuid: Uuid::new_v4().simple().to_string() } }
+    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4) -> Self { Self { dest, sender, timestamp: datetime_to_timestamp(Utc::now()), uuid: Uuid::new_v4().simple().to_string() } }
 }
 
 impl Message for Heartbeat {
@@ -151,28 +159,6 @@ impl SearchMessage {
     }
 
     pub fn set_origin(&mut self, origin: SocketAddrV4) { self.origin = origin; }
-    // pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.host_name), self) }
-
-    // pub fn chunked(self) -> Vec<Self> {
-    //     let (payload, empty_message) = self.extract_payload();
-    //     let chunks = payload.chunks(1024 - (bincode::serialized_size(&empty_message).unwrap() as usize));
-    //     let num_chunks = chunks.len();
-    //     let mut messages: Vec<Self> = chunks
-    //         .enumerate()
-    //         .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_query(chunk.to_vec()))
-    //         .collect();
-    //     messages.shuffle(&mut SmallRng::from_entropy());
-    //     messages
-    // }
-
-    // pub fn reassemble_message_payload(mut messages: Vec<Self>) -> Vec<u8> {
-    //     messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
-    //     let mut bytes = Vec::new();
-    //     for message in messages {
-    //         bytes.append(&mut message.into_payload());
-    //     }
-    //     bytes
-    // }
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn origin(&self) -> SocketAddrV4 { self.origin }

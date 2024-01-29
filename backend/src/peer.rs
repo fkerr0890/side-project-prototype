@@ -2,13 +2,9 @@ use std::fmt::Debug;
 
 use serde::{Serialize, Deserialize};
 
-use crate::{node::EndpointPair, message_processing::send_error_response};
+use crate::{node::EndpointPair, message::{Heartbeat, Message}};
 
-use chrono::Utc;
 use priority_queue::DoublePriorityQueue;
-use tokio::sync::mpsc;
-
-use crate::{message::{Message, self, Heartbeat}, gateway::EmptyResult};
 
 pub const MAX_PEERS: u16 = 10;
 
@@ -20,16 +16,14 @@ pub enum PeerStatus {
 
 pub struct PeerOps {
     peers: DoublePriorityQueue<EndpointPair, i32>,
-    heartbeat_tx: mpsc::UnboundedSender<Heartbeat>,
     endpoint_pair: EndpointPair
 }
 
 impl PeerOps {
-    pub fn new(heartbeat_tx: mpsc::UnboundedSender<Heartbeat>, endpoint_pair: EndpointPair) -> Self { Self { peers: DoublePriorityQueue::new(), heartbeat_tx, endpoint_pair } }
+    pub fn new(endpoint_pair: EndpointPair) -> Self { Self { peers: DoublePriorityQueue::new(), endpoint_pair } }
 
     pub fn peers(&self) -> Vec<(EndpointPair, i32)> { self.peers.iter().map(|(i, score)| (*i, *score)).collect() }
     pub fn peers_len(&self) -> usize { self.peers.len() }
-    pub fn heartbeat_tx(&self) -> mpsc::UnboundedSender<Heartbeat> { return self.heartbeat_tx.clone() }
 
     pub fn add_initial_peer(&mut self, endpoint_pair: EndpointPair) {
         self.add_peer(endpoint_pair, 0);
@@ -66,11 +60,7 @@ impl PeerOps {
         messages
     }
 
-    pub fn send_heartbeats(&self) -> EmptyResult {
-        for peer in self.peers.iter() {
-            let heartbeat = Heartbeat::new(peer.0.public_endpoint, self.endpoint_pair.public_endpoint, message::datetime_to_timestamp(Utc::now()));
-            self.heartbeat_tx.send(heartbeat).map_err(|e| send_error_response(e, file!(), line!()))?;
-        }
-        Ok(())
+    pub fn get_heartbeats(&self) -> Vec<Heartbeat> {
+        self.peers.iter().map(|peer| Heartbeat::new(peer.0.public_endpoint, self.endpoint_pair.public_endpoint)).collect()
     }
 }
