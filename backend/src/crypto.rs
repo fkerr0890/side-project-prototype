@@ -24,8 +24,8 @@ impl KeyStore {
         }
     }
 
-    fn get_key_aad(&mut self, index: &str, host_name: &str) -> Result<(aead::Aad<Vec<u8>>, &mut KeySet), Error> {
-        Ok((aead::Aad::from(host_name.as_bytes().to_vec()), self.symmetric_keys.get_mut(index).ok_or(Error::NoKey)?))
+    fn get_key_aad(&mut self, index: &str) -> Result<(aead::Aad<Vec<u8>>, &mut KeySet), Error> {
+        Ok((aead::Aad::from("test".as_bytes().to_vec()), self.symmetric_keys.get_mut(index).ok_or(Error::NoKey)?))
     }
 
     fn generate_key_pair(&mut self, index: String, tx: Option<oneshot::Sender<()>>) -> agreement::PublicKey {
@@ -46,8 +46,8 @@ impl KeyStore {
         self.generate_key_pair(peer_addr.to_string() + host_name, None)
     }
 
-    pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, host_name: &str, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
-        let (aad, key_set) = self.get_key_aad(&(peer_addr.to_string() + host_name), host_name)?;
+    pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
+        let (aad, key_set) = self.get_key_aad(&peer_addr.to_string())?;
         match mode {
             Direction::Encode => {
                 key_set.sealing_key.seal_in_place_append_tag(aad, payload)?;
@@ -61,9 +61,9 @@ impl KeyStore {
         }
     }
 
-    pub fn agree(&mut self, peer_addr: SocketAddrV4, host_name: &str, peer_public_key: Vec<u8>) -> Result<(), Error> {
+    pub fn agree(&mut self, peer_addr: SocketAddrV4, peer_public_key: Vec<u8>) -> Result<(), Error> {
         let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
-        let index = peer_addr.to_string() + host_name;
+        let index = peer_addr.to_string();
         let Some((my_private_key, stop_heartbeats)) = self.private_keys.remove(&index) else { return Err(Error::NoKey) };
         if let Some(tx) = stop_heartbeats {
             tx.send(()).ok();

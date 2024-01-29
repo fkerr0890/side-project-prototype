@@ -186,8 +186,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         host_name.to_owned(),
         search_request.id().to_owned(),
         StreamMessageKind::Request,
-        payload,
-        None)).ok();
+        payload)).ok();
     context.to_srp.send(search_request).ok();
     let mut rx = context.from_smp.lock().await;
     let response = match rx.recv().await {

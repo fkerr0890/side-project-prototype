@@ -50,23 +50,20 @@ impl PeerOps {
         }
     }
 
-    pub fn send_request<T: Message + Clone + Debug>(&self, search_request_parts: Vec<T>, tx: &mpsc::UnboundedSender<T>) -> EmptyResult {
-        // gateway::log_debug(&format!("Peers len: {}", self.peers.len()));
+    pub fn check_request<T: Message + Clone + Debug>(&self, request: T) -> Vec<T> {
+        let mut messages = Vec::new();
         for peer in self.peers.iter() {
-            for message in search_request_parts.clone() {
-                let message = message
-                    .set_sender(self.endpoint_pair.public_endpoint)
-                    .replace_dest_and_timestamp(peer.0.public_endpoint);
-                if message.check_expiry() {
-                    tx.send(message).map_err(|e| send_error_response(e, file!(), line!()))?;
-                }
-                else {
-                    println!("PeerOps: Message expired: {:?}", message);
-                    return Ok(());
-                }
+            let mut message = request.clone();
+            message.set_sender(self.endpoint_pair.public_endpoint);
+            message.replace_dest_and_timestamp(peer.0.public_endpoint);
+            if message.check_expiry() {
+                messages.push(message);
+            }
+            else {
+                println!("PeerOps: Message expired: {:?}", message);
             }
         }
-        Ok(())
+        messages
     }
 
     pub fn send_heartbeats(&self) -> EmptyResult {

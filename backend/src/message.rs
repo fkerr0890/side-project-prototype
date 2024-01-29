@@ -1,5 +1,4 @@
 use chrono::{Utc, SecondsFormat, DateTime, Duration};
-use rand::{seq::SliceRandom, rngs::SmallRng, SeedableRng};
 use serde::{Serialize, Deserialize};
 use std::{str, net::SocketAddrV4, mem};
 use uuid::Uuid;
@@ -7,15 +6,46 @@ use uuid::Uuid;
 use crate::message_processing::SEARCH_TIMEOUT;
 use crate::node::EndpointPair;
 
-const NO_POSITION: (usize, usize) = (0, 1);
+pub const NO_POSITION: (usize, usize) = (0, 1);
 
 pub trait Message {
     fn dest(&self) -> SocketAddrV4;
     fn id(&self) -> &str;
-    fn replace_dest_and_timestamp(self, dest: SocketAddrV4) -> Self;
+    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4);
     fn check_expiry(&self) -> bool;
-    fn set_sender(self, sender: SocketAddrV4) -> Self;
-    fn position(&self) -> (usize, usize);
+    fn set_sender(&mut self, sender: SocketAddrV4);
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct InboundMessage {
+    payload: Vec<u8>,
+    uuid: String,
+    is_encrypted: IsEncrypted,
+    position: (usize, usize)
+}
+impl InboundMessage {
+    pub fn new(payload: Vec<u8>, uuid: String, is_encrypted: IsEncrypted, position: (usize, usize)) -> Self { Self { payload, uuid, is_encrypted, position } }
+    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
+    pub fn set_payload(mut self, payload: Vec<u8>) -> Self { self.payload = payload; self }
+    pub fn uuid(&self) -> &str { &self.uuid }
+    pub fn position(&self) -> (usize, usize) { self.position }
+    pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
+    pub fn into_uuid_is_encrypted(self) -> (String, IsEncrypted) { (self.uuid, self.is_encrypted) }
+
+    pub fn reassemble_message(mut messages: Vec<Self>) -> (Self, Vec<u8>) {
+        messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
+        let last = messages.pop().unwrap();
+        let (last_bytes, base_message) = last.extract_payload();
+        let mut bytes = messages.into_iter().map(|m| m.payload).collect::<Vec<Vec<u8>>>();
+        bytes.push(last_bytes);
+        return (base_message, bytes.concat())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub enum IsEncrypted {
+    True(Vec<u8>),
+    False
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -33,10 +63,9 @@ impl Heartbeat {
 impl Message for Heartbeat {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &str { &self.uuid }
-    fn replace_dest_and_timestamp(self, _dest: SocketAddrV4) -> Self { self }
+    fn replace_dest_and_timestamp(&mut self, _dest: SocketAddrV4) {}
     fn check_expiry(&self) -> bool { false }
-    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
-    fn position(&self) -> (usize, usize) { NO_POSITION }
+    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -47,81 +76,43 @@ pub struct StreamMessage {
     timestamp: String,
     host_name: String,
     uuid: String,
-    position: (usize, usize),
-    payload: Vec<u8>,
-    nonce: Option<Vec<u8>>
+    payload: Vec<u8>
 }
 impl StreamMessage {
-    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, host_name: String, uuid: String, kind: StreamMessageKind, payload: Vec<u8>, nonce: Option<Vec<u8>>) -> Self {
+    pub fn new(dest: SocketAddrV4, sender: SocketAddrV4, host_name: String, uuid: String, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
         Self {
             dest,
             sender,
             timestamp: datetime_to_timestamp(Utc::now()),
             host_name,
             uuid,
-            position: NO_POSITION,
             kind,
-            payload,
-            nonce
+            payload
         }
     }
 
     pub fn payload(&self) -> &Vec<u8> { &self.payload }
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn into_payload(self) -> Vec<u8> { self.payload }
-    pub fn into_payload_host_name(self) -> (Vec<u8>, String) { (self.payload, self.host_name) }
     pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.payload), self) }
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn host_name(&self) -> &str { &self.host_name }
-    pub fn nonce(&self) -> &Option<Vec<u8>> { &self.nonce }
-    pub fn into_host_name_uuid_nonce_payload(self) -> (String, String, Vec<u8>, Vec<u8>) {
-        let nonce = if let Some(nonce) = self.nonce { nonce } else { panic!() };
-        (self.host_name, self.uuid, nonce, self.payload)
-    }
-
-    pub fn chunked(self) -> Vec<Self> {
-        let (payload, empty_message) = self.extract_payload();
-        let chunks = payload.chunks(1024 - (bincode::serialized_size(&empty_message).unwrap() as usize));
-        let num_chunks = chunks.len();
-        let mut messages: Vec<Self> = chunks
-            .enumerate()
-            .map(|(i, chunk)| empty_message.clone().set_position((i, num_chunks)).set_payload(chunk.to_vec()))
-            .collect();
-        messages.shuffle(&mut SmallRng::from_entropy());
-        messages
-    }
+    pub fn into_host_name_uuid_payload(self) -> (String, String, Vec<u8>) { (self.host_name, self.uuid, self.payload) }
 
     pub fn set_payload(mut self, bytes: Vec<u8>) -> Self {
         self.payload = bytes;
         self
     }
-
-    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
-    pub fn set_nonce(&mut self, nonce: Vec<u8>) { self.nonce = Some(nonce); }
-
-    pub fn reassemble_message(mut messages: Vec<Self>) -> Self {
-        messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
-        let last = messages.pop().unwrap();
-        let (mut last_bytes, base_message) = last.extract_payload();
-        let mut bytes = Vec::new();
-        for message in messages {
-            bytes.append(&mut message.into_payload());
-        }
-        bytes.append(&mut last_bytes);
-        base_message.set_payload(bytes)
-    }
 }
 impl Message for StreamMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &str { &self.uuid }
-    fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
+    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
         self.timestamp = datetime_to_timestamp(Utc::now());
-        self
     }
     fn check_expiry(&self) -> bool { false }
-    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
-    fn position(&self) -> (usize, usize) { self.position }
+    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -134,7 +125,6 @@ pub struct SearchMessage {
     host_name: String,
     origin: SocketAddrV4,
     expiry: String,
-    position: (usize, usize)
 }
 impl SearchMessage {
     fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, host_name: String, uuid: String, kind: SearchMessageKind) -> Self {
@@ -148,7 +138,6 @@ impl SearchMessage {
             kind,
             origin,
             expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
-            position: NO_POSITION
         }
     }
 
@@ -161,7 +150,6 @@ impl SearchMessage {
         Self::new(dest, sender, origin, host_name, uuid, SearchMessageKind::Response(public_key))
     }
 
-    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
     pub fn set_origin(&mut self, origin: SocketAddrV4) { self.origin = origin; }
     // pub fn extract_payload(mut self) -> (Vec<u8>, Self) { return (mem::take(&mut self.host_name), self) }
 
@@ -201,10 +189,9 @@ impl Message for SearchMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &str { &self.uuid }
 
-    fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
+    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
         self.timestamp = datetime_to_timestamp(Utc::now());
-        self
     }
 
     fn check_expiry(&self) -> bool {
@@ -212,8 +199,7 @@ impl Message for SearchMessage {
         return expiry >= Utc::now()
     }
 
-    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
-    fn position(&self) -> (usize, usize) { self.position }
+    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -273,24 +259,19 @@ impl Message for DiscoverPeerMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &str { &self.uuid }
 
-    fn replace_dest_and_timestamp(mut self, dest: SocketAddrV4) -> Self {
+    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
         self.timestamp = datetime_to_timestamp(Utc::now());
-        self
     }
 
     fn check_expiry(&self) -> bool { true }
-    fn set_sender(mut self, sender: SocketAddrV4) -> Self { self.sender = sender; self }
-    fn position(&self) -> (usize, usize) { NO_POSITION }
+    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SearchMessageKind {
     Request,
     Response(Vec<u8>)
-}
-impl SearchMessageKind {
-    pub fn public_key(&self) {}
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
