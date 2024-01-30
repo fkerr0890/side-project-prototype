@@ -75,7 +75,7 @@ impl MessageStaging {
 
     fn handle_key_agreement(&mut self, message: StreamMessage) -> EmptyResult {
         let sender = message.sender();
-        let (.., uuid, peer_public_key) = message.into_host_name_uuid_payload();
+        let (uuid, peer_public_key) = message.into_uuid_payload();
         self.key_store.lock().unwrap().agree(sender, peer_public_key).map_err(|e| e.error_response(file!(), line!()))?;
         if let Some(cached_message) = self.cached_messages.remove(&uuid) {
             let (mut cached_message, is_encrypted) = cached_message.into_payload_is_encrypted();
@@ -87,10 +87,11 @@ impl MessageStaging {
 
     fn deserialize_message(&mut self, message_bytes: &[u8]) -> EmptyResult {
         if let Ok(message) = bincode::deserialize::<SearchMessage>(message_bytes) {
-            println!("Received search message, uuid: {} at {:?}", message.id(), self.endpoint_pair.public_endpoint.to_string());
+            println!("Received search message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string());
             self.to_srp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
+            // println!("Received dp message, uuid: {} at {}, {:?}", message.id(), self.endpoint_pair.public_endpoint.to_string(), message.kind);
             self.to_dpp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(message) = bincode::deserialize::<Heartbeat>(message_bytes) {
@@ -98,7 +99,7 @@ impl MessageStaging {
             Ok(())
         }
         else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
-            println!("Received stream message, uuid: {} at {:?}", message.id(), self.endpoint_pair.public_endpoint.to_string());
+            println!("Received stream message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string());
             match message {
                 StreamMessage { kind: StreamMessageKind::KeyAgreement, .. } => self.handle_key_agreement(message) ,
                 _ => self.to_smp.send(message).map_err(|e| { e.to_string() } )
@@ -164,16 +165,18 @@ pub struct MessageProcessor {
     socket: Arc<UdpSocket>,
     endpoint_pair: EndpointPair,
     breadcrumbs: Arc<Mutex<HashMap<String, SocketAddrV4>>>,
-    key_store: Arc<Mutex<KeyStore>>
+    key_store: Arc<Mutex<KeyStore>>,
+    peer_ops: Option<Arc<Mutex<PeerOps>>>
 }
 
 impl MessageProcessor {
-    pub fn new(socket: Arc<UdpSocket>, endpoint_pair: EndpointPair, key_store: &Arc<Mutex<KeyStore>>) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, endpoint_pair: EndpointPair, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>,) -> Self {
         Self {
             socket: socket.clone(),
             endpoint_pair,
             breadcrumbs: Arc::new(Mutex::new(HashMap::new())),
-            key_store: key_store.clone()
+            key_store: key_store.clone(),
+            peer_ops
         }
     } 
 
@@ -191,13 +194,12 @@ impl MessageProcessor {
     }
 
     fn set_breadcrumb_ttl(&self, early_return_message: Option<DiscoverPeerMessage>, id: &str, ttl: u64) {
-        let (breadcrumbs_clone, dest, id) = (self.breadcrumbs.clone(), self.endpoint_pair.public_endpoint, id.to_owned());
+        let (breadcrumbs_clone, dest, sender, id) = (self.breadcrumbs.clone(), self.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, id.to_owned());
         let (socket, key_store) = (self.socket.clone(), self.key_store.clone());
         tokio::spawn(async move {
             sleep(Duration::from_millis(ttl)).await;
             if let Some(mut message) = early_return_message {
-                message.replace_dest_and_timestamp(dest);
-                Self::send_static(&socket, &key_store, dest, &mut message, false).await.ok();
+                Self::send_static(&socket, &key_store, dest, sender, &mut message, false).await.ok();
             }
             else {
                 // gateway::log_debug("Ttl for breadcrumb expired");
@@ -210,13 +212,30 @@ impl MessageProcessor {
         self.breadcrumbs.lock().unwrap().get(id).cloned()
     }
 
-    pub async fn send(&self, dest: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool) -> EmptyResult {
-        Self::send_static(&self.socket, &self.key_store, dest, message, to_be_encrypted).await
+    pub async fn send_peer_request(&self, request: &mut(impl Message + Serialize)) -> EmptyResult {
+        let peers = self.peer_ops.as_ref().unwrap().lock().unwrap().peers();
+        for peer in peers {
+            self.send(peer.public_endpoint, request, false).await?;
+        }
+        Ok(())
     }
 
-    pub async fn send_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool) -> EmptyResult {
-        if message.dest() != dest {
-            message.replace_dest_and_timestamp(dest);
+    fn add_new_peers(&self, peers: Vec<EndpointPair>) {
+        for peer in peers {
+            self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.endpoint_pair.public_endpoint, peer.public_endpoint));
+        }
+    }
+
+    pub async fn send(&self, dest: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool) -> EmptyResult {
+        Self::send_static(&self.socket, &self.key_store, dest, self.endpoint_pair.public_endpoint, message, to_be_encrypted).await
+    }
+
+    pub async fn send_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool) -> EmptyResult {
+        message.set_sender(sender);
+        message.replace_dest_and_timestamp(dest);
+        if message.check_expiry() {
+            println!("PeerOps: Message expired: {}", message.id());
+            return Ok(())
         }
         let mut serialized = bincode::serialize(message).map_err(|e| e.to_string())?;
         let is_encrypted = if to_be_encrypted {
@@ -231,12 +250,12 @@ impl MessageProcessor {
         Ok(())
     }
 
-    pub fn send_rapid_heartbeats(&self, mut rx: oneshot::Receiver<()>, sender: SocketAddrV4, dest: SocketAddrV4) {
-        let (socket, key_store) = (self.socket.clone(), self.key_store.clone());
+    pub fn send_rapid_heartbeats(&self, mut rx: oneshot::Receiver<()>, dest: SocketAddrV4) {
+        let (socket, key_store, sender) = (self.socket.clone(), self.key_store.clone(), self.endpoint_pair.public_endpoint);
         tokio::spawn(async move {
             while let Err(_) = rx.try_recv() {
-                let mut message = Heartbeat::new(dest, sender);
-                MessageProcessor::send_static(&socket, &key_store, dest, &mut message, false).await.ok();
+                let mut message = Heartbeat::new();
+                MessageProcessor::send_static(&socket, &key_store, dest, sender, &mut message, false).await.ok();
                 sleep(Duration::from_millis(500)).await;
             }
         });
@@ -264,23 +283,21 @@ pub struct SearchRequestProcessor {
     from_staging: mpsc::UnboundedReceiver<SearchMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
-    peer_ops: Arc<Mutex<PeerOps>>,
     active_sessions: HashSet<String>
 }
 
 impl SearchRequestProcessor {
-    pub fn new(message_processor: MessageProcessor, from_staging: mpsc::UnboundedReceiver<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, peer_ops: &Arc<Mutex<PeerOps>>) -> Self {
+    pub fn new(message_processor: MessageProcessor, from_staging: mpsc::UnboundedReceiver<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>) -> Self {
         Self {
             message_processor,
             from_staging,
             to_smp,
             local_hosts,
-            peer_ops: peer_ops.clone(),
             active_sessions: HashSet::new()
         }
     }
 
-    pub async fn handle_search_request(&mut self, search_request: SearchMessage) -> EmptyResult {
+    pub async fn handle_search_request(&mut self, mut search_request: SearchMessage) -> EmptyResult {
         if !self.message_processor.try_add_breadcrumb(search_request.id(), search_request.sender()) {
             return Ok(())
         }
@@ -293,11 +310,7 @@ impl SearchRequestProcessor {
             let (uuid, host_name) = search_request.into_uuid_host_name();
             return self.return_search_responses(self.construct_search_response(uuid, dest, origin, host_name)).await
         }
-        let outbound_requests = self.peer_ops.lock().unwrap().check_request(search_request);
-        for mut message in outbound_requests {
-            self.message_processor.send(message.dest(), &mut message, false).await?;
-        }
-        Ok(())
+        self.message_processor.send_peer_request(&mut search_request).await
     }
 
     async fn return_search_responses(&mut self, mut search_response: SearchMessage) -> EmptyResult {
@@ -308,8 +321,10 @@ impl SearchRequestProcessor {
             let mut key_store = self.message_processor.key_store.lock().unwrap();
             let my_public_key = key_store.requester_public_key(origin);
             key_store.agree(origin, peer_public_key).unwrap();
+            let mut key_agreement_message = StreamMessage::new(host_name, uuid, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec());
+            key_agreement_message.replace_dest_and_timestamp(origin);
             self.to_smp
-                .send(StreamMessage::new(origin, EndpointPair::default_socket(), host_name, uuid, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec()))
+                .send(key_agreement_message)
                 .map_err(|e| send_error_response(e, file!(), line!()))
         }
         else {
@@ -319,7 +334,7 @@ impl SearchRequestProcessor {
     
     fn construct_search_response(&self, uuid: String, dest: SocketAddrV4, origin: SocketAddrV4, host_name: String) -> SearchMessage {
         let (tx, rx) = oneshot::channel();
-        self.message_processor.send_rapid_heartbeats(rx, self.message_processor.endpoint_pair.public_endpoint, origin);
+        self.message_processor.send_rapid_heartbeats(rx, origin);
         let public_key = self.message_processor.key_store.lock().unwrap().host_public_key(origin, tx);
         SearchMessage::key_response(dest, self.message_processor.endpoint_pair.public_endpoint, self.message_processor.endpoint_pair.public_endpoint, uuid, host_name, public_key.as_ref().to_vec())
     }
@@ -344,17 +359,15 @@ impl SearchRequestProcessor {
 pub struct DiscoverPeerProcessor {
     message_processor: MessageProcessor,
     from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>,
-    message_staging: Arc<Mutex<HashMap<String, Option<DiscoverPeerMessage>>>>,
-    peer_ops: Arc<Mutex<PeerOps>>
+    message_staging: Arc<Mutex<HashMap<String, Option<DiscoverPeerMessage>>>>
 }
 
 impl DiscoverPeerProcessor {
-    pub fn new(message_processor: MessageProcessor, from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>, peer_ops: &Arc<Mutex<PeerOps>>) -> Self {
+    pub fn new(message_processor: MessageProcessor, from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>) -> Self {
         Self {
             message_processor,
             from_staging,
             message_staging: Arc::new(Mutex::new(HashMap::new())),
-            peer_ops: peer_ops.clone()
         }
     }
 
@@ -369,11 +382,10 @@ impl DiscoverPeerProcessor {
     }
 
     async fn propogate_request(&mut self, mut request: DiscoverPeerMessage) -> EmptyResult {
+        request = request.set_origin_if_unset(self.message_processor.endpoint_pair.public_endpoint);
         let (sender, origin) = (request.sender(), request.origin());
         if self.message_processor.try_add_breadcrumb(request.id(), request.sender()) {
             let mut hairpin_response = DiscoverPeerMessage::new(DpMessageKind::Response,
-                request.sender(),
-                self.message_processor.endpoint_pair.public_endpoint,
                 request.origin(),
                 request.id().to_owned(),
             request.hop_count());
@@ -385,22 +397,19 @@ impl DiscoverPeerProcessor {
             }
             self.message_processor.set_breadcrumb_ttl(Some(hairpin_response), request.id(), TTL);
             // gateway::log_debug("Propogating request");
-            let outbound_requests = self.peer_ops.lock().unwrap().check_request(request);
-            for mut message in outbound_requests {
-                self.message_processor.send(message.dest(), &mut message, false).await?;
-            }
+            self.message_processor.send_peer_request(&mut request).await?;
         }
-        let (endpoint_pair, score) = if sender != EndpointPair::default_socket() {
-            (EndpointPair::new(sender, sender), self.get_score(sender))
+        let endpoint_pair = if sender != EndpointPair::default_socket() {
+            EndpointPair::new(sender, sender)
         } else {
-            (EndpointPair::new(origin, origin), self.get_score(origin))
+            EndpointPair::new(origin, origin)
         };        
-        self.peer_ops.lock().unwrap().add_peer(endpoint_pair, score);
+        self.message_processor.add_new_peers(vec![endpoint_pair]);
         Ok(())
     }
 
-    fn get_score(&self, other: SocketAddrV4) -> i32 {
-        (other.port() as i32).abs_diff(self.message_processor.endpoint_pair.public_endpoint.port() as i32) as i32
+    fn get_score(first: SocketAddrV4, second: SocketAddrV4) -> i32 {
+        (second.port() as i32).abs_diff(first.port() as i32) as i32
     }
 
     fn stage_message(&mut self, message: DiscoverPeerMessage) -> bool {
@@ -417,10 +426,10 @@ impl DiscoverPeerProcessor {
         }
         else {
             let message_staging_clone = self.message_staging.clone();
-            let (socket, key_store, uuid) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), message.id().to_owned());
+            let (socket, key_store, uuid, dest, sender) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), message.id().to_owned(), self.message_processor.get_dest(message.id()).unwrap(), self.message_processor.endpoint_pair.public_endpoint);
             tokio::spawn(async move {
                 sleep(Duration::from_millis(TTL*2)).await;
-                Self::send_final_response_static(&socket, &key_store, &message_staging_clone, &uuid).await;
+                Self::send_final_response_static(&socket, &key_store, dest, sender, &message_staging_clone, &uuid).await;
                 message_staging_clone.lock().unwrap().remove(&uuid);
             });
             0
@@ -438,7 +447,7 @@ impl DiscoverPeerProcessor {
     async fn return_response(&mut self, mut response: DiscoverPeerMessage) -> EmptyResult {
         response.add_peer(self.message_processor.endpoint_pair);
         let Some(dest) = self.message_processor.get_dest(response.id()) else { return Ok(()) };
-        if dest == EndpointPair::default_socket() {
+        if response.origin() == self.message_processor.endpoint_pair.public_endpoint {
             let uuid = response.id().to_owned();
             if self.stage_message(response) {
                 self.send_final_response(&uuid).await;
@@ -451,20 +460,19 @@ impl DiscoverPeerProcessor {
     }
 
     async fn send_final_response(&self, uuid: &str) {
-        Self::send_final_response_static(&self.message_processor.socket, &self.message_processor.key_store, &self.message_staging, uuid).await;
+        let dest = self.message_processor.get_dest(uuid).unwrap();
+        Self::send_final_response_static(&self.message_processor.socket, &self.message_processor.key_store, dest, self.message_processor.endpoint_pair.public_endpoint, &self.message_staging, uuid).await;
     }
 
-    async fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, message_staging: &Arc<Mutex<HashMap<String, Option<DiscoverPeerMessage>>>>, uuid: &str) {
+    async fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message_staging: &Arc<Mutex<HashMap<String, Option<DiscoverPeerMessage>>>>, uuid: &str) {
         let staged_message = {
             let mut message_staging = message_staging.lock().unwrap();
             let Some(staged_message) = message_staging.get_mut(uuid) else { return };
             staged_message.take()
         };
-        if let Some(mut staged_message) = staged_message {
+        if let Some(staged_message) = staged_message {
             // gateway::log_debug("I'm back at the introducer");
-            let dest = staged_message.origin();
-            staged_message.replace_dest_and_timestamp(dest);
-            MessageProcessor::send_static(socket, key_store, dest, &mut staged_message.set_kind(DpMessageKind::IveGotSome), false).await.ok();
+            MessageProcessor::send_static(socket, key_store, dest, sender, &mut staged_message.set_kind(DpMessageKind::IveGotSome), false).await.ok();
         }
     }
 
@@ -473,17 +481,13 @@ impl DiscoverPeerProcessor {
         let introducer = message.get_last_peer();
         self.message_processor.send(introducer.public_endpoint, 
             &mut message
-                .set_kind(DpMessageKind::Request)
-                .set_origin_if_unset(self.message_processor.endpoint_pair.public_endpoint),
+                .set_kind(DpMessageKind::Request),
             false,
             ).await
     }
 
     fn add_new_peers(&self, message: DiscoverPeerMessage) -> EmptyResult {
-        // gateway::log_debug("Got IveGotSome");
-        for peer in message.into_peer_list() {
-            self.peer_ops.lock().unwrap().add_peer(peer, self.get_score(peer.public_endpoint));
-        }
+        self.message_processor.add_new_peers(message.into_peer_list());
         Ok(())
     }
 }
@@ -527,7 +531,6 @@ impl StreamMessageProcessor {
             return Ok(())
         };
         if let StreamMessageKind::Request = cached_message.kind {
-            message.set_sender(self.message_processor.endpoint_pair.public_endpoint);
             self.message_processor.send(dest, &mut message, false).await?;
             Self::send_resource(&self.message_processor, cached_message, dest).await
         }
@@ -559,8 +562,6 @@ impl StreamMessageProcessor {
         let response = http::make_request(request, &socket.to_string()).await;
         let Ok(response_bytes) = bincode::serialize(&response) else { return Ok(()) };
         let mut response = StreamMessage::new(
-            dest,
-            self.message_processor.endpoint_pair.public_endpoint,
             host_name,
             uuid,
             StreamMessageKind::Response,
@@ -589,12 +590,11 @@ impl StreamMessageProcessor {
     }
 
     async fn send_resource(message_processor: &MessageProcessor, message: &mut StreamMessage, dest: SocketAddrV4) -> EmptyResult {
-        message.set_sender(message_processor.endpoint_pair.public_endpoint);
         message_processor.send(dest, message, true).await
     }
 
     fn return_resource(&self, message: StreamMessage) -> EmptyResult {
-        let response = bincode::deserialize(&message.into_payload()).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
+        let response = bincode::deserialize(message.payload()).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
         self.to_http_handler.send(response).map_err(|e| send_error_response(e, file!(), line!()))
     }
 }

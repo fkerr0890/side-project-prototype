@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
 use uuid::Uuid;
 
-use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor, StreamMessageProcessor, MessageStaging}, peer::{PeerOps, self}, gateway::InboundGateway, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message, InboundMessage, IsEncrypted, NO_POSITION}, crypto::KeyStore};
+use crate::{message_processing::{SearchRequestProcessor, DiscoverPeerProcessor, MessageProcessor, StreamMessageProcessor, MessageStaging}, peer::{PeerOps, self}, gateway::InboundGateway, http::{ServerContext, self}, message::{DiscoverPeerMessage, DpMessageKind, Message, InboundMessage, IsEncrypted, NO_POSITION, Heartbeat}, crypto::KeyStore};
 
 pub struct Node {
     endpoint_pair: EndpointPair,
@@ -41,16 +41,16 @@ impl Node {
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
     
         let key_store = Arc::new(Mutex::new(KeyStore::new()));
-        let peer_ops = Arc::new(Mutex::new(PeerOps::new(self.endpoint_pair)));
+        let peer_ops = Arc::new(Mutex::new(PeerOps::new()));
         let peer_ops_clone = peer_ops.clone();
         let mut local_hosts = HashMap::new();
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
         let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), &key_store, self.endpoint_pair);
-        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone(), &peer_ops);
-        let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store), dpm_from_gateway, &peer_ops);
-        let mut smp = StreamMessageProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store), sm_from_gateway, local_hosts, to_http_handler);
+        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone())), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
+        let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone())), dpm_from_gateway);
+        let mut smp = StreamMessageProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, None), sm_from_gateway, local_hosts, to_http_handler);
     
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&self.socket, to_staging.clone());
@@ -100,31 +100,25 @@ impl Node {
             }
         });
         
-        let heartbeat_mp = MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store);
+        let heartbeat_mp = MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops));
         tokio::spawn(async move {
             loop {
-                let heartbeats = peer_ops.lock().unwrap().get_heartbeats();
-                for mut heartbeat in heartbeats {
-                    if let Err(e) = heartbeat_mp.send(heartbeat.dest(), &mut heartbeat, false).await {
-                        println!("Heartbeats stopped: {}", e);
-                        return;
-                    }
-                    
-                }
+                if let Err(e) = heartbeat_mp.send_peer_request(&mut Heartbeat::new()).await {
+                    println!("Heartbeats stopped: {}", e);
+                    return;
+                };
                 sleep(Duration::from_secs(29)).await;
             }
         });
 
         if let Some(introducer) = self.introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
-                self.endpoint_pair.public_endpoint,
-                EndpointPair::default_socket(),
                 EndpointPair::default_socket(),
                 Uuid::new_v4().simple().to_string(),
                 (peer::MAX_PEERS, peer::MAX_PEERS));
             message.add_peer(introducer);
             let inbound_message = InboundMessage::new(bincode::serialize(&message).unwrap(), message.id().to_owned(), IsEncrypted::False, NO_POSITION);
-            self.socket.send_to(&bincode::serialize(&inbound_message).unwrap(), message.dest()).await.unwrap();
+            self.socket.send_to(&bincode::serialize(&inbound_message).unwrap(), self.endpoint_pair.public_endpoint).await.unwrap();
         }
         else if let Some(initial_peers) = &self.initial_peers {
             for peer in initial_peers {
@@ -157,7 +151,7 @@ impl Node {
             name,
             port: self.endpoint_pair.public_endpoint.port(),
             uuid: self.uuid.clone(),
-            peers: peer_ops.lock().unwrap().peers().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect()
+            peers: peer_ops.lock().unwrap().peers_and_scores().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect()
         }
     }
 }

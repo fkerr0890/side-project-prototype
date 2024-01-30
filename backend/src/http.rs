@@ -4,7 +4,7 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::{message::{SearchMessage, StreamMessage, StreamMessageKind, Message}, node::EndpointPair};
+use crate::message::{SearchMessage, StreamMessage, StreamMessageKind, Message};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -181,8 +181,6 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         }
     };
     context.to_smp.send(StreamMessage::new(
-        EndpointPair::default_socket(),
-        EndpointPair::default_socket(),
         host_name.to_owned(),
         search_request.id().to_owned(),
         StreamMessageKind::Request,

@@ -1,8 +1,6 @@
-use std::fmt::Debug;
-
 use serde::{Serialize, Deserialize};
 
-use crate::{node::EndpointPair, message::{Heartbeat, Message}};
+use crate::node::EndpointPair;
 
 use priority_queue::DoublePriorityQueue;
 
@@ -15,14 +13,14 @@ pub enum PeerStatus {
 }
 
 pub struct PeerOps {
-    peers: DoublePriorityQueue<EndpointPair, i32>,
-    endpoint_pair: EndpointPair
+    peers: DoublePriorityQueue<EndpointPair, i32>
 }
 
 impl PeerOps {
-    pub fn new(endpoint_pair: EndpointPair) -> Self { Self { peers: DoublePriorityQueue::new(), endpoint_pair } }
+    pub fn new() -> Self { Self { peers: DoublePriorityQueue::new() } }
 
-    pub fn peers(&self) -> Vec<(EndpointPair, i32)> { self.peers.iter().map(|(i, score)| (*i, *score)).collect() }
+    pub fn peers(&self) -> Vec<EndpointPair> { self.peers.iter().map(|p| *p.0).collect() }
+    pub fn peers_and_scores(&self) -> Vec<(EndpointPair, i32)> { self.peers.iter().map(|(i, score)| (*i, *score)).collect() }
     pub fn peers_len(&self) -> usize { self.peers.len() }
 
     pub fn add_initial_peer(&mut self, endpoint_pair: EndpointPair) {
@@ -42,25 +40,5 @@ impl PeerOps {
             }
             self.peers.push(endpoint_pair, score);
         }
-    }
-
-    pub fn check_request<T: Message + Clone + Debug>(&self, request: T) -> Vec<T> {
-        let mut messages = Vec::new();
-        for peer in self.peers.iter() {
-            let mut message = request.clone();
-            message.set_sender(self.endpoint_pair.public_endpoint);
-            message.replace_dest_and_timestamp(peer.0.public_endpoint);
-            if message.check_expiry() {
-                messages.push(message);
-            }
-            else {
-                println!("PeerOps: Message expired: {:?}", message);
-            }
-        }
-        messages
-    }
-
-    pub fn get_heartbeats(&self) -> Vec<Heartbeat> {
-        self.peers.iter().map(|peer| Heartbeat::new(peer.0.public_endpoint, self.endpoint_pair.public_endpoint)).collect()
     }
 }
