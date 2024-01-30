@@ -95,8 +95,7 @@ impl MessageStaging {
             self.to_dpp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(message) = bincode::deserialize::<Heartbeat>(message_bytes) {
-            // Ok(println!("{:?}", message))
-            Ok(())
+            Ok(println!("{:?}", message))
         }
         else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
             println!("Received stream message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string());

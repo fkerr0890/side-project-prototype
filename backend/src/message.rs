@@ -70,7 +70,10 @@ impl Heartbeat {
 impl Message for Heartbeat {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &str { &self.uuid }
-    fn replace_dest_and_timestamp(&mut self, _dest: SocketAddrV4) {}
+    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
+        self.dest = dest;
+        self.timestamp = datetime_to_timestamp(Utc::now());
+    }
     fn check_expiry(&self) -> bool { false }
     fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
 }
