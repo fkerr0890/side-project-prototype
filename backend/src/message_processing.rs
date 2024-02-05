@@ -63,11 +63,11 @@ impl MessageStaging {
             nonce.clone()
         }
         else {
-            return self.deserialize_message(message.payload())
+            return self.deserialize_message(message.payload(), false)
         };
         let crypto_result = self.key_store.lock().unwrap().transform(peer_addr, message.payload_mut(), Direction::Decode(nonce));
         match crypto_result {
-            Ok(_) => self.deserialize_message(message.payload()),
+            Ok(_) => self.deserialize_message(message.payload(), true),
             Err(Error::NoKey) => { self.cached_messages.insert(message.uuid().to_owned(), message); Ok(()) }
             Err(e) => Err(e.error_response(file!(), line!()))
         }
@@ -79,28 +79,33 @@ impl MessageStaging {
         self.key_store.lock().unwrap().agree(sender, peer_public_key).map_err(|e| e.error_response(file!(), line!()))?;
         if let Some(cached_message) = self.cached_messages.remove(&uuid) {
             let (mut cached_message, is_encrypted) = cached_message.into_payload_is_encrypted();
-            self.key_store.lock().unwrap().transform(sender, &mut cached_message, Direction::Decode(is_encrypted.nonce())).map_err(|e| e.error_response(file!(), line!()))?;
-            self.deserialize_message(&cached_message)?;
+            let (nonce1, nonce2) = is_encrypted.nonces();
+            self.key_store.lock().unwrap().transform(sender, &mut cached_message, Direction::Decode()).map_err(|e| e.error_response(file!(), line!()))?;
+            self.deserialize_message(&cached_message, true)?;
         }
         Ok(())
     }
 
-    fn deserialize_message(&mut self, message_bytes: &[u8]) -> EmptyResult {
+    fn deserialize_message(&mut self, message_bytes: &[u8], was_encrypted: bool) -> EmptyResult {
         if let Ok(message) = bincode::deserialize::<SearchMessage>(message_bytes) {
             println!("Received search message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string());
+            if SearchMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             self.to_srp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
             // println!("Received dp message, uuid: {} at {}, {:?}", message.id(), self.endpoint_pair.public_endpoint.to_string(), message.kind);
+            if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             self.to_dpp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(message) = bincode::deserialize::<Heartbeat>(message_bytes) {
-            Ok(println!("{:?}", message))
+            // Ok(println!("{:?}", message))
+            Ok(())
         }
         else if let Ok(message) = bincode::deserialize::<StreamMessage>(message_bytes) {
             println!("Received stream message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string());
+            if StreamMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             match message {
-                StreamMessage { kind: StreamMessageKind::KeyAgreement, .. } => self.handle_key_agreement(message) ,
+                StreamMessage { kind: StreamMessageKind::KeyAgreement, .. } => self.handle_key_agreement(message),
                 _ => self.to_smp.send(message).map_err(|e| { e.to_string() } )
             }
         }
@@ -211,10 +216,10 @@ impl MessageProcessor {
         self.breadcrumbs.lock().unwrap().get(id).cloned()
     }
 
-    pub async fn send_peer_request(&self, request: &mut(impl Message + Serialize)) -> EmptyResult {
-        let peers = self.peer_ops.as_ref().unwrap().lock().unwrap().peers();
+    pub async fn send_request(&self, request: &mut(impl Message + Serialize), dests: Option<HashSet<SocketAddrV4>>) -> EmptyResult {
+        let (peers, to_be_encrypted) = if let Some(dests) = dests { (dests, true) } else { (self.peer_ops.as_ref().unwrap().lock().unwrap().peers().into_iter().map(|p| p.public_endpoint).collect(), false) };
         for peer in peers {
-            self.send(peer.public_endpoint, request, false).await?;
+            self.send(peer, request, to_be_encrypted).await?;
         }
         Ok(())
     }
@@ -236,14 +241,17 @@ impl MessageProcessor {
             println!("PeerOps: Message expired: {}", message.id());
             return Ok(())
         }
+        let mut unique_parts = bincode::serialize(&message.extract_unique_parts()).map_err(|e| e.to_string())?;
         let mut serialized = bincode::serialize(message).map_err(|e| e.to_string())?;
         let is_encrypted = if to_be_encrypted {
-            IsEncrypted::True(key_store.lock().unwrap().transform(dest, &mut serialized, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?)
+            let nonce1 = key_store.lock().unwrap().transform(dest, &mut serialized, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
+            let nonce2 = key_store.lock().unwrap().transform(dest, &mut unique_parts, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
+            IsEncrypted::True((nonce1, nonce2))
         }
         else {
             IsEncrypted::False
         };
-        for chunk in Self::chunked(serialized, is_encrypted, message.id())? {
+        for chunk in Self::chunked(serialized, unique_parts, is_encrypted, message.id())? {
             socket.send_to(&chunk, dest).await.map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -260,8 +268,8 @@ impl MessageProcessor {
         });
     }
 
-    fn chunked(bytes: Vec<u8>, is_encrypted: IsEncrypted, uuid: &str) -> Result<Vec<Vec<u8>>, String> {
-        let base_message = InboundMessage::new(Vec::with_capacity(0), uuid.to_owned(), is_encrypted, message::NO_POSITION);
+    fn chunked(bytes: Vec<u8>, unique_parts_bytes: Vec<u8>, is_encrypted: IsEncrypted, uuid: &str) -> Result<Vec<Vec<u8>>, String> {
+        let base_message = InboundMessage::new(Vec::with_capacity(0), uuid.to_owned(), is_encrypted, message::NO_POSITION, unique_parts_bytes);
         let chunks = bytes.chunks(1024 - (bincode::serialized_size(&base_message).unwrap() as usize));
         let num_chunks = chunks.len();
         let (mut messages, errors): (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>) = chunks
@@ -309,7 +317,7 @@ impl SearchRequestProcessor {
             let (uuid, host_name) = search_request.into_uuid_host_name();
             return self.return_search_responses(self.construct_search_response(uuid, dest, origin, host_name)).await
         }
-        self.message_processor.send_peer_request(&mut search_request).await
+        self.message_processor.send_request(&mut search_request, None).await
     }
 
     async fn return_search_responses(&mut self, mut search_response: SearchMessage) -> EmptyResult {
@@ -342,7 +350,7 @@ impl SearchRequestProcessor {
         let mut message = self.from_staging.recv().await.ok_or("SearchRequestProcessor: failed to receive message from gateway")?;
         if message.origin() == EndpointPair::default_socket() {
             if self.active_sessions.contains(message.host_name()) {
-                println!("SearchMessageProcessor: Blocked search request for {}, reason: active session exists", message.host_name());
+                println!("SearchMessageProcessor: Blocked search request for {}, reason: active session exists, {:?}", message.host_name(), message);
                 return Ok(());
             }
             self.active_sessions.insert(message.host_name().to_owned());
@@ -396,7 +404,7 @@ impl DiscoverPeerProcessor {
             }
             self.message_processor.set_breadcrumb_ttl(Some(hairpin_response), request.id(), TTL);
             // gateway::log_debug("Propogating request");
-            self.message_processor.send_peer_request(&mut request).await?;
+            self.message_processor.send_request(&mut request, None).await?;
         }
         let endpoint_pair = if sender != EndpointPair::default_socket() {
             EndpointPair::new(sender, sender)
@@ -497,8 +505,7 @@ pub struct StreamMessageProcessor {
     cached_messages: HashMap<String, StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
     to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>,
-    active_sessions: HashMap<String, SocketAddrV4>,
-    resource_queues: HashMap<String, VecDeque<String>>
+    active_sessions: HashMap<String, ActiveSessionInfo>
 }
 impl StreamMessageProcessor {
     pub fn new(message_processor: MessageProcessor,from_staging: mpsc::UnboundedReceiver<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>) -> Self {
@@ -509,8 +516,7 @@ impl StreamMessageProcessor {
             cached_messages: HashMap::new(),
             local_hosts,
             to_http_handler,
-            active_sessions: HashMap::new(),
-            resource_queues: HashMap::new()
+            active_sessions: HashMap::new()
         }
     }
 
@@ -541,14 +547,14 @@ impl StreamMessageProcessor {
     async fn handle_request(&mut self, mut message: StreamMessage) -> EmptyResult {
         let (dest, uuid, host_name) = (message.sender(), message.id().to_owned(), message.host_name().to_owned());
         if message.sender() == EndpointPair::default_socket() {
-            self.cached_messages.insert(uuid.clone(), message.clone());
-            if let Some(dest) = self.active_sessions.get(&host_name) {
-                println!("Found active session for {}, pushed: {}", host_name, uuid);
-                let resource_queue = self.resource_queues.entry(host_name).or_default();
-                resource_queue.push_back(uuid);
-                Self::send_resource(&self.message_processor, &mut message, *dest).await?;
+            let active_session_info = self.active_sessions.entry(host_name).or_default();
+            if active_session_info.dests().len() > 0 {
+                self.message_processor.send_request(&mut message, Some(active_session_info.dests())).await?;
             }
-            Ok(())
+            else {
+                self.cached_messages.insert(uuid.clone(), message.clone());
+            }
+            Ok(active_session_info.push_resource(uuid))
         }
         else {
             self.send_response(message.payload(), dest, host_name, uuid).await
@@ -569,18 +575,20 @@ impl StreamMessageProcessor {
     }
 
     fn handle_response(&mut self, message: StreamMessage) -> EmptyResult {
-        let Some(cached_message) = self.cached_messages.remove(message.id()) else {
+        let Some(active_session_info) = self.active_sessions.get_mut(message.host_name()) else { return Ok(()) };
+        if !active_session_info.resource_is_valid(message.id(), message.sender()) {
             println!("StreamMessageProcessor: blocked response from host {:?}, reason: unsolicited response for resource {}", message.sender(), message.id());
             return Ok(())
         };
-        let Some(resource_queue) = self.resource_queues.get_mut(message.host_name()) else {
-            self.active_sessions.insert(message.host_name().to_owned(), message.sender());
-            return self.return_resource(message);
-        };
-        if resource_queue.front().unwrap() == message.id() {
-            println!("Popped: {}", resource_queue.pop_front().unwrap());
-            let cached_message = if let StreamMessageKind::Response = cached_message.kind { cached_message } else { message };
-            return self.return_resource(cached_message)
+        if active_session_info.pop_resource(message.id()) {
+            println!("Popped: {}", message.id());
+            let cached_message = if let Some(cached_message) = self.cached_messages.remove(message.id()) {
+                if let StreamMessageKind::Response = cached_message.kind { cached_message } else { message }
+            } 
+            else {
+                message
+            };
+            return self.return_resource(cached_message.payload())
         }
         else {
             self.cached_messages.insert( message.id().to_owned(), message);
@@ -592,8 +600,41 @@ impl StreamMessageProcessor {
         message_processor.send(dest, message, true).await
     }
 
-    fn return_resource(&self, message: StreamMessage) -> EmptyResult {
-        let response = bincode::deserialize(message.payload()).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
+    fn return_resource(&self, payload: &[u8]) -> EmptyResult {
+        let response = bincode::deserialize(payload).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
         self.to_http_handler.send(response).map_err(|e| send_error_response(e, file!(), line!()))
+    }
+}
+
+struct ActiveSessionInfo {
+    dests: HashSet<SocketAddrV4>,
+    resource_queue: VecDeque<String>,
+    resolved_resources: HashSet<String>
+}
+
+impl ActiveSessionInfo {
+    fn new() -> Self { Self { dests: HashSet::new(), resource_queue: VecDeque::new(), resolved_resources: HashSet::new() } }
+    fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.clone() }
+    fn push_resource(&mut self, uuid: String) { self.resource_queue.push_back(uuid) }
+    fn pop_resource(&mut self, uuid: &String) -> bool {
+        if self.is_front_resource(uuid) {
+            self.resolved_resources.insert(self.resource_queue.pop_front().unwrap());
+            return true;
+        }
+        false
+    }
+    fn is_front_resource(&self, uuid: &String) -> bool { self.resource_queue.front().unwrap() == uuid }
+    fn resource_is_valid(&mut self, uuid: &String, sender: SocketAddrV4) -> bool {
+        if self.resolved_resources.contains(uuid) || self.resource_queue.contains(uuid) {
+            self.dests.insert(sender);
+            return !self.resolved_resources.contains(uuid);
+        }
+        false        
+    }
+}
+
+impl Default for ActiveSessionInfo {
+    fn default() -> Self {
+        Self::new()
     }
 }
