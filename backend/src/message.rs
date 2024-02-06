@@ -21,32 +21,17 @@ pub trait Message {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     payload: Vec<u8>,
-    uuid: String,
     is_encrypted: IsEncrypted,
-    position: (usize, usize),
     unique_parts: Vec<u8>
 }
 impl InboundMessage {
-    pub fn new(payload: Vec<u8>, uuid: String, is_encrypted: IsEncrypted, position: (usize, usize), unique_parts: Vec<u8>) -> Self { Self { payload, uuid, is_encrypted, position, unique_parts } }
-    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
-    pub fn set_payload(mut self, payload: Vec<u8>) -> Self { self.payload = payload; self }
+    pub fn new(payload: Vec<u8>, is_encrypted: IsEncrypted, unique_parts: Vec<u8>) -> Self { Self { payload, is_encrypted, unique_parts } }
     pub fn payload(&self) -> &Vec<u8> { &self.payload }
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
-    pub fn uuid(&self) -> &str { &self.uuid }
     pub fn is_encrypted(&self) -> &IsEncrypted { &self.is_encrypted }
-    pub fn position(&self) -> (usize, usize) { self.position }
-    fn extract_payload(mut self) -> (Vec<u8>, Self) { (mem::take(&mut self.payload), self) }
     pub fn into_payload_is_encrypted(self) -> (Vec<u8>, IsEncrypted) { (self.payload, self.is_encrypted) }
-
-    pub fn reassemble_message(mut messages: Vec<Self>) -> Self {
-        messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
-        let last = messages.pop().unwrap();
-        let (last_bytes, mut base_message) = last.extract_payload();
-        let mut bytes = messages.into_iter().map(|m| m.payload).collect::<Vec<Vec<u8>>>();
-        bytes.push(last_bytes);
-        base_message.payload = bytes.concat();
-        base_message
-    }
+    pub fn into_parts(self) -> (Vec<u8>, IsEncrypted, Vec<u8>) { (self.payload, self.is_encrypted, self.unique_parts) }
+    pub fn unique_parts_mut(&mut self) -> &mut Vec<u8> { &mut self.unique_parts }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -83,7 +68,7 @@ impl Message for Heartbeat {
     fn extract_unique_parts(&mut self) -> UniqueParts {
         let sender = self.sender;
         self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp))
+        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
     }
 }
 
@@ -128,19 +113,26 @@ impl Message for StreamMessage {
     fn extract_unique_parts(&mut self) -> UniqueParts {
         let sender = self.sender;
         self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp))
+        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct UniqueParts {
     sender: SocketAddrV4,
-    timestamp: String
+    timestamp: String,
+    uuid: String,
+    position: (usize, usize)
 }
 
 impl UniqueParts {
-    fn new(sender: SocketAddrV4, timestamp: String) -> Self { Self { sender, timestamp } }
-    pub fn into_parts(self) -> (SocketAddrV4, String)  { (self.sender, self.timestamp) }
+    fn new(sender: SocketAddrV4, timestamp: String, uuid: String) -> Self { Self { sender, timestamp, uuid, position: NO_POSITION } }
+    pub fn into_parts(self) -> (SocketAddrV4, String, String, (usize, usize))  { (self.sender, self.timestamp, self.uuid, self.position) }
+    pub fn position(&self) -> (usize, usize) { self.position }
+    pub fn uuid(&self) -> &str { &self.uuid }
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    
+    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -209,7 +201,7 @@ impl Message for SearchMessage {
     fn extract_unique_parts(&mut self) -> UniqueParts {
         let sender = self.sender;
         self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp))
+        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
     }
 }
 
@@ -278,7 +270,7 @@ impl Message for DiscoverPeerMessage {
     fn extract_unique_parts(&mut self) -> UniqueParts {
         let sender = self.sender;
         self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp))
+        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
     }
 }
 

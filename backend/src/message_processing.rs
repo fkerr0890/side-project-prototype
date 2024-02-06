@@ -1,10 +1,12 @@
-use std::{net::SocketAddrV4, collections::{HashMap, HashSet, VecDeque}, time::Duration, sync::{Arc, Mutex}};
+use core::num;
+use std::{collections::{HashMap, HashSet, VecDeque}, mem, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
+use ring::aead;
 use serde::Serialize;
 use tokio::{sync::{oneshot, mpsc}, time::sleep, net::UdpSocket};
 
-use crate::{message::{SearchMessageKind, SearchMessage, Message, DiscoverPeerMessage, DpMessageKind, StreamMessage, StreamMessageKind, InboundMessage, IsEncrypted, self, Heartbeat}, gateway::EmptyResult, peer::PeerOps, http::{SerdeHttpResponse, self}, node::EndpointPair, crypto::{KeyStore, Direction, Error}};
+use crate::{crypto::{Direction, Error, KeyStore}, gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{self, DiscoverPeerMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind, UniqueParts}, node::EndpointPair, peer::PeerOps};
 
 pub static SEARCH_TIMEOUT: i64 = 30;
 pub static TTL: u64 = 200;
@@ -20,7 +22,7 @@ pub struct MessageStaging {
     to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     key_store: Arc<Mutex<KeyStore>>,
-    message_staging: HashMap<String, HashMap<usize, InboundMessage>>,
+    message_staging: HashMap<String, HashMap<usize, StagedMessage>>,
     cached_messages: HashMap<String, InboundMessage>,
     staging_ttls: HashMap<String, oneshot::Receiver<()>>,
     endpoint_pair: EndpointPair
@@ -50,15 +52,24 @@ impl MessageStaging {
 
     pub async fn receive(&mut self) -> EmptyResult {
         let (peer_addr, inbound_message) = self.from_gateway.recv().await.ok_or("MessageStaging: failed to receive message from gateway")?;
-        let res = self.stage_message(inbound_message);
+        let (payload, is_encrypted, mut unique_parts) = inbound_message.into_parts();
+        let nonce = if let IsEncrypted::True((nonce1, nonce2)) = is_encrypted {
+            self.key_store.lock().unwrap().transform(peer_addr, &mut unique_parts, Direction::Decode(nonce2)).map_err(|e| e.error_response(file!(), line!()))?;
+            Some(nonce1)
+        }
+        else {
+            None
+        };
+        let unique_parts = bincode::deserialize(&unique_parts).map_err(|e| e.to_string())?;
+        let res = self.stage_message(payload, nonce, unique_parts);
         if let Some(message_parts) = res {
             return self.reassemble_message(message_parts, peer_addr);
         }
         Ok(())
     }
 
-    fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>, peer_addr: SocketAddrV4) -> EmptyResult {
-        let mut message = InboundMessage::reassemble_message(message_parts);
+    fn reassemble_message(&mut self, message_parts: Vec<StagedMessage>, peer_addr: SocketAddrV4) -> EmptyResult {
+        let mut message = StagedMessage::reassemble_message(message_parts);
         let nonce = if let IsEncrypted::True(nonce) = message.is_encrypted() {
             nonce.clone()
         }
@@ -114,17 +125,17 @@ impl MessageStaging {
         }
     }
 
-    fn stage_message(&mut self, message: InboundMessage) -> Option<Vec<InboundMessage>> {
-        let (index, num_chunks) = message.position();
+    fn stage_message(&mut self, payload: Vec<u8>, nonce: Option<Vec<u8>>, unique_parts: UniqueParts) -> Option<Vec<StagedMessage>> {
+        let (sender, .., uuid, position) = unique_parts.into_parts();
+        let (index, num_chunks) = position;
         if num_chunks == 1 {
             // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
-            Some(vec![message])
+            Some(vec![StagedMessage::new(payload, nonce, unique_parts.sender())])
         }
         else {
-            let uuid = message.uuid().to_owned();
             let staged_messages_len = {
                 let staged_messages= self.message_staging.entry(uuid.clone()).or_insert(HashMap::with_capacity(num_chunks));
-                staged_messages.insert(index, message);
+                staged_messages.insert(index, StagedMessage::new(payload, nonce, sender));
                 staged_messages.len()
             };
             if staged_messages_len == 1 {
@@ -136,7 +147,7 @@ impl MessageStaging {
             }
             if staged_messages_len == num_chunks {
                 // gateway::log_debug("Collected all messages");
-                let messages: Vec<InboundMessage> = self.message_staging.remove(&uuid).unwrap().into_values().collect();
+                let messages: Vec<StagedMessage> = self.message_staging.remove(&uuid).unwrap().into_values().collect();
                 return Some(messages);
             }
             None
@@ -162,6 +173,24 @@ impl MessageStaging {
         else {
             true
         }
+    }
+}
+
+pub struct StagedMessage {
+    payload: Vec<u8>,
+    nonce: Option<Vec<u8>>,
+    sender: SocketAddrV4,
+    position: (usize, usize)
+}
+
+impl StagedMessage {
+    pub fn new(payload: Vec<u8>, nonce: Option<Vec<u8>>, sender: SocketAddrV4, position: (usize, usize)) -> Self { Self { payload, nonce, sender, position } }
+    fn into_payload_sender(mut self) -> (Vec<u8>, SocketAddrV4) { (self.payload, self.sender) }
+
+    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, Vec<SocketAddrV4>) {
+        messages.sort_by(|a, b| a.position.0.cmp(&b.position.0));
+        let (bytes, senders): (Vec<Vec<u8>>, Vec<SocketAddrV4>) = messages.into_iter().map(|m| m.into_payload_sender()).unzip();
+        (bytes.concat(), senders)
     }
 }
 
@@ -241,17 +270,9 @@ impl MessageProcessor {
             println!("PeerOps: Message expired: {}", message.id());
             return Ok(())
         }
-        let mut unique_parts = bincode::serialize(&message.extract_unique_parts()).map_err(|e| e.to_string())?;
-        let mut serialized = bincode::serialize(message).map_err(|e| e.to_string())?;
-        let is_encrypted = if to_be_encrypted {
-            let nonce1 = key_store.lock().unwrap().transform(dest, &mut serialized, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
-            let nonce2 = key_store.lock().unwrap().transform(dest, &mut unique_parts, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
-            IsEncrypted::True((nonce1, nonce2))
-        }
-        else {
-            IsEncrypted::False
-        };
-        for chunk in Self::chunked(serialized, unique_parts, is_encrypted, message.id())? {
+        let serialized = bincode::serialize(message).map_err(|e| e.to_string())?;
+        let unique_parts = message.extract_unique_parts();
+        for chunk in Self::chunked(key_store, dest, serialized, unique_parts, to_be_encrypted, message.id())? {
             socket.send_to(&chunk, dest).await.map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -268,13 +289,13 @@ impl MessageProcessor {
         });
     }
 
-    fn chunked(bytes: Vec<u8>, unique_parts_bytes: Vec<u8>, is_encrypted: IsEncrypted, uuid: &str) -> Result<Vec<Vec<u8>>, String> {
-        let base_message = InboundMessage::new(Vec::with_capacity(0), uuid.to_owned(), is_encrypted, message::NO_POSITION, unique_parts_bytes);
-        let chunks = bytes.chunks(1024 - (bincode::serialized_size(&base_message).unwrap() as usize));
+    fn chunked(key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, bytes: Vec<u8>, unique_parts: UniqueParts, to_be_encrypted: bool, uuid: &str) -> Result<Vec<Vec<u8>>, String> {
+        let base_is_encrypted = if to_be_encrypted { IsEncrypted::True(([0u8; aead::NONCE_LEN].to_vec(), [0u8; aead::NONCE_LEN].to_vec())) } else { IsEncrypted::False };
+        let chunks = bytes.chunks(1024 - (bincode::serialized_size(&base_is_encrypted).unwrap() + bincode::serialized_size(&unique_parts).unwrap()) as usize);
         let num_chunks = chunks.len();
         let (mut messages, errors): (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>) = chunks
             .enumerate()
-            .map(|(i, chunk)| bincode::serialize(&base_message.clone().set_payload(chunk.to_vec()).set_position((i, num_chunks))).map_err(|e| e.to_string()))
+            .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store.clone(), dest, chunk.to_vec(), unique_parts.clone(), (i, num_chunks), to_be_encrypted))
             .map(|r| { match r { Ok(bytes) => (bytes, String::new()), Err(e) => (Vec::new(), e) } })
             .partition(|r| r.0.len() > 0);
         if errors.len() > 0 {
@@ -282,6 +303,21 @@ impl MessageProcessor {
         }
         messages.shuffle(&mut SmallRng::from_entropy());
         Ok(messages.into_iter().map(|o| o.0).collect())
+    }
+
+    fn generate_inbound_message_bytes(key_store: Arc<Mutex<KeyStore>>, dest: SocketAddrV4, mut chunk: Vec<u8>, unique_parts: UniqueParts, position: (usize, usize), to_be_encrypted: bool) -> Result<Vec<u8>, String> {
+        unique_parts.set_position(position);
+        let mut unique_parts_bytes = bincode::serialize(&unique_parts).map_err(|e| e.to_string())?;
+        let is_encrypted = if to_be_encrypted {
+            let mut key_store = key_store.lock().unwrap();
+            let nonce1 = key_store.transform(dest, &mut chunk, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
+            let nonce2 = key_store.transform(dest, &mut unique_parts_bytes, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
+            IsEncrypted::True((nonce1, nonce2))
+        }
+        else {
+            IsEncrypted::False
+        };
+        bincode::serialize(&InboundMessage::new(chunk, is_encrypted, unique_parts_bytes)).map_err(|e| e.to_string())
     }
 }
 
