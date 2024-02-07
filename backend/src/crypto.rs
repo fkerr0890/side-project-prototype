@@ -50,8 +50,8 @@ impl KeyStore {
             },
             Direction::Decode(nonce_bytes) => {
                 let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)?;
-                key_set.opening_key.open_in_place(nonce, aad, payload)?;
-                Ok(Vec::with_capacity(0))
+                let res = key_set.opening_key.open_in_place(nonce, aad, payload)?.to_vec();
+                Ok(res)
             }
         }
     }

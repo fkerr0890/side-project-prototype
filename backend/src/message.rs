@@ -1,6 +1,6 @@
 use chrono::{Utc, SecondsFormat, DateTime, Duration};
 use serde::{Serialize, Deserialize};
-use std::{str, net::SocketAddrV4, mem};
+use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
 use crate::message_processing::SEARCH_TIMEOUT;
@@ -15,32 +15,30 @@ pub trait Message {
     fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4);
     fn check_expiry(&self) -> bool;
     fn set_sender(&mut self, sender: SocketAddrV4);
-    fn extract_unique_parts(&mut self) -> UniqueParts;
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     payload: Vec<u8>,
     is_encrypted: IsEncrypted,
-    unique_parts: Vec<u8>
+    unique_parts: UniqueParts
 }
 impl InboundMessage {
-    pub fn new(payload: Vec<u8>, is_encrypted: IsEncrypted, unique_parts: Vec<u8>) -> Self { Self { payload, is_encrypted, unique_parts } }
+    pub fn new(payload: Vec<u8>, is_encrypted: IsEncrypted, unique_parts: UniqueParts) -> Self { Self { payload, is_encrypted, unique_parts } }
     pub fn payload(&self) -> &Vec<u8> { &self.payload }
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn is_encrypted(&self) -> &IsEncrypted { &self.is_encrypted }
     pub fn into_payload_is_encrypted(self) -> (Vec<u8>, IsEncrypted) { (self.payload, self.is_encrypted) }
-    pub fn into_parts(self) -> (Vec<u8>, IsEncrypted, Vec<u8>) { (self.payload, self.is_encrypted, self.unique_parts) }
-    pub fn unique_parts_mut(&mut self) -> &mut Vec<u8> { &mut self.unique_parts }
+    pub fn into_parts(self) -> (Vec<u8>, IsEncrypted, UniqueParts) { (self.payload, self.is_encrypted, self.unique_parts) }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum IsEncrypted {
-    True((Vec<u8>, Vec<u8>)),
+    True(Vec<u8>),
     False
 }
 impl IsEncrypted {
-    pub fn nonces(self) -> (Vec<u8>, Vec<u8>) { if let Self::True(nonces) = self { nonces } else { panic!() } }
+    pub fn nonce(self) -> Vec<u8> { if let Self::True(nonce) = self { nonce } else { panic!() } }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -53,6 +51,10 @@ pub struct Heartbeat {
 
 impl Heartbeat {
     pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: EndpointPair::default_socket(), timestamp: String::new(), uuid: Uuid::new_v4().simple().to_string() } }
+    pub fn restore_unique_parts(&mut self, sender: SocketAddrV4, uuid: String) {
+        self.sender = sender;
+        self.uuid = uuid;
+    }
 }
 
 impl Message for Heartbeat {
@@ -65,18 +67,13 @@ impl Message for Heartbeat {
     }
     fn check_expiry(&self) -> bool { false }
     fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
-    fn extract_unique_parts(&mut self) -> UniqueParts {
-        let sender = self.sender;
-        self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamMessage {
     pub kind: StreamMessageKind,
     dest: SocketAddrV4,
-    sender: SocketAddrV4,
+    senders: Vec<SocketAddrV4>,
     timestamp: String,
     host_name: String,
     uuid: String,
@@ -86,7 +83,7 @@ impl StreamMessage {
     pub fn new(host_name: String, uuid: String, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
         Self {
             dest: EndpointPair::default_socket(),
-            sender: EndpointPair::default_socket(),
+            senders: Vec::new(),
             timestamp: datetime_to_timestamp(Utc::now()),
             host_name,
             uuid,
@@ -96,9 +93,15 @@ impl StreamMessage {
     }
 
     pub fn payload(&self) -> &Vec<u8> { &self.payload }
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn senders(&self) -> &Vec<SocketAddrV4> { &self.senders }
+    pub fn only_sender(&mut self) -> SocketAddrV4 { self.senders.pop().unwrap() }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn into_uuid_payload(self) -> (String, Vec<u8>) { (self.uuid, self.payload) }
+
+    pub fn restore_unique_parts(&mut self, senders: Vec<SocketAddrV4>, uuid: String) {
+        self.senders = senders;
+        self.uuid = uuid;
+    }
 }
 impl Message for StreamMessage {
     const ENCRYPTION_REQUIRED: bool = true;
@@ -109,25 +112,19 @@ impl Message for StreamMessage {
         self.timestamp = datetime_to_timestamp(Utc::now());
     }
     fn check_expiry(&self) -> bool { false }
-    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
-    fn extract_unique_parts(&mut self) -> UniqueParts {
-        let sender = self.sender;
-        self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
-    }
+    fn set_sender(&mut self, sender: SocketAddrV4) { self.senders.push(sender); }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UniqueParts {
     sender: SocketAddrV4,
-    timestamp: String,
     uuid: String,
     position: (usize, usize)
 }
 
 impl UniqueParts {
-    fn new(sender: SocketAddrV4, timestamp: String, uuid: String) -> Self { Self { sender, timestamp, uuid, position: NO_POSITION } }
-    pub fn into_parts(self) -> (SocketAddrV4, String, String, (usize, usize))  { (self.sender, self.timestamp, self.uuid, self.position) }
+    pub fn new(sender: SocketAddrV4, uuid: String) -> Self { Self { sender, uuid, position: NO_POSITION } }
+    pub fn into_parts(self) -> (SocketAddrV4, String, (usize, usize))  { (self.sender, self.uuid, self.position) }
     pub fn position(&self) -> (usize, usize) { self.position }
     pub fn uuid(&self) -> &str { &self.uuid }
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
@@ -180,6 +177,11 @@ impl SearchMessage {
     }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn into_uuid_host_name(self) -> (String, String) { (self.uuid, self.host_name) }
+
+    pub fn restore_unique_parts(&mut self, sender: SocketAddrV4, uuid: String) {
+        self.sender = sender;
+        self.uuid = uuid;
+    }
 }
 
 impl Message for SearchMessage {
@@ -198,11 +200,6 @@ impl Message for SearchMessage {
     }
 
     fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
-    fn extract_unique_parts(&mut self) -> UniqueParts {
-        let sender = self.sender;
-        self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -253,6 +250,11 @@ impl DiscoverPeerMessage {
     }
 
     pub fn set_kind(mut self, kind: DpMessageKind) -> Self { self.kind = kind; self }
+
+    pub fn restore_unique_parts(&mut self, sender: SocketAddrV4, uuid: String) {
+        self.sender = sender;
+        self.uuid = uuid;
+    }
 }
 
 impl Message for DiscoverPeerMessage {
@@ -267,11 +269,6 @@ impl Message for DiscoverPeerMessage {
 
     fn check_expiry(&self) -> bool { false }
     fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
-    fn extract_unique_parts(&mut self) -> UniqueParts {
-        let sender = self.sender;
-        self.sender = EndpointPair::default_socket();
-        UniqueParts::new(sender, mem::take(&mut self.timestamp), mem::take(&mut self.uuid))
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

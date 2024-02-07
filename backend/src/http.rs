@@ -4,7 +4,7 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::message::{SearchMessage, StreamMessage, StreamMessageKind, Message};
+use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -180,11 +180,13 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
                 .unwrap())
         }
     };
-    context.to_smp.send(StreamMessage::new(
+    let mut sm = StreamMessage::new(
         host_name.to_owned(),
         search_request.id().to_owned(),
         StreamMessageKind::Request,
-        payload)).ok();
+        payload);
+    sm.set_sender(EndpointPair::default_socket());
+    context.to_smp.send(sm).ok();
     context.to_srp.send(search_request).ok();
     let mut rx = context.from_smp.lock().await;
     let response = match rx.recv().await {
@@ -231,7 +233,7 @@ pub fn construct_error_response(e: String, request_version: String) -> SerdeHttp
     println!("http error: {}", e);
     let body = format!("<h1>{}</h1>", e);
     SerdeHttpResponse::builder(500, request_version)
-        .header("Content-Type", "text/plain")
+        .header("Content-Type", "text/html")
         .header("Content-Length", &body.len().to_string())
         .body(body.into_bytes())
 }
