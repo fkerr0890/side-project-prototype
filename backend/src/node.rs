@@ -103,7 +103,7 @@ impl Node {
         let heartbeat_mp = MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops));
         tokio::spawn(async move {
             loop {
-                if let Err(e) = heartbeat_mp.send_request(&mut Heartbeat::new(), None).await {
+                if let Err(e) = heartbeat_mp.send_request(&mut Heartbeat::new(), None) {
                     println!("Heartbeats stopped: {}", e);
                     return;
                 };
