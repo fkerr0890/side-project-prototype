@@ -21,15 +21,11 @@ pub trait Message {
 pub struct InboundMessage {
     payload: Vec<u8>,
     is_encrypted: IsEncrypted,
-    unique_parts: UniqueParts
+    separate_parts: SeparateParts
 }
 impl InboundMessage {
-    pub fn new(payload: Vec<u8>, is_encrypted: IsEncrypted, unique_parts: UniqueParts) -> Self { Self { payload, is_encrypted, unique_parts } }
-    pub fn payload(&self) -> &Vec<u8> { &self.payload }
-    pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
-    pub fn is_encrypted(&self) -> &IsEncrypted { &self.is_encrypted }
-    pub fn into_payload_is_encrypted(self) -> (Vec<u8>, IsEncrypted) { (self.payload, self.is_encrypted) }
-    pub fn into_parts(self) -> (Vec<u8>, IsEncrypted, UniqueParts) { (self.payload, self.is_encrypted, self.unique_parts) }
+    pub fn new(payload: Vec<u8>, is_encrypted: IsEncrypted, separate_parts: SeparateParts) -> Self { Self { payload, is_encrypted, separate_parts } }
+    pub fn into_parts(self) -> (Vec<u8>, IsEncrypted, SeparateParts) { (self.payload, self.is_encrypted, self.separate_parts) }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -51,10 +47,6 @@ pub struct Heartbeat {
 
 impl Heartbeat {
     pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: EndpointPair::default_socket(), timestamp: String::new(), uuid: Uuid::new_v4().simple().to_string() } }
-    pub fn restore_unique_parts(&mut self, sender: SocketAddrV4, uuid: String) {
-        self.sender = sender;
-        self.uuid = uuid;
-    }
 }
 
 impl Message for Heartbeat {
@@ -97,11 +89,6 @@ impl StreamMessage {
     pub fn only_sender(&mut self) -> SocketAddrV4 { self.senders.pop().unwrap() }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn into_uuid_payload(self) -> (String, Vec<u8>) { (self.uuid, self.payload) }
-
-    pub fn restore_unique_parts(&mut self, senders: Vec<SocketAddrV4>, uuid: String) {
-        self.senders = senders;
-        self.uuid = uuid;
-    }
 }
 impl Message for StreamMessage {
     const ENCRYPTION_REQUIRED: bool = true;
@@ -116,13 +103,13 @@ impl Message for StreamMessage {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UniqueParts {
+pub struct SeparateParts {
     sender: SocketAddrV4,
     uuid: String,
     position: (usize, usize)
 }
 
-impl UniqueParts {
+impl SeparateParts {
     pub fn new(sender: SocketAddrV4, uuid: String) -> Self { Self { sender, uuid, position: NO_POSITION } }
     pub fn into_parts(self) -> (SocketAddrV4, String, (usize, usize))  { (self.sender, self.uuid, self.position) }
     pub fn position(&self) -> (usize, usize) { self.position }
@@ -177,11 +164,6 @@ impl SearchMessage {
     }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn into_uuid_host_name(self) -> (String, String) { (self.uuid, self.host_name) }
-
-    pub fn restore_unique_parts(&mut self, sender: SocketAddrV4, uuid: String) {
-        self.sender = sender;
-        self.uuid = uuid;
-    }
 }
 
 impl Message for SearchMessage {
@@ -250,11 +232,6 @@ impl DiscoverPeerMessage {
     }
 
     pub fn set_kind(mut self, kind: DpMessageKind) -> Self { self.kind = kind; self }
-
-    pub fn restore_unique_parts(&mut self, sender: SocketAddrV4, uuid: String) {
-        self.sender = sender;
-        self.uuid = uuid;
-    }
 }
 
 impl Message for DiscoverPeerMessage {
