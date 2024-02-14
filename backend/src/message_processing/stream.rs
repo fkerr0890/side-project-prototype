@@ -1,6 +1,6 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::{HashMap, HashSet, VecDeque}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{Message, StreamMessage, StreamMessageKind}, node::EndpointPair};
+use crate::{gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientMap};
 use super::{send_error_response, MessageProcessor};
 
 pub struct StreamMessageProcessor {
@@ -8,7 +8,7 @@ pub struct StreamMessageProcessor {
     from_staging: mpsc::UnboundedReceiver<StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
     to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>,
-    active_sessions: Arc<Mutex<HashMap<String, ActiveSessionInfo>>>
+    active_sessions: TransientMap<String, ActiveSessionInfo>
 }
 impl StreamMessageProcessor {
     pub fn new(message_processor: MessageProcessor,from_staging: mpsc::UnboundedReceiver<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, to_http_handler: mpsc::UnboundedSender<SerdeHttpResponse>) -> Self {
@@ -18,7 +18,7 @@ impl StreamMessageProcessor {
             from_staging,
             local_hosts,
             to_http_handler,
-            active_sessions: Arc::new(Mutex::new(HashMap::new()))
+            active_sessions: TransientMap::new(3660)
         }
     }
 
@@ -33,7 +33,7 @@ impl StreamMessageProcessor {
 
     fn handle_key_agreement(&mut self, mut message: StreamMessage) -> EmptyResult {
         let dest = message.dest();
-        let mut active_sessions = self.active_sessions.lock().unwrap();
+        let mut active_sessions = self.active_sessions.map().lock().unwrap();
         let active_session = active_sessions.get_mut(message.host_name()).unwrap();
         match active_session.get_resource_mut(message.id(), dest) {
             Ok(cached_message) => {
@@ -45,7 +45,7 @@ impl StreamMessageProcessor {
     }
 
     fn send_follow_ups(&self, host_name: String) {
-        let (socket, key_store, sender, active_sessions) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), self.message_processor.endpoint_pair.public_endpoint, self.active_sessions.clone());
+        let (socket, key_store, sender, active_sessions) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), self.message_processor.endpoint_pair.public_endpoint, self.active_sessions.map().clone());
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
@@ -71,7 +71,8 @@ impl StreamMessageProcessor {
     async fn handle_request(&mut self, mut message: StreamMessage) -> EmptyResult {
         let (dest, uuid, host_name) = (message.only_sender(), message.id().to_owned(), message.host_name().to_owned());
         if dest == EndpointPair::default_socket() {
-            let mut active_sessions = self.active_sessions.lock().unwrap();
+            self.active_sessions.set_timer(host_name.clone());
+            let mut active_sessions = self.active_sessions.map().lock().unwrap();
             let active_session_info = active_sessions.entry(host_name.clone()).or_default();
             let dests = active_session_info.dests();
             if dests.len() > 0 {
@@ -100,7 +101,7 @@ impl StreamMessageProcessor {
     }
 
     fn handle_response(&mut self, message: StreamMessage) -> EmptyResult {
-        let mut active_sessions = self.active_sessions.lock().unwrap();
+        let mut active_sessions = self.active_sessions.map().lock().unwrap();
         let Some(active_session_info) = active_sessions.get_mut(message.host_name()) else { return Ok(()) };
         let cached_messages = match active_session_info.pop_resource(message) { Ok(message) => message, Err(e) => { println!("{e}"); return Ok(()) } };
         for message in cached_messages {
