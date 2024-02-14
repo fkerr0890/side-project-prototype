@@ -1,6 +1,6 @@
 use std::{collections::HashSet, time::Duration, panic, process, future};
 
-use p2p::{self, node::Node, message_processing::TTL};
+use p2p::{self, node::Node, message_processing::DPP_TTL};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{time::sleep, fs};
 use uuid::Uuid;
@@ -32,7 +32,7 @@ async fn basic() {
         let is_end = host_indices.contains(&i);
         let is_start = start == i;
         tokio::spawn(async move { node.listen(is_start, is_end).await });
-        sleep(Duration::from_millis(TTL*6)).await;
+        sleep(Duration::from_millis(DPP_TTL*6)).await;
         println!();
     }
     future::pending::<()>().await;
