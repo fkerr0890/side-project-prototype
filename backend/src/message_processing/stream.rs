@@ -51,9 +51,6 @@ impl StreamMessageProcessor {
                 let mut active_sessions = active_sessions.lock().unwrap();
                 let active_session = active_sessions.get_mut(&host_name).unwrap();
                 active_session.send_cached_messages(|requests, dests| {
-                    if requests.len() == 0 {
-                        return;
-                    }
                     for message in requests {
                         if let StreamMessageKind::Request = message.kind {                    
                             for dest in dests.iter() {
@@ -72,14 +69,17 @@ impl StreamMessageProcessor {
         if dest == EndpointPair::default_socket() {
             self.active_sessions.set_timer(host_name.clone(), String::from("StreamActiveSessions"));
             let mut active_sessions = self.active_sessions.map().lock().unwrap();
-            let active_session_info = active_sessions.entry(host_name.clone()).or_default();
+            if !active_sessions.contains_key(&host_name) {
+                self.send_follow_ups(host_name.clone());
+            }
+            let active_session_info = active_sessions.entry(host_name).or_default();
             let dests = active_session_info.dests();
             if dests.len() > 0 {
                 self.message_processor.send_request(&mut message, Some(dests), true)?;
             }
             println!("Pushed: {}", message.id());
             active_session_info.push_resource(message)?;
-            Ok(self.send_follow_ups(host_name))
+            Ok(())
         }
         else {
             self.send_response(message.payload(), dest, host_name, uuid).await

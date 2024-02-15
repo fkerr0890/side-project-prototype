@@ -51,7 +51,7 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static> TransientSet<K> {
         let (set, ttl, key_owned) = (self.set.clone(), self.ttl, key.to_owned());
         tokio::spawn(async move {
             sleep(Duration::from_secs(ttl)).await;
-            println!("TransientSet: Removing {}", key_owned);
+            // println!("TransientSet: Removing {}", key_owned);
             set.lock().unwrap().remove(&key_owned);
         });
         self.set.lock().unwrap().insert(key.to_owned());
