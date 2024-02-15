@@ -1,17 +1,17 @@
-use std::{collections::{HashMap, HashSet}, net::SocketAddrV4};
+use std::{collections::HashMap, net::SocketAddrV4};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{gateway::EmptyResult, message::{Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair};
+use crate::{gateway::EmptyResult, message::{Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientSet};
 
-use super::{send_error_response, MessageProcessor, SRP_TTL};
+use super::{send_error_response, MessageProcessor, ACTIVE_SESSION_TTL, SRP_TTL};
 
 pub struct SearchRequestProcessor {
     message_processor: MessageProcessor,
     from_staging: mpsc::UnboundedReceiver<SearchMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
-    active_sessions: HashSet<String>
+    active_sessions: TransientSet<String>
 }
 
 impl SearchRequestProcessor {
@@ -21,7 +21,7 @@ impl SearchRequestProcessor {
             from_staging,
             to_smp,
             local_hosts,
-            active_sessions: HashSet::new()
+            active_sessions: TransientSet::new(ACTIVE_SESSION_TTL)
         }
     }
 
@@ -70,11 +70,10 @@ impl SearchRequestProcessor {
     pub async fn receive(&mut self) -> EmptyResult  {
         let mut message = self.from_staging.recv().await.ok_or("SearchRequestProcessor: failed to receive message from gateway")?;
         if message.origin() == EndpointPair::default_socket() {
-            if self.active_sessions.contains(message.host_name()) {
+            if !self.active_sessions.insert(message.host_name()) {
                 println!("SearchMessageProcessor: Blocked search request for {}, reason: active session exists, {:?}", message.host_name(), message);
                 return Ok(());
             }
-            self.active_sessions.insert(message.host_name().to_owned());
             message.set_origin(self.message_processor.endpoint_pair.public_endpoint)
         }
         match message {

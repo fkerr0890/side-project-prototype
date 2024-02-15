@@ -11,7 +11,8 @@ pub use self::discover::DiscoverPeerProcessor;
 
 pub const SEARCH_TIMEOUT: i64 = 30;
 pub const DPP_TTL: u64 = 200;
-const SRP_TTL: u64 = 30000;
+const SRP_TTL: u64 = 30;
+const ACTIVE_SESSION_TTL: u64 = 3600;
 
 pub mod stage;
 pub mod stream;

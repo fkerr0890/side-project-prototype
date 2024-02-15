@@ -1,5 +1,7 @@
 use chrono::{Utc, SecondsFormat, DateTime, Duration};
 use serde::{Serialize, Deserialize};
+use std::collections::HashSet;
+use std::mem;
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
@@ -26,6 +28,19 @@ pub struct InboundMessage {
 impl InboundMessage {
     pub fn new(payload: Vec<u8>, is_encrypted: IsEncrypted, separate_parts: SeparateParts) -> Self { Self { payload, is_encrypted, separate_parts } }
     pub fn into_parts(self) -> (Vec<u8>, IsEncrypted, SeparateParts) { (self.payload, self.is_encrypted, self.separate_parts) }
+    pub fn take_is_encrypted(&mut self) -> IsEncrypted { mem::take(&mut self.is_encrypted) }
+    pub fn set_is_encrypted_true(&mut self, nonce: Vec<u8>) { self.is_encrypted = IsEncrypted::True(nonce) }
+    pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
+    pub fn separate_parts(&self) -> &SeparateParts { &self.separate_parts }
+
+    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, HashSet<SocketAddrV4>) {
+        messages.sort_by(|a, b| a.separate_parts.position.0.cmp(&b.separate_parts.position.0));
+        let (bytes, senders): (Vec<Vec<u8>>, Vec<SocketAddrV4>) = messages
+            .into_iter()
+            .map(|m| { let parts = m.into_parts(); (parts.0, parts.2.sender) })
+            .unzip();
+        (bytes.concat(), HashSet::from_iter(senders.into_iter()))
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -35,6 +50,11 @@ pub enum IsEncrypted {
 }
 impl IsEncrypted {
     pub fn nonce(self) -> Vec<u8> { if let Self::True(nonce) = self { nonce } else { panic!() } }
+}
+impl Default for IsEncrypted {
+    fn default() -> Self {
+        Self::False
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -113,7 +133,7 @@ impl SeparateParts {
     pub fn new(sender: SocketAddrV4, uuid: String) -> Self { Self { sender, uuid, position: NO_POSITION } }
     pub fn into_parts(self) -> (SocketAddrV4, String, (usize, usize))  { (self.sender, self.uuid, self.position) }
     pub fn position(&self) -> (usize, usize) { self.position }
-    pub fn uuid(&self) -> &str { &self.uuid }
+    pub fn uuid(&self) -> &str { &self.uuid}
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
@@ -162,7 +182,7 @@ impl SearchMessage {
         let public_key = if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() };
         (self.uuid, self.host_name, public_key)
     }
-    pub fn host_name(&self) -> &str { &self.host_name }
+    pub fn host_name(&self) -> &String { &self.host_name }
     pub fn into_uuid_host_name(self) -> (String, String) { (self.uuid, self.host_name) }
 }
 

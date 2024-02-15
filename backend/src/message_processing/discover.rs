@@ -2,14 +2,14 @@ use std::{collections::HashMap, net::SocketAddrV4, sync::{Arc, Mutex}, time::Dur
 
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep};
 
-use crate::{crypto::KeyStore, gateway::EmptyResult, message::{DiscoverPeerMessage, DpMessageKind, Message}, node::EndpointPair};
+use crate::{crypto::KeyStore, gateway::EmptyResult, message::{DiscoverPeerMessage, DpMessageKind, Message}, node::EndpointPair, utils::TransientMap};
 
 use super::{MessageProcessor, DPP_TTL};
 
 pub struct DiscoverPeerProcessor {
     message_processor: MessageProcessor,
     from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>,
-    message_staging: Arc<Mutex<HashMap<String, Option<DiscoverPeerMessage>>>>
+    message_staging: Arc<Mutex<HashMap<String, DiscoverPeerMessage>>>
 }
 
 impl DiscoverPeerProcessor {
@@ -63,33 +63,30 @@ impl DiscoverPeerProcessor {
     }
 
     fn stage_message(&mut self, message: DiscoverPeerMessage) -> bool {
-        let mut message_staging = self.message_staging.lock().unwrap();
-        let entry = message_staging.get(message.id());
-
-        let staged_peers_len = if let Some(staged_message) = entry {
-            if let Some(staged_message) = staged_message {
+        let staged_peers_len = {
+            let message_staging = self.message_staging.lock().unwrap();
+            let entry = message_staging.get(message.id());
+            if let Some(staged_message) = entry {
                 staged_message.peer_list().len()
             }
             else {
-                return false;
+                let message_staging_clone = self.message_staging.clone();
+                let (socket, key_store, uuid, dest, sender) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), message.id().to_owned(), self.message_processor.get_dest(message.id()).unwrap(), self.message_processor.endpoint_pair.public_endpoint);
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(DPP_TTL*2)).await;
+                    Self::send_final_response_static(&socket, &key_store, dest, sender, &message_staging_clone, &uuid);
+                    message_staging_clone.lock().unwrap().remove(&uuid);
+                });
+                0
             }
-        }
-        else {
-            let message_staging_clone = self.message_staging.clone();
-            let (socket, key_store, uuid, dest, sender) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), message.id().to_owned(), self.message_processor.get_dest(message.id()).unwrap(), self.message_processor.endpoint_pair.public_endpoint);
-            tokio::spawn(async move {
-                sleep(Duration::from_millis(DPP_TTL*2)).await;
-                Self::send_final_response_static(&socket, &key_store, dest, sender, &message_staging_clone, &uuid);
-                message_staging_clone.lock().unwrap().remove(&uuid);
-            });
-            0
         };
 
         let target_num_peers = message.hop_count().1;
         let peers_len = message.peer_list().len();
         println!("hop count: {:?}, peer list len: {}", message.hop_count(), peers_len);
         if peers_len > staged_peers_len {
-            message_staging.insert(message.id().to_owned(), Some(message));
+            // self.message_staging.set_timer(message.id().to_owned(), String::from("DiscoverPeerStaging"));
+            self.message_staging.lock().unwrap().insert(message.id().to_owned(), message);
         }
         peers_len == target_num_peers as usize
     }
@@ -114,14 +111,12 @@ impl DiscoverPeerProcessor {
         Self::send_final_response_static(&self.message_processor.socket, &self.message_processor.key_store, dest, self.message_processor.endpoint_pair.public_endpoint, &self.message_staging, uuid);
     }
 
-    fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message_staging: &Arc<Mutex<HashMap<String, Option<DiscoverPeerMessage>>>>, uuid: &str) {
+    fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message_staging: &Arc<Mutex<HashMap<String, DiscoverPeerMessage>>>, uuid: &str) {
         let staged_message = {
             let mut message_staging = message_staging.lock().unwrap();
-            let Some(staged_message) = message_staging.get_mut(uuid) else { return };
-            staged_message.take()
+            message_staging.remove(uuid)
         };
         if let Some(staged_message) = staged_message {
-            // gateway::log_debug("I'm back at the introducer");
             MessageProcessor::send_static(socket, key_store, dest, sender, &mut staged_message.set_kind(DpMessageKind::IveGotSome), false, false).ok();
         }
     }
