@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{gateway::EmptyResult, message::{Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientSet};
 
-use super::{send_error_response, MessageProcessor, ACTIVE_SESSION_TTL, SRP_TTL};
+use super::{send_error_response, MessageProcessor, ACTIVE_SESSION_TTL, SRP_TTL_MILLIS};
 
 pub struct SearchRequestProcessor {
     message_processor: MessageProcessor,
@@ -30,7 +30,7 @@ impl SearchRequestProcessor {
             return Ok(())
         }
         else {
-            self.message_processor.set_breadcrumb_ttl(None, search_request.id(), SRP_TTL);
+            self.message_processor.set_breadcrumb_ttl(None, search_request.id(), SRP_TTL_MILLIS);
         }
         if self.local_hosts.contains_key(search_request.host_name()) {
             println!("Found host {} at {}, uuid: {}", search_request.host_name(), self.message_processor.endpoint_pair.public_endpoint.port(), search_request.id());

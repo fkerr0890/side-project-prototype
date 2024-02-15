@@ -69,16 +69,17 @@ impl StreamMessageProcessor {
         if dest == EndpointPair::default_socket() {
             self.active_sessions.set_timer(host_name.clone(), String::from("StreamActiveSessions"));
             let mut active_sessions = self.active_sessions.map().lock().unwrap();
-            if !active_sessions.contains_key(&host_name) {
-                self.send_follow_ups(host_name.clone());
-            }
-            let active_session_info = active_sessions.entry(host_name).or_default();
+            let start_loop = !active_sessions.contains_key(&host_name);
+            let active_session_info = active_sessions.entry(host_name.clone()).or_default();
             let dests = active_session_info.dests();
             if dests.len() > 0 {
                 self.message_processor.send_request(&mut message, Some(dests), true)?;
             }
             println!("Pushed: {}", message.id());
             active_session_info.push_resource(message)?;
+            if start_loop {
+                self.send_follow_ups(host_name);
+            }
             Ok(())
         }
         else {
