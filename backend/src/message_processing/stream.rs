@@ -35,7 +35,7 @@ impl StreamMessageProcessor {
         let dest = message.dest();
         let mut active_sessions = self.active_sessions.map().lock().unwrap();
         let active_session = active_sessions.get_mut(message.host_name()).unwrap();
-        match active_session.send_cached_message(message.id(), dest, |cached_message| self.message_processor.send(dest, cached_message, true, true)) {
+        match active_session.send_cached_message(message.id(), Some(dest), |cached_message, dests| self.message_processor.send(dests.drain().next().unwrap(), cached_message, true, true)) {
             Ok(_) => {
                 self.message_processor.send(dest, &mut message, false, false)
             }
@@ -43,22 +43,19 @@ impl StreamMessageProcessor {
         }
     }
 
-    fn send_follow_ups(&self, host_name: String) {
+    fn send_follow_ups(&self, host_name: String, uuid: String) {
         let (socket, key_store, sender, active_sessions) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), self.message_processor.endpoint_pair.public_endpoint, self.active_sessions.map().clone());
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
                 let mut active_sessions = active_sessions.lock().unwrap();
                 let active_session = active_sessions.get_mut(&host_name).unwrap();
-                active_session.send_cached_messages(|requests, dests| {
-                    for message in requests {
-                        if let StreamMessageKind::Request = message.kind {                    
-                            for dest in dests.iter() {
-                                println!("Sending follow up for {} to {}", message.id(), dest);
-                                MessageProcessor::send_static(&socket, &key_store, *dest, sender, message, true, true).ok();
-                            }
-                        }
+                active_session.send_cached_message(&uuid, None, |request, dests| {                  
+                    for dest in dests.iter() {
+                        println!("Sending follow up for {} to {}", request.id(), dest);
+                        MessageProcessor::send_static(&socket, &key_store, *dest, sender, request, true, true).ok();
                     }
+                    Ok(())
                 });
             }
         });
@@ -78,7 +75,7 @@ impl StreamMessageProcessor {
             println!("Pushed: {}", message.id());
             active_session_info.push_resource(message)?;
             if start_loop {
-                self.send_follow_ups(host_name);
+                self.send_follow_ups(host_name, uuid);
             }
             Ok(())
         }
@@ -126,21 +123,18 @@ struct ActiveSessionInfo {
 impl ActiveSessionInfo {
     fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(30), resource_queue: VecDeque::new() } }
     fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.clone() }
-    fn send_cached_messages(&self, action: impl Fn(Vec<&mut StreamMessage>, &HashSet<SocketAddrV4>)) {
-        let mut cached_messages = self.cached_messages.map().lock().unwrap();
-        action(cached_messages.values_mut().collect::<Vec<&mut StreamMessage>>(), &self.dests);
-    }
-    fn send_cached_message(&mut self, uuid: &str, dest: SocketAddrV4, action: impl Fn(&mut StreamMessage) -> EmptyResult) -> EmptyResult {
+    fn send_cached_message(&mut self, uuid: &str, dest: Option<SocketAddrV4>, action: impl Fn(&mut StreamMessage, HashSet<SocketAddrV4>) -> EmptyResult) -> EmptyResult {
+        let dests = if let Some(dest) = dest { self.dests.insert(dest); HashSet::from([dest]) } else { self.dests() };
         let mut cached_messages = self.cached_messages.map().lock().unwrap();
         let Some(cached_message) = cached_messages.get_mut(uuid) else {
             return Err(format!("StreamMessageProcessor: blocked key agreement/initial request from client to host {:?}, reason: request expired for resource {}", dest, uuid));
         };
-        self.dests.insert(dest);
         if let StreamMessageKind::Request = cached_message.kind {
-            return action(cached_message)
+            return action(cached_message, dests)
         }
         Err(format!("StreamMessageProcessor: blocked key agreement/initial request from client to host {:?}, reason: already received resource {}", dest, uuid))
     }
+    fn initial_send_action
     fn push_resource(&mut self, message: StreamMessage) -> EmptyResult {
         self.cached_messages.set_timer(message.id().to_owned(), String::from("ActiveSessionsCache"));
         let mut cached_messages = self.cached_messages.map().lock().unwrap();
