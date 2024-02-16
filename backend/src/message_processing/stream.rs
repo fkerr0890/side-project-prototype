@@ -31,32 +31,34 @@ impl StreamMessageProcessor {
         }
     }
 
-    fn handle_key_agreement(&mut self, mut message: StreamMessage) -> EmptyResult {
+    fn handle_key_agreement(&mut self, message: StreamMessage) -> EmptyResult {
         let dest = message.dest();
         let mut active_sessions = self.active_sessions.map().lock().unwrap();
         let active_session = active_sessions.get_mut(message.host_name()).unwrap();
-        match active_session.send_cached_message(message.id(), Some(dest), |cached_message, dests| self.message_processor.send(dests.drain().next().unwrap(), cached_message, true, true)) {
-            Ok(_) => {
-                self.message_processor.send(dest, &mut message, false, false)
-            }
-            Err(e) => { println!("{e}"); Ok(()) }
+        match active_session.initial_request(dest, message, |message, cached_message, dest| {
+            self.message_processor.send(dest, message, false, false)?;
+            self.message_processor.send(dest, cached_message, true, true)
+        }) {
+            Ok(_) => Ok(()),
+            Err(e) => { println!("{}", e); Ok(()) }
         }
     }
 
-    fn send_follow_ups(&self, host_name: String, uuid: String) {
+    fn start_follow_ups(&self, host_name: String, uuid: String) {
         let (socket, key_store, sender, active_sessions) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), self.message_processor.endpoint_pair.public_endpoint, self.active_sessions.map().clone());
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
                 let mut active_sessions = active_sessions.lock().unwrap();
-                let active_session = active_sessions.get_mut(&host_name).unwrap();
-                active_session.send_cached_message(&uuid, None, |request, dests| {                  
+                let Some(active_session) = active_sessions.get_mut(&host_name) else { return };
+                if !active_session.follow_up(&uuid, |request, dests| {                  
                     for dest in dests.iter() {
                         println!("Sending follow up for {} to {}", request.id(), dest);
                         MessageProcessor::send_static(&socket, &key_store, *dest, sender, request, true, true).ok();
                     }
-                    Ok(())
-                });
+                }) {
+                    return
+                }
             }
         });
     }
@@ -64,9 +66,8 @@ impl StreamMessageProcessor {
     async fn handle_request(&mut self, mut message: StreamMessage) -> EmptyResult {
         let (dest, uuid, host_name) = (message.only_sender(), message.id().to_owned(), message.host_name().to_owned());
         if dest == EndpointPair::default_socket() {
-            self.active_sessions.set_timer(host_name.clone(), String::from("StreamActiveSessions"));
+            self.active_sessions.set_timer(host_name.clone());
             let mut active_sessions = self.active_sessions.map().lock().unwrap();
-            let start_loop = !active_sessions.contains_key(&host_name);
             let active_session_info = active_sessions.entry(host_name.clone()).or_default();
             let dests = active_session_info.dests();
             if dests.len() > 0 {
@@ -74,10 +75,7 @@ impl StreamMessageProcessor {
             }
             println!("Pushed: {}", message.id());
             active_session_info.push_resource(message)?;
-            if start_loop {
-                self.send_follow_ups(host_name, uuid);
-            }
-            Ok(())
+            Ok(self.start_follow_ups(host_name, uuid))
         }
         else {
             self.send_response(message.payload(), dest, host_name, uuid).await
@@ -123,20 +121,31 @@ struct ActiveSessionInfo {
 impl ActiveSessionInfo {
     fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(30), resource_queue: VecDeque::new() } }
     fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.clone() }
-    fn send_cached_message(&mut self, uuid: &str, dest: Option<SocketAddrV4>, action: impl Fn(&mut StreamMessage, HashSet<SocketAddrV4>) -> EmptyResult) -> EmptyResult {
-        let dests = if let Some(dest) = dest { self.dests.insert(dest); HashSet::from([dest]) } else { self.dests() };
-        let mut cached_messages = self.cached_messages.map().lock().unwrap();
-        let Some(cached_message) = cached_messages.get_mut(uuid) else {
-            return Err(format!("StreamMessageProcessor: blocked key agreement/initial request from client to host {:?}, reason: request expired for resource {}", dest, uuid));
+    fn handle_cached_message<'a>(uuid: &str, cached_message: Option<&'a mut StreamMessage>) -> Result<&'a mut StreamMessage, String> {
+        let Some(cached_message) = cached_message else {
+            return Err(format!("StreamMessageProcessor: prevented request from client, reason: request expired for resource {}", uuid));
         };
         if let StreamMessageKind::Request = cached_message.kind {
-            return action(cached_message, dests)
+            return Ok(cached_message)
         }
-        Err(format!("StreamMessageProcessor: blocked key agreement/initial request from client to host {:?}, reason: already received resource {}", dest, uuid))
+        Err(format!("StreamMessageProcessor: prevented request from client, reason: already received resource {}", uuid))
     }
-    fn initial_send_action
+    fn initial_request(&mut self, dest: SocketAddrV4, mut key_agreement: StreamMessage, action: impl Fn(&mut StreamMessage, &mut StreamMessage, SocketAddrV4) -> EmptyResult) -> EmptyResult {
+        self.dests.insert(dest);
+        let mut cached_messages = self.cached_messages.map().lock().unwrap();
+        let cached_message = cached_messages.get_mut(key_agreement.id());
+        let cached_message = Self::handle_cached_message(key_agreement.id(), cached_message)?;
+        action(&mut key_agreement, cached_message, dest)
+    }
+    fn follow_up(&mut self, uuid: &str, action: impl Fn(&mut StreamMessage, &HashSet<SocketAddrV4>)) -> bool {
+        let mut cached_messages = self.cached_messages.map().lock().unwrap();
+        let cached_message = cached_messages.get_mut(uuid);
+        let cached_message = match Self::handle_cached_message(uuid, cached_message) { Ok(cached_message) => cached_message, Err(e) => { println!("{}", e); return false; } };
+        action(cached_message, &self.dests);
+        true
+    }
     fn push_resource(&mut self, message: StreamMessage) -> EmptyResult {
-        self.cached_messages.set_timer(message.id().to_owned(), String::from("ActiveSessionsCache"));
+        self.cached_messages.set_timer(message.id().to_owned());
         let mut cached_messages = self.cached_messages.map().lock().unwrap();
         if cached_messages.contains_key(message.id()) {
             return Err(String::from("ActiveSessionInfo: Attempted to insert duplicate request"));

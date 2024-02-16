@@ -15,7 +15,7 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
         }
     }
 
-    pub fn set_timer(&self, key: K, name: String) {
+    pub fn set_timer(&self, key: K) {
         if self.map.lock().unwrap().contains_key(&key) {
             return;
         }
@@ -23,7 +23,7 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
         let (map, ttl) = (self.map.clone(), self.ttl);
         tokio::spawn(async move {
             sleep(Duration::from_secs(ttl)).await;
-            // println!("TransientMap {}: Removing {}", name, key);
+            println!("TransientMap: Removing {}", key);
             map.lock().unwrap().remove(&key);
         });
     }

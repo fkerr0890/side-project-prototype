@@ -84,8 +84,8 @@ impl MessageStaging {
         else if let Ok(mut message) = bincode::deserialize::<Heartbeat>(message_bytes) {
             if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             message.set_sender(senders.drain().next().unwrap());
-            // Ok(println!("{:?}", message))
-            Ok(())
+            Ok(println!("{:?}", message))
+            // Ok(())
         }
         else if let Ok(mut message) = bincode::deserialize::<StreamMessage>(message_bytes) {
             // if StreamMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
@@ -110,7 +110,7 @@ impl MessageStaging {
             match crypto_result {
                 Ok(plaintext) => { *payload = plaintext },
                 Err(Error::NoKey) => {
-                    self.cached_messages.set_timer(inbound_message.separate_parts().uuid().to_owned(), String::from("StageCache"));
+                    self.cached_messages.set_timer(inbound_message.separate_parts().uuid().to_owned());
                     let mut cached_messages = self.cached_messages.map().lock().unwrap();
                     let cached_messages = cached_messages.entry(inbound_message.separate_parts().uuid().to_owned()).or_default();
                     inbound_message.set_is_encrypted_true(nonce);
@@ -129,7 +129,7 @@ impl MessageStaging {
         else {
             let uuid = inbound_message.separate_parts().uuid().to_owned();
             let staged_messages_len = {
-                self.message_staging.set_timer(uuid.clone(), String::from("StageStaging"));
+                self.message_staging.set_timer(uuid.clone());
                 let mut staged_messages = self.message_staging.map().lock().unwrap();
                 let staged_messages= staged_messages.entry(uuid.clone()).or_insert(HashMap::with_capacity(num_chunks));
                 staged_messages.insert(index, inbound_message);
