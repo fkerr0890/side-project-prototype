@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientMap};
+use crate::{gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientMap};
 use super::{send_error_response, MessageProcessor, ACTIVE_SESSION_TTL};
 
 pub struct StreamMessageProcessor {
@@ -44,7 +44,7 @@ impl StreamMessageProcessor {
         }
     }
 
-    fn start_follow_ups(&self, host_name: String, uuid: String) {
+    fn start_follow_ups(&self, host_name: String, uuid: Id) {
         let (socket, key_store, sender, active_sessions) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), self.message_processor.endpoint_pair.public_endpoint, self.active_sessions.map().clone());
         tokio::spawn(async move {
             loop {
@@ -82,7 +82,7 @@ impl StreamMessageProcessor {
         }
     }
 
-    async fn send_response(&self, payload: &[u8], dest: SocketAddrV4, host_name: String, uuid: String) -> EmptyResult {
+    async fn send_response(&self, payload: &[u8], dest: SocketAddrV4, host_name: String, uuid: Id) -> EmptyResult {
         let Ok(request) = bincode::deserialize(payload) else { return Ok(()) };
         let socket = self.local_hosts.get(&host_name).unwrap();
         let response = http::make_request(request, &socket.to_string()).await;
@@ -114,14 +114,14 @@ impl StreamMessageProcessor {
 
 struct ActiveSessionInfo {
     dests: HashSet<SocketAddrV4>,
-    cached_messages: TransientMap<String, StreamMessage>,
-    resource_queue: VecDeque<String>
+    cached_messages: TransientMap<Id, StreamMessage>,
+    resource_queue: VecDeque<Id>
 }
 
 impl ActiveSessionInfo {
     fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(30), resource_queue: VecDeque::new() } }
     fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.clone() }
-    fn handle_cached_message<'a>(uuid: &str, cached_message: Option<&'a mut StreamMessage>) -> Result<&'a mut StreamMessage, String> {
+    fn handle_cached_message<'a>(uuid: &Id, cached_message: Option<&'a mut StreamMessage>) -> Result<&'a mut StreamMessage, String> {
         let Some(cached_message) = cached_message else {
             return Err(format!("StreamMessageProcessor: prevented request from client, reason: request expired for resource {}", uuid));
         };
@@ -137,7 +137,7 @@ impl ActiveSessionInfo {
         let cached_message = Self::handle_cached_message(key_agreement.id(), cached_message)?;
         action(&mut key_agreement, cached_message, dest)
     }
-    fn follow_up(&mut self, uuid: &str, action: impl Fn(&mut StreamMessage, &HashSet<SocketAddrV4>)) -> bool {
+    fn follow_up(&mut self, uuid: &Id, action: impl Fn(&mut StreamMessage, &HashSet<SocketAddrV4>)) -> bool {
         let mut cached_messages = self.cached_messages.map().lock().unwrap();
         let cached_message = cached_messages.get_mut(uuid);
         let cached_message = match Self::handle_cached_message(uuid, cached_message) { Ok(cached_message) => cached_message, Err(e) => { println!("{}", e); return false; } };

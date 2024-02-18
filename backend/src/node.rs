@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, gateway::InboundGateway, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, MessageProcessor}, peer::{self, PeerOps}};
+use crate::{crypto::KeyStore, gateway::InboundGateway, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, MessageProcessor}, peer::{self, PeerOps}};
 
 pub struct Node {
     endpoint_pair: EndpointPair,
@@ -114,7 +114,7 @@ impl Node {
         if let Some(introducer) = self.introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
                 EndpointPair::default_socket(),
-                Uuid::new_v4().simple().to_string(),
+                Id(Uuid::new_v4().as_bytes().to_vec()),
                 (peer::MAX_PEERS, peer::MAX_PEERS));
             message.add_peer(introducer);
             let inbound_message = InboundMessage::new(bincode::serialize(&message).unwrap(), IsEncrypted::False, SeparateParts::new(self.endpoint_pair.public_endpoint, message.id().to_owned()));

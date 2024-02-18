@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, sync::{Arc, Mutex}};
 use tokio::sync::mpsc;
-use crate::{crypto::{Direction, Error, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientMap};
+use crate::{crypto::{Direction, Error, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientMap};
 
 use super::SRP_TTL;
 
@@ -10,8 +10,8 @@ pub struct MessageStaging {
     to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     key_store: Arc<Mutex<KeyStore>>,
-    message_staging: TransientMap<String, HashMap<usize, InboundMessage>>,
-    cached_messages: TransientMap<String, Vec<InboundMessage>>,
+    message_staging: TransientMap<Id, HashMap<usize, InboundMessage>>,
+    cached_messages: TransientMap<Id, Vec<InboundMessage>>,
     endpoint_pair: EndpointPair
 }
 
@@ -52,7 +52,7 @@ impl MessageStaging {
 
     fn handle_key_agreement(&mut self, mut message: StreamMessage) -> EmptyResult {
         let sender = message.only_sender();
-        let (uuid, peer_public_key) = message.into_uuid_payload();
+        let (uuid, peer_public_key) = message.into_hash_payload();
         self.key_store.lock().unwrap().agree(sender, peer_public_key).map_err(|e| e.error_response(file!(), line!()))?;
         let cached_messages = self.cached_messages.map().lock().unwrap().remove(&uuid);
         if let Some(cached_messages) = cached_messages {
@@ -110,9 +110,9 @@ impl MessageStaging {
             match crypto_result {
                 Ok(plaintext) => { *payload = plaintext },
                 Err(Error::NoKey) => {
-                    self.cached_messages.set_timer(inbound_message.separate_parts().uuid().to_owned());
+                    self.cached_messages.set_timer(inbound_message.separate_parts().id().to_owned());
                     let mut cached_messages = self.cached_messages.map().lock().unwrap();
-                    let cached_messages = cached_messages.entry(inbound_message.separate_parts().uuid().to_owned()).or_default();
+                    let cached_messages = cached_messages.entry(inbound_message.separate_parts().id().to_owned()).or_default();
                     inbound_message.set_is_encrypted_true(nonce);
                     cached_messages.push(inbound_message);
                     println!("no key");
@@ -127,7 +127,7 @@ impl MessageStaging {
             Some(vec![inbound_message])
         }
         else {
-            let uuid = inbound_message.separate_parts().uuid().to_owned();
+            let uuid = inbound_message.separate_parts().id().to_owned();
             let staged_messages_len = {
                 self.message_staging.set_timer(uuid.clone());
                 let mut staged_messages = self.message_staging.map().lock().unwrap();

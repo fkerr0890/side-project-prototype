@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddrV4};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{gateway::EmptyResult, message::{Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientSet};
+use crate::{gateway::EmptyResult, message::{Id, Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientSet};
 
 use super::{send_error_response, MessageProcessor, ACTIVE_SESSION_TTL, SRP_TTL_MILLIS};
 
@@ -60,7 +60,7 @@ impl SearchRequestProcessor {
         }
     }
     
-    fn construct_search_response(&self, uuid: String, dest: SocketAddrV4, origin: SocketAddrV4, host_name: String) -> SearchMessage {
+    fn construct_search_response(&self, uuid: Id, dest: SocketAddrV4, origin: SocketAddrV4, host_name: String) -> SearchMessage {
         let (tx, rx) = oneshot::channel();
         self.message_processor.send_nat_heartbeats(rx, origin);
         let public_key = self.message_processor.key_store.lock().unwrap().host_public_key(origin, tx);

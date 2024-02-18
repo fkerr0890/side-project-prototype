@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddrV4, sync::mpsc, fmt::Display};
 
-use ring::{aead::{self, AES_256_GCM, BoundKey}, rand::SystemRandom, agreement, hkdf::{self, HKDF_SHA256, KeyType}};
+use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 use tokio::sync::oneshot;
 
 const INITIAL_SALT: [u8; 20] = [
@@ -95,6 +95,14 @@ impl aead::NonceSequence for CurrentNonce {
         self.1.send(nonce_copy).ok();
         Ok(nonce)
     }
+}
+
+pub fn digest_parts(parts: Vec<&[u8]>) -> Vec<u8> {
+    let mut ctx = digest::Context::new(&digest::SHA1_FOR_LEGACY_USE_ONLY);
+    for part in parts {
+        ctx.update(part);
+    }
+    ctx.finish().as_ref().to_vec()
 }
 
 #[derive(Debug)]

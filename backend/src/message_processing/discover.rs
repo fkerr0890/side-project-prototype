@@ -2,14 +2,14 @@ use std::{collections::HashMap, net::SocketAddrV4, sync::{Arc, Mutex}, time::Dur
 
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep};
 
-use crate::{crypto::KeyStore, gateway::EmptyResult, message::{DiscoverPeerMessage, DpMessageKind, Message}, node::EndpointPair, utils::TransientMap};
+use crate::{crypto::KeyStore, gateway::EmptyResult, message::{DiscoverPeerMessage, DpMessageKind, Id, Message}, node::EndpointPair, utils::TransientMap};
 
 use super::{MessageProcessor, DPP_TTL};
 
 pub struct DiscoverPeerProcessor {
     message_processor: MessageProcessor,
     from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>,
-    message_staging: Arc<Mutex<HashMap<String, DiscoverPeerMessage>>>
+    message_staging: Arc<Mutex<HashMap<Id, DiscoverPeerMessage>>>
 }
 
 impl DiscoverPeerProcessor {
@@ -106,12 +106,12 @@ impl DiscoverPeerProcessor {
         }
     }
 
-    fn send_final_response(&self, uuid: &str) {
+    fn send_final_response(&self, uuid: &Id) {
         let dest = self.message_processor.get_dest(uuid).unwrap();
         Self::send_final_response_static(&self.message_processor.socket, &self.message_processor.key_store, dest, self.message_processor.endpoint_pair.public_endpoint, &self.message_staging, uuid);
     }
 
-    fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message_staging: &Arc<Mutex<HashMap<String, DiscoverPeerMessage>>>, uuid: &str) {
+    fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message_staging: &Arc<Mutex<HashMap<Id, DiscoverPeerMessage>>>, uuid: &Id) {
         let staged_message = {
             let mut message_staging = message_staging.lock().unwrap();
             message_staging.remove(uuid)

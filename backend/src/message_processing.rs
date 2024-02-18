@@ -5,7 +5,7 @@ use ring::aead;
 use serde::Serialize;
 use tokio::{sync::{oneshot, mpsc}, time::sleep, net::UdpSocket};
 
-use crate::{crypto::{Direction, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps};
+use crate::{crypto::{Direction, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -27,7 +27,7 @@ pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str,
 pub struct MessageProcessor {
     socket: Arc<UdpSocket>,
     endpoint_pair: EndpointPair,
-    breadcrumbs: Arc<Mutex<HashMap<String, SocketAddrV4>>>,
+    breadcrumbs: Arc<Mutex<HashMap<Id, SocketAddrV4>>>,
     key_store: Arc<Mutex<KeyStore>>,
     peer_ops: Option<Arc<Mutex<PeerOps>>>
 }
@@ -43,7 +43,7 @@ impl MessageProcessor {
         }
     } 
 
-    fn try_add_breadcrumb(&mut self, id: &str, dest: SocketAddrV4) -> bool {
+    fn try_add_breadcrumb(&mut self, id: &Id, dest: SocketAddrV4) -> bool {
         // gateway::log_debug(&format!("Sender {}", dest));
         let mut breadcrumbs = self.breadcrumbs.lock().unwrap();
         if breadcrumbs.contains_key(id) {
@@ -56,7 +56,7 @@ impl MessageProcessor {
         }
     }
 
-    fn set_breadcrumb_ttl(&self, early_return_message: Option<DiscoverPeerMessage>, id: &str, ttl: u64) {
+    fn set_breadcrumb_ttl(&self, early_return_message: Option<DiscoverPeerMessage>, id: &Id, ttl: u64) {
         let (breadcrumbs_clone, dest, sender, id) = (self.breadcrumbs.clone(), self.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, id.to_owned());
         let (socket, key_store) = (self.socket.clone(), self.key_store.clone());
         tokio::spawn(async move {
@@ -71,7 +71,7 @@ impl MessageProcessor {
         });
     }
 
-    fn get_dest(&self, id: &str) -> Option<SocketAddrV4> {
+    fn get_dest(&self, id: &Id) -> Option<SocketAddrV4> {
         self.breadcrumbs.lock().unwrap().get(id).cloned()
     }
 

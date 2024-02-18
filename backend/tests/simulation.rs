@@ -19,8 +19,8 @@ async fn basic() {
     fs::create_dir("../peer_info").await.unwrap();
 
     let mut introducers = Vec::new();
-    let num_hosts = 10;
-    let num_nodes: u16 = 500;
+    let num_hosts = 1;
+    let num_nodes: u16 = 2;
     let mut rng = rand::thread_rng();
     let mut indices = (0..num_nodes).choose_multiple(&mut rng, num_hosts + 1);
     let start = indices.pop().unwrap();

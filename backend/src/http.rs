@@ -36,7 +36,9 @@ impl SerdeHttpRequest {
         Ok(request)
     }
 
+    pub fn method(&self) -> &str { &self.method }
     pub fn uri(&self) -> &str { &self.uri }
+    pub fn body(&self) -> &[u8] { &self.body }
     pub fn set_uri(&mut self, uri: String) { self.uri = uri; }
 }
 
@@ -151,7 +153,7 @@ impl ServerContext {
 
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
     let request_version = request.version().clone();
-    let mut serde_request = match SerdeHttpRequest::from_hyper_request(request).await {
+    let mut request = match SerdeHttpRequest::from_hyper_request(request).await {
         Ok(request) => request,
         Err(e) => {
             return Ok(Response::builder()
@@ -163,11 +165,11 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
                 .unwrap())
         }
     };
-    println!("http: Request uri is {}", serde_request.uri());
-    let (host_name, path) = get_host_name_and_path(serde_request.uri());
-    serde_request.set_uri(path);
-    let search_request = SearchMessage::initial_search_request(host_name.to_owned());
-    let payload = match bincode::serialize(&serde_request) {
+    println!("http: Request uri is {}", request.uri());
+    let (host_name, path) = get_host_name_and_path(request.uri());
+    request.set_uri(path);
+    let search_request = SearchMessage::initial_search_request(host_name.to_owned(), &request);
+    let payload = match bincode::serialize(&request) {
         Ok(request) => request,
         Err(e) => {
             let e = (*e).to_string();

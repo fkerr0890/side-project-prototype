@@ -23,7 +23,7 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
         let (map, ttl) = (self.map.clone(), self.ttl);
         tokio::spawn(async move {
             sleep(Duration::from_secs(ttl)).await;
-            println!("TransientMap: Removing {}", key);
+            // println!("TransientMap: Removing {}", key);
             map.lock().unwrap().remove(&key);
         });
     }

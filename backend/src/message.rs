@@ -1,10 +1,13 @@
 use chrono::{Utc, SecondsFormat, DateTime, Duration};
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
+use std::fmt::{Debug, Display};
 use std::mem;
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
+use crate::crypto;
+use crate::http::SerdeHttpRequest;
 use crate::message_processing::SEARCH_TIMEOUT;
 use crate::node::EndpointPair;
 
@@ -13,7 +16,7 @@ pub const NO_POSITION: (usize, usize) = (0, 1);
 pub trait Message {
     const ENCRYPTION_REQUIRED: bool;
     fn dest(&self) -> SocketAddrV4;
-    fn id(&self) -> &String;
+    fn id(&self) -> &Id;
     fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4);
     fn check_expiry(&self) -> bool;
     fn set_sender(&mut self, sender: SocketAddrV4);
@@ -62,17 +65,17 @@ pub struct Heartbeat {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
-    uuid: String
+    uuid: Id
 }
 
 impl Heartbeat {
-    pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: EndpointPair::default_socket(), timestamp: String::new(), uuid: Uuid::new_v4().simple().to_string() } }
+    pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: EndpointPair::default_socket(), timestamp: String::new(), uuid: Id(Uuid::new_v4().as_bytes().to_vec()) } }
 }
 
 impl Message for Heartbeat {
     const ENCRYPTION_REQUIRED: bool = false;
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.uuid }
+    fn id(&self) -> &Id { &self.uuid }
     fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
         self.timestamp = datetime_to_timestamp(Utc::now());
@@ -88,17 +91,17 @@ pub struct StreamMessage {
     senders: Vec<SocketAddrV4>,
     timestamp: String,
     host_name: String,
-    uuid: String,
+    hash: Id,
     payload: Vec<u8>
 }
 impl StreamMessage {
-    pub fn new(host_name: String, uuid: String, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
+    pub fn new(host_name: String, hash: Id, kind: StreamMessageKind, payload: Vec<u8>) -> Self {
         Self {
             dest: EndpointPair::default_socket(),
             senders: Vec::new(),
             timestamp: datetime_to_timestamp(Utc::now()),
             host_name,
-            uuid,
+            hash,
             kind,
             payload
         }
@@ -108,12 +111,12 @@ impl StreamMessage {
     pub fn senders(&self) -> &Vec<SocketAddrV4> { &self.senders }
     pub fn only_sender(&mut self) -> SocketAddrV4 { self.senders.pop().unwrap() }
     pub fn host_name(&self) -> &str { &self.host_name }
-    pub fn into_uuid_payload(self) -> (String, Vec<u8>) { (self.uuid, self.payload) }
+    pub fn into_hash_payload(self) -> (Id, Vec<u8>) { (self.hash, self.payload) }
 }
 impl Message for StreamMessage {
     const ENCRYPTION_REQUIRED: bool = true;
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.uuid }
+    fn id(&self) -> &Id { &self.hash }
     fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
         self.timestamp = datetime_to_timestamp(Utc::now());
@@ -125,15 +128,15 @@ impl Message for StreamMessage {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SeparateParts {
     sender: SocketAddrV4,
-    uuid: String,
+    id: Id,
     position: (usize, usize)
 }
 
 impl SeparateParts {
-    pub fn new(sender: SocketAddrV4, uuid: String) -> Self { Self { sender, uuid, position: NO_POSITION } }
-    pub fn into_parts(self) -> (SocketAddrV4, String, (usize, usize))  { (self.sender, self.uuid, self.position) }
+    pub fn new(sender: SocketAddrV4, id: Id) -> Self { Self { sender, id, position: NO_POSITION } }
+    pub fn into_parts(self) -> (SocketAddrV4, Id, (usize, usize))  { (self.sender, self.id, self.position) }
     pub fn position(&self) -> (usize, usize) { self.position }
-    pub fn uuid(&self) -> &str { &self.uuid}
+    pub fn id(&self) -> &Id { &self.id}
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
@@ -145,51 +148,52 @@ pub struct SearchMessage {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
-    uuid: String,
+    hash: Id,
     host_name: String,
     origin: SocketAddrV4,
     expiry: String,
 }
 impl SearchMessage {
-    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, host_name: String, uuid: String, kind: SearchMessageKind) -> Self {
+    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, host_name: String, hash: Id, kind: SearchMessageKind) -> Self {
         let datetime = Utc::now();
         Self {
             dest,
             sender,
             timestamp: datetime_to_timestamp(datetime),
             host_name,
-            uuid,
+            hash,
             kind,
             origin,
             expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
         }
     }
 
-    pub fn initial_search_request(host_name: String) -> Self {
+    pub fn initial_search_request(host_name: String, request: &SerdeHttpRequest) -> Self {
+        let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
-            host_name, Uuid::new_v4().simple().to_string(), SearchMessageKind::Request)
+            host_name, hash, SearchMessageKind::Request)
     }
 
-    pub fn key_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, uuid: String, host_name: String, public_key: Vec<u8>) -> Self {
-        Self::new(dest, sender, origin, host_name, uuid, SearchMessageKind::Response(public_key))
+    pub fn key_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, hash: Id, host_name: String, public_key: Vec<u8>) -> Self {
+        Self::new(dest, sender, origin, host_name, hash, SearchMessageKind::Response(public_key))
     }
 
     pub fn set_origin(&mut self, origin: SocketAddrV4) { self.origin = origin; }
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn origin(&self) -> SocketAddrV4 { self.origin }
-    pub fn into_uuid_host_name_public_key(self) -> (String, String, Vec<u8>) {
+    pub fn into_uuid_host_name_public_key(self) -> (Id, String, Vec<u8>) {
         let public_key = if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() };
-        (self.uuid, self.host_name, public_key)
+        (self.hash, self.host_name, public_key)
     }
     pub fn host_name(&self) -> &String { &self.host_name }
-    pub fn into_uuid_host_name(self) -> (String, String) { (self.uuid, self.host_name) }
+    pub fn into_uuid_host_name(self) -> (Id, String) { (self.hash, self.host_name) }
 }
 
 impl Message for SearchMessage {
     const ENCRYPTION_REQUIRED: bool = false;
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.uuid }
+    fn id(&self) -> &Id { &self.hash }
 
     fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
@@ -210,14 +214,14 @@ pub struct DiscoverPeerMessage {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
     timestamp: String,
-    uuid: String,
+    uuid: Id,
     origin: SocketAddrV4,
     peer_list: Vec<EndpointPair>,
     hop_count: (u16, u16)
 }
 
 impl DiscoverPeerMessage {
-    pub fn new(kind: DpMessageKind, origin: SocketAddrV4, uuid: String, target_peer_count: (u16, u16)) -> Self {
+    pub fn new(kind: DpMessageKind, origin: SocketAddrV4, uuid: Id, target_peer_count: (u16, u16)) -> Self {
         Self {
             kind,
             dest: EndpointPair::default_socket(),
@@ -257,7 +261,7 @@ impl DiscoverPeerMessage {
 impl Message for DiscoverPeerMessage {
     const ENCRYPTION_REQUIRED: bool = false;
     fn dest(&self) -> SocketAddrV4 { self.dest }
-    fn id(&self) -> &String { &self.uuid }
+    fn id(&self) -> &Id { &self.uuid }
 
     fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
@@ -291,4 +295,17 @@ pub enum StreamMessageKind {
 
 pub fn datetime_to_timestamp(datetime: DateTime<Utc>) -> String {
     datetime.to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
+pub struct Id(pub Vec<u8>);
+impl Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", bs58::encode(&self.0).into_string())
+    }
+}
+impl Debug for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Id").field(&self.to_string()).finish()
+    }
 }
