@@ -6,8 +6,6 @@ use std::mem;
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
-use crate::crypto;
-use crate::http::SerdeHttpRequest;
 use crate::message_processing::SEARCH_TIMEOUT;
 use crate::node::EndpointPair;
 
@@ -168,8 +166,9 @@ impl SearchMessage {
         }
     }
 
-    pub fn initial_search_request(host_name: String, request: &SerdeHttpRequest) -> Self {
-        let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
+    pub fn initial_search_request(host_name: String) -> Self {
+        // let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
+        let hash = Id(Uuid::new_v4().as_bytes().to_vec());
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
             host_name, hash, SearchMessageKind::Request)
     }

@@ -36,9 +36,9 @@ impl Node {
     pub async fn listen(&self, is_start: bool, is_end: bool) {
         let (srm_to_srp, srm_from_gateway) = mpsc::unbounded_channel();
         let (dpm_to_dpp, dpm_from_gateway) = mpsc::unbounded_channel();
-        let (to_http_handler, from_smp) = mpsc::unbounded_channel();
         let (sm_to_smp, sm_from_gateway) = mpsc::unbounded_channel();
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
+        let (tx_to_smp, tx_from_http_handler) = mpsc::unbounded_channel();
     
         let key_store = Arc::new(Mutex::new(KeyStore::new()));
         let peer_ops = Arc::new(Mutex::new(PeerOps::new()));
@@ -50,7 +50,7 @@ impl Node {
         let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), &key_store, self.endpoint_pair);
         let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone())), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
         let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone())), dpm_from_gateway);
-        let mut smp = StreamMessageProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, None), sm_from_gateway, local_hosts, to_http_handler);
+        let mut smp = StreamMessageProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, None), sm_from_gateway, local_hosts, tx_from_http_handler);
     
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&self.socket, to_staging.clone());
@@ -137,7 +137,7 @@ impl Node {
         
         if is_start {
             println!("Tcp listening");
-            let server_context = ServerContext::new(srm_to_srp, Arc::new(tokio::sync::Mutex::new(from_smp)), sm_to_smp);
+            let server_context = ServerContext::new(srm_to_srp, sm_to_smp, tx_to_smp);
             http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
         }
         else {

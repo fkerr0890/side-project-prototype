@@ -84,8 +84,8 @@ impl MessageStaging {
         else if let Ok(mut message) = bincode::deserialize::<Heartbeat>(message_bytes) {
             if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             message.set_sender(senders.drain().next().unwrap());
-            Ok(println!("{:?}", message))
-            // Ok(())
+            // Ok(println!("{:?}", message))
+            Ok(())
         }
         else if let Ok(mut message) = bincode::deserialize::<StreamMessage>(message_bytes) {
             // if StreamMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }

@@ -1,8 +1,8 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, convert::Infallible, net::SocketAddr};
+use std::{collections::HashMap, str::FromStr, convert::Infallible, net::SocketAddr};
 
 use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, header::{HeaderName, HeaderValue}, service::{make_service_fn, service_fn}, Server, Client, Method, Uri};
 use serde::{Serialize, Deserialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair};
 
@@ -143,13 +143,47 @@ fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> Result<Heade
 #[derive(Clone)]
 pub struct ServerContext {
     to_srp: mpsc::UnboundedSender<SearchMessage>,
-    from_smp: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>,
-    to_smp: mpsc::UnboundedSender<StreamMessage>
+    to_smp: mpsc::UnboundedSender<StreamMessage>,
+    tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<SerdeHttpResponse>>
 }
 
 impl ServerContext {
-    pub fn new(to_srp: mpsc::UnboundedSender<SearchMessage>, from_outbound_gateway: Arc<Mutex<mpsc::UnboundedReceiver<SerdeHttpResponse>>>, to_smp: mpsc::UnboundedSender<StreamMessage>) -> Self { Self { to_srp, from_smp: from_outbound_gateway, to_smp } }
+    pub fn new(to_srp: mpsc::UnboundedSender<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<SerdeHttpResponse>>) -> Self {
+        Self {
+            to_srp,
+            to_smp,
+            tx_to_smp
+        }
+    }
 }
+
+// struct ResourceQueue {
+//     resource_queue: VecDeque<Id>,
+//     cached_messages: TransientMap<Id, StreamMessage>
+// }
+// impl ResourceQueue {
+//     fn new() -> Self { Self { resource_queue: VecDeque::new(), cached_messages: TransientMap::new(30)}}
+//     fn push_resource(&mut self, hash: &Id) {
+//         if self.resource_queue.contains(hash) {
+//             self.resource_queue.clear();
+//         }
+//         self.resource_queue.push_back(hash.to_owned());
+//     }
+//     fn pop_resource(&mut self, message: StreamMessage) -> Vec<StreamMessage> {
+//         let mut cached_messages = self.cached_messages.map().lock().unwrap();
+//         if self.resource_queue.front().unwrap() != message.id() {
+//             cached_messages.insert(message.id().to_owned(), message);
+//             return Vec::with_capacity(0)
+//         }
+//         let cached_message = if let Some(cached_message) = cached_messages.remove(&self.resource_queue.pop_front().unwrap()) { cached_message } else { message };
+//         let mut popped_resources = vec![cached_message];
+//         while let Some(_) = self.resource_queue.front() {
+//             let Some(cached_message) = cached_messages.remove(&self.resource_queue.pop_front().unwrap()) else { break };
+//             popped_resources.push(cached_message);
+//         }
+//         popped_resources
+//     }
+// }
 
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
     let request_version = request.version().clone();
@@ -168,7 +202,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     println!("http: Request uri is {}", request.uri());
     let (host_name, path) = get_host_name_and_path(request.uri());
     request.set_uri(path);
-    let search_request = SearchMessage::initial_search_request(host_name.to_owned(), &request);
+    let search_request = SearchMessage::initial_search_request(host_name.to_owned());
     let payload = match bincode::serialize(&request) {
         Ok(request) => request,
         Err(e) => {
@@ -188,9 +222,10 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         StreamMessageKind::Request,
         payload);
     sm.set_sender(EndpointPair::default_socket());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    context.tx_to_smp.send(tx).ok();
     context.to_smp.send(sm).ok();
     context.to_srp.send(search_request).ok();
-    let mut rx = context.from_smp.lock().await;
     let response = match rx.recv().await {
         Some(response) => response,
         None => {
