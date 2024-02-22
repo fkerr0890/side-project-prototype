@@ -75,7 +75,6 @@ impl DiscoverPeerProcessor {
                 tokio::spawn(async move {
                     sleep(Duration::from_millis(DPP_TTL*2)).await;
                     Self::send_final_response_static(&socket, &key_store, dest, sender, &message_staging_clone, &uuid);
-                    message_staging_clone.lock().unwrap().remove(&uuid);
                 });
                 0
             }

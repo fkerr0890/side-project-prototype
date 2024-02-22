@@ -26,11 +26,8 @@ impl SearchRequestProcessor {
     }
 
     pub fn handle_search_request(&mut self, mut search_request: SearchMessage) -> EmptyResult {
-        if !self.message_processor.try_add_breadcrumb(search_request.id(), search_request.sender()) {
+        if !self.message_processor.try_add_breadcrumb(None, search_request.id()) {
             return Ok(())
-        }
-        else {
-            self.message_processor.set_breadcrumb_ttl(None, search_request.id(), SRP_TTL_MILLIS);
         }
         if self.local_hosts.contains_key(search_request.host_name()) {
             println!("Found host {} at {}, uuid: {}", search_request.host_name(), self.message_processor.endpoint_pair.public_endpoint.port(), search_request.id());

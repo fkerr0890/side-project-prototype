@@ -1,19 +1,19 @@
-use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashSet, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use ring::aead;
 use serde::Serialize;
 use tokio::{sync::{oneshot, mpsc}, time::sleep, net::UdpSocket};
 
-use crate::{crypto::{Direction, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps};
+use crate::{crypto::{Direction, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::TransientMap};
 
 pub use self::discover::DiscoverPeerProcessor;
 
 pub const SEARCH_TIMEOUT: i64 = 30;
 pub const DPP_TTL: u64 = 200;
-const SRP_TTL: u64 = 30;
+pub const SRP_TTL: u64 = 30;
 const SRP_TTL_MILLIS: u64 = SRP_TTL * 1000;
-const ACTIVE_SESSION_TTL: u64 = 3600;
+pub const ACTIVE_SESSION_TTL: u64 = 3600;
 
 pub mod stage;
 pub mod stream;
@@ -27,52 +27,38 @@ pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str,
 pub struct MessageProcessor {
     socket: Arc<UdpSocket>,
     endpoint_pair: EndpointPair,
-    breadcrumbs: Arc<Mutex<HashMap<Id, SocketAddrV4>>>,
+    breadcrumbs: TransientMap<Id, SocketAddrV4>,
     key_store: Arc<Mutex<KeyStore>>,
     peer_ops: Option<Arc<Mutex<PeerOps>>>
 }
 
 impl MessageProcessor {
-    pub fn new(socket: Arc<UdpSocket>, endpoint_pair: EndpointPair, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>,) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, endpoint_pair: EndpointPair, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>, ttl_secs: u64) -> Self {
         Self {
             socket: socket.clone(),
             endpoint_pair,
-            breadcrumbs: Arc::new(Mutex::new(HashMap::new())),
+            breadcrumbs: TransientMap::new(ttl_secs),
             key_store: key_store.clone(),
             peer_ops
         }
     } 
 
-    fn try_add_breadcrumb(&mut self, id: &Id, dest: SocketAddrV4) -> bool {
-        // gateway::log_debug(&format!("Sender {}", dest));
-        let mut breadcrumbs = self.breadcrumbs.lock().unwrap();
-        if breadcrumbs.contains_key(id) {
-            // gateway::log_debug("Already visited this node, not propagating message");
-            false
-        }
-        else {
-            breadcrumbs.insert(id.to_owned(), dest);
-            true
-        }
-    }
-
-    fn set_breadcrumb_ttl(&self, early_return_message: Option<DiscoverPeerMessage>, id: &Id, ttl: u64) {
-        let (breadcrumbs_clone, dest, sender, id) = (self.breadcrumbs.clone(), self.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, id.to_owned());
+    fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: &Id) -> bool {
+        let (dest, sender, id) = (self.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, id.to_owned());
         let (socket, key_store) = (self.socket.clone(), self.key_store.clone());
-        tokio::spawn(async move {
-            sleep(Duration::from_millis(ttl)).await;
+        let contains_key = self.breadcrumbs.set_timer_with_send_action(id.clone(), || {
             if let Some(mut message) = early_return_message {
                 Self::send_static(&socket, &key_store, dest, sender, &mut message, false, false).ok();
             }
-            else {
-                // gateway::log_debug("Ttl for breadcrumb expired");
-                breadcrumbs_clone.lock().unwrap().remove(&id);
-            }
         });
+        if contains_key {
+            self.breadcrumbs.map().lock().unwrap().insert(id.clone(), dest);
+        }
+        contains_key
     }
 
     fn get_dest(&self, id: &Id) -> Option<SocketAddrV4> {
-        self.breadcrumbs.lock().unwrap().get(id).cloned()
+        self.breadcrumbs.map().lock().unwrap().get(id).cloned()
     }
 
     pub fn send_request(&self, request: &mut(impl Message + Serialize), dests: Option<HashSet<SocketAddrV4>>, to_be_chunked: bool) -> EmptyResult {

@@ -1,35 +1,33 @@
-use std::{collections::HashMap, net::SocketAddrV4, sync::mpsc, fmt::Display};
+use std::{net::SocketAddrV4, sync::mpsc, fmt::Display};
 
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 use tokio::sync::oneshot;
+
+use crate::{message_processing::ACTIVE_SESSION_TTL, utils::TransientMap};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
     0xbe, 0xf9, 0xf5, 0x02,
     ];
 pub struct KeyStore {
-    private_keys: HashMap<String, (agreement::EphemeralPrivateKey, Option<oneshot::Sender<()>>)>,
-    symmetric_keys: HashMap<String, KeySet>,
+    private_keys: TransientMap<String, (agreement::EphemeralPrivateKey, Option<oneshot::Sender<()>>)>,
+    symmetric_keys: TransientMap<String, KeySet>,
     rng: SystemRandom
 }
 impl KeyStore {
     pub fn new() -> Self {
         Self {
-            private_keys: HashMap::new(),
-            symmetric_keys: HashMap::new(),
+            private_keys: TransientMap::new(ACTIVE_SESSION_TTL),
+            symmetric_keys: TransientMap::new(ACTIVE_SESSION_TTL),
             rng: SystemRandom::new()
         }
-    }
-
-    fn get_key_aad(&mut self, index: &str) -> Result<(aead::Aad<Vec<u8>>, &mut KeySet), Error> {
-        Ok((aead::Aad::from("test".as_bytes().to_vec()), self.symmetric_keys.get_mut(index).ok_or(Error::NoKey)?))
     }
 
     fn generate_key_pair(&mut self, index: String, tx: Option<oneshot::Sender<()>>) -> agreement::PublicKey {
         let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
         let public_key = my_private_key.compute_public_key().unwrap();
         // println!("Inserting private key: {index}");
-        self.private_keys.insert(index, (my_private_key, tx));
+        self.private_keys.map().lock().unwrap().insert(index, (my_private_key, tx));
         public_key
     }
 
@@ -42,7 +40,8 @@ impl KeyStore {
     }
 
     pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
-        let (aad, key_set) = self.get_key_aad(&peer_addr.to_string())?;
+        let mut symmetric_keys = self.symmetric_keys.map().lock().unwrap();
+        let (aad, key_set) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_addr.to_string()).ok_or(Error::NoKey)?);
         match mode {
             Direction::Encode => {
                 key_set.sealing_key.seal_in_place_append_tag(aad, payload)?;
@@ -60,7 +59,7 @@ impl KeyStore {
         // println!("{:?}, finding: {}", self.private_keys, peer_addr.to_string());
         let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let index = peer_addr.to_string();
-        let Some((my_private_key, stop_heartbeats)) = self.private_keys.remove(&index) else { return Err(Error::NoKey) };
+        let Some((my_private_key, stop_heartbeats)) = self.private_keys.map().lock().unwrap().remove(&index) else { return Err(Error::NoKey) };
         if let Some(tx) = stop_heartbeats {
             tx.send(()).ok();
         }
@@ -78,7 +77,7 @@ impl KeyStore {
         let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value, nonce_tx));
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
         // println!("Inserting symmetric key: {index}");
-        self.symmetric_keys.insert(index, key_set);
+        self.symmetric_keys.map().lock().unwrap().insert(index, key_set);
         Ok(())
     }
 }

@@ -15,17 +15,29 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
         }
     }
 
-    pub fn set_timer(&self, key: K) {
+    pub fn set_timer(&self, key: K) -> bool {
+        self.start_timer(key, None::<fn()>)
+    }
+
+    pub fn set_timer_with_send_action(&self, key: K, send_action: impl FnMut() + Send + 'static) -> bool {
+        self.start_timer(key, Some(send_action))
+    }
+
+    fn start_timer(&self, key: K, send_action: Option<impl FnMut() + Send + 'static>) -> bool {
         if self.map.lock().unwrap().contains_key(&key) {
-            return;
+            return false;
         }
         // println!("TransientMap {}: Adding {}", name, key);
         let (map, ttl) = (self.map.clone(), self.ttl);
         tokio::spawn(async move {
             sleep(Duration::from_secs(ttl)).await;
             // println!("TransientMap: Removing {}", key);
-            map.lock().unwrap().remove(&key);
+            let removed_value = map.lock().unwrap().remove(&key);
+            if let Some(send_action) = send_action {
+                send_action();
+            }
         });
+        true
     }
 
     pub fn map(&self) -> &Arc<Mutex<HashMap<K, V>>> { &self.map }
