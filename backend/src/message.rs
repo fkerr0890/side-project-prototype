@@ -1,4 +1,4 @@
-use chrono::{Utc, SecondsFormat, DateTime, Duration};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
 use std::fmt::{Debug, Display};
@@ -15,7 +15,7 @@ pub trait Message {
     const ENCRYPTION_REQUIRED: bool;
     fn dest(&self) -> SocketAddrV4;
     fn id(&self) -> &Id;
-    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4);
+    fn replace_dest(&mut self, dest: SocketAddrV4);
     fn check_expiry(&self) -> bool;
     fn set_sender(&mut self, sender: SocketAddrV4);
 }
@@ -34,13 +34,14 @@ impl InboundMessage {
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn separate_parts(&self) -> &SeparateParts { &self.separate_parts }
 
-    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, HashSet<SocketAddrV4>) {
+    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, HashSet<SocketAddrV4>, String) {
+        let timestamp = messages.iter().map(|m| DateTime::parse_from_rfc3339(&m.separate_parts.timestamp).unwrap()).min().unwrap();
         messages.sort_by(|a, b| a.separate_parts.position.0.cmp(&b.separate_parts.position.0));
         let (bytes, senders): (Vec<Vec<u8>>, Vec<SocketAddrV4>) = messages
             .into_iter()
             .map(|m| { let parts = m.into_parts(); (parts.0, parts.2.sender) })
             .unzip();
-        (bytes.concat(), HashSet::from_iter(senders.into_iter()))
+        (bytes.concat(), HashSet::from_iter(senders.into_iter()), datetime_to_timestamp(timestamp.into()))
     }
 }
 
@@ -59,6 +60,24 @@ impl Default for IsEncrypted {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SeparateParts {
+    sender: SocketAddrV4,
+    id: Id,
+    position: (usize, usize),
+    timestamp: String
+}
+
+impl SeparateParts {
+    pub fn new(sender: SocketAddrV4, id: Id) -> Self { Self { sender, id, position: NO_POSITION, timestamp: datetime_to_timestamp(Utc::now()) } }
+    pub fn into_parts(self) -> (SocketAddrV4, Id, (usize, usize))  { (self.sender, self.id, self.position) }
+    pub fn position(&self) -> (usize, usize) { self.position }
+    pub fn id(&self) -> &Id { &self.id}
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    
+    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Heartbeat {
     dest: SocketAddrV4,
     sender: SocketAddrV4,
@@ -68,15 +87,15 @@ pub struct Heartbeat {
 
 impl Heartbeat {
     pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: EndpointPair::default_socket(), timestamp: String::new(), uuid: Id(Uuid::new_v4().as_bytes().to_vec()) } }
+    pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
 
 impl Message for Heartbeat {
     const ENCRYPTION_REQUIRED: bool = false;
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &Id { &self.uuid }
-    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
+    fn replace_dest(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
-        self.timestamp = datetime_to_timestamp(Utc::now());
     }
     fn check_expiry(&self) -> bool { false }
     fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
@@ -110,34 +129,17 @@ impl StreamMessage {
     pub fn only_sender(&mut self) -> SocketAddrV4 { self.senders.pop().unwrap() }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn into_hash_payload(self) -> (Id, Vec<u8>) { (self.hash, self.payload) }
+    pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
 impl Message for StreamMessage {
     const ENCRYPTION_REQUIRED: bool = true;
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &Id { &self.hash }
-    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
+    fn replace_dest(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
-        self.timestamp = datetime_to_timestamp(Utc::now());
     }
     fn check_expiry(&self) -> bool { false }
     fn set_sender(&mut self, sender: SocketAddrV4) { self.senders.push(sender); }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SeparateParts {
-    sender: SocketAddrV4,
-    id: Id,
-    position: (usize, usize)
-}
-
-impl SeparateParts {
-    pub fn new(sender: SocketAddrV4, id: Id) -> Self { Self { sender, id, position: NO_POSITION } }
-    pub fn into_parts(self) -> (SocketAddrV4, Id, (usize, usize))  { (self.sender, self.id, self.position) }
-    pub fn position(&self) -> (usize, usize) { self.position }
-    pub fn id(&self) -> &Id { &self.id}
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
-    
-    pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -187,6 +189,7 @@ impl SearchMessage {
     }
     pub fn host_name(&self) -> &String { &self.host_name }
     pub fn into_uuid_host_name(self) -> (Id, String) { (self.hash, self.host_name) }
+    pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
 
 impl Message for SearchMessage {
@@ -194,9 +197,8 @@ impl Message for SearchMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &Id { &self.hash }
 
-    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
+    fn replace_dest(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
-        self.timestamp = datetime_to_timestamp(Utc::now());
     }
 
     fn check_expiry(&self) -> bool {
@@ -255,6 +257,7 @@ impl DiscoverPeerMessage {
     }
 
     pub fn set_kind(mut self, kind: DpMessageKind) -> Self { self.kind = kind; self }
+    pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
 
 impl Message for DiscoverPeerMessage {
@@ -262,9 +265,8 @@ impl Message for DiscoverPeerMessage {
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &Id { &self.uuid }
 
-    fn replace_dest_and_timestamp(&mut self, dest: SocketAddrV4) {
+    fn replace_dest(&mut self, dest: SocketAddrV4) {
         self.dest = dest;
-        self.timestamp = datetime_to_timestamp(Utc::now());
     }
 
     fn check_expiry(&self) -> bool { false }

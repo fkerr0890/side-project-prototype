@@ -80,7 +80,7 @@ impl MessageProcessor {
     }
 
     pub fn send_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) -> EmptyResult {
-        message.replace_dest_and_timestamp(dest);
+        message.replace_dest(dest);
         if message.check_expiry() {
             println!("PeerOps: Message expired: {}", message.id());
             return Ok(())

@@ -48,7 +48,7 @@ impl SearchRequestProcessor {
             let my_public_key = key_store.requester_public_key(origin);
             key_store.agree(origin, peer_public_key).unwrap();
             let mut key_agreement_message = StreamMessage::new(host_name, uuid, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec());
-            key_agreement_message.replace_dest_and_timestamp(origin);
+            key_agreement_message.replace_dest(origin);
             self.to_smp
                 .send(key_agreement_message)
                 .map_err(|e| send_error_response(e, file!(), line!()))

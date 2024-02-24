@@ -46,8 +46,8 @@ impl MessageStaging {
     }
 
     fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> EmptyResult {
-        let (message_bytes, senders) = InboundMessage::reassemble_message(message_parts);
-        self.deserialize_message(&message_bytes, false, senders)
+        let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
+        self.deserialize_message(&message_bytes, false, senders, timestamp)
     }
 
     fn handle_key_agreement(&mut self, mut message: StreamMessage) -> EmptyResult {
@@ -68,22 +68,25 @@ impl MessageStaging {
         Ok(())
     }
 
-    fn deserialize_message(&mut self, message_bytes: &[u8], was_encrypted: bool, mut senders: HashSet<SocketAddrV4>) -> EmptyResult {
+    fn deserialize_message(&mut self, message_bytes: &[u8], was_encrypted: bool, mut senders: HashSet<SocketAddrV4>, timestamp: String) -> EmptyResult {
         if let Ok(mut message) = bincode::deserialize::<SearchMessage>(message_bytes) {
             println!("Received search message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string());
             if SearchMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             message.set_sender(senders.drain().next().unwrap());
+            message.set_timestamp(timestamp);
             self.to_srp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(mut message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
             // println!("Received dp message, uuid: {} at {}, {:?}", message.id(), self.endpoint_pair.public_endpoint.to_string(), message.kind);
             if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             message.set_sender(senders.drain().next().unwrap());
+            message.set_timestamp(timestamp);
             self.to_dpp.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(mut message) = bincode::deserialize::<Heartbeat>(message_bytes) {
             if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             message.set_sender(senders.drain().next().unwrap());
+            message.set_timestamp(timestamp);
             // Ok(println!("{:?}", message))
             Ok(())
         }
@@ -92,6 +95,7 @@ impl MessageStaging {
             for sender in senders {
                 message.set_sender(sender);
             }
+            message.set_timestamp(timestamp);
             match message {
                 StreamMessage { kind: StreamMessageKind::KeyAgreement, .. } => { println!("Received key agreement message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string()); self.handle_key_agreement(message) },
                 _ => { println!("Received stream message, uuid: {} at {}", message.id(), self.endpoint_pair.public_endpoint.to_string()); self.to_smp.send(message).map_err(|e| { e.to_string() } ) }
