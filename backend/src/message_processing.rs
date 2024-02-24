@@ -5,15 +5,14 @@ use ring::aead;
 use serde::Serialize;
 use tokio::{sync::{oneshot, mpsc}, time::sleep, net::UdpSocket};
 
-use crate::{crypto::{Direction, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::TransientMap};
+use crate::{crypto::{Direction, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::{TransientMap, TtlType}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
-pub const SEARCH_TIMEOUT: i64 = 30;
-pub const DPP_TTL: u64 = 200;
-pub const SRP_TTL: u64 = 30;
-const SRP_TTL_MILLIS: u64 = SRP_TTL * 1000;
-pub const ACTIVE_SESSION_TTL: u64 = 3600;
+pub const SEARCH_TIMEOUT_SECONDS: i64 = 30;
+pub const DPP_TTL_MILLIS: u64 = 200;
+pub const SRP_TTL_SECONDS: u64 = 30;
+pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 3600;
 
 pub mod stage;
 pub mod stream;
@@ -33,26 +32,27 @@ pub struct MessageProcessor {
 }
 
 impl MessageProcessor {
-    pub fn new(socket: Arc<UdpSocket>, endpoint_pair: EndpointPair, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>, ttl_secs: u64) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, endpoint_pair: EndpointPair, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>, ttl: TtlType) -> Self {
         Self {
             socket: socket.clone(),
             endpoint_pair,
-            breadcrumbs: TransientMap::new(ttl_secs),
+            breadcrumbs: TransientMap::new(ttl),
             key_store: key_store.clone(),
             peer_ops
         }
     } 
 
-    fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: &Id) -> bool {
-        let (dest, sender, id) = (self.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, id.to_owned());
+    fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: &Id, dest: SocketAddrV4) -> bool {
+        let (early_return_dest, sender, id) = (self.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, id.to_owned());
         let (socket, key_store) = (self.socket.clone(), self.key_store.clone());
-        let contains_key = self.breadcrumbs.set_timer_with_send_action(id.clone(), || {
-            if let Some(mut message) = early_return_message {
-                Self::send_static(&socket, &key_store, dest, sender, &mut message, false, false).ok();
-            }
-        });
+        let contains_key = if let Some(mut message) = early_return_message {
+            self.breadcrumbs.set_timer_with_send_action(id.clone(), move || { Self::send_static(&socket, &key_store, early_return_dest, sender, &mut message, false, false).ok(); })
+        }
+        else {
+            self.breadcrumbs.set_timer(id.clone())
+        };
         if contains_key {
-            self.breadcrumbs.map().lock().unwrap().insert(id.clone(), dest);
+            self.breadcrumbs.map().lock().unwrap().insert(id, dest);
         }
         contains_key
     }

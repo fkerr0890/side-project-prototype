@@ -1,6 +1,6 @@
 use std::{collections::HashSet, time::Duration, panic, process, future};
 
-use p2p::{self, node::Node, message_processing::DPP_TTL};
+use p2p::{self, node::Node, message_processing::DPP_TTL_MILLIS};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{time::sleep, fs};
 use uuid::Uuid;
@@ -19,8 +19,8 @@ async fn basic() {
     fs::create_dir("../peer_info").await.unwrap();
 
     let mut introducers = Vec::new();
-    let num_hosts = 1;
-    let num_nodes: u16 = 2;
+    let num_hosts = 3;
+    let num_nodes: u16 = 10;
     let mut rng = rand::thread_rng();
     let mut indices = (0..num_nodes).choose_multiple(&mut rng, num_hosts + 1);
     let start = indices.pop().unwrap();
@@ -32,7 +32,7 @@ async fn basic() {
         let is_end = host_indices.contains(&i);
         let is_start = start == i;
         tokio::spawn(async move { node.listen(is_start, is_end).await });
-        sleep(Duration::from_millis(DPP_TTL*6)).await;
+        sleep(Duration::from_millis(DPP_TTL_MILLIS*6)).await;
         println!();
     }
     future::pending::<()>().await;

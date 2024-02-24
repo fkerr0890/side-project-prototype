@@ -3,7 +3,7 @@ use std::{net::SocketAddrV4, sync::mpsc, fmt::Display};
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 use tokio::sync::oneshot;
 
-use crate::{message_processing::ACTIVE_SESSION_TTL, utils::TransientMap};
+use crate::{message_processing::ACTIVE_SESSION_TTL_SECONDS, utils::{TransientMap, TtlType}};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
@@ -17,8 +17,8 @@ pub struct KeyStore {
 impl KeyStore {
     pub fn new() -> Self {
         Self {
-            private_keys: TransientMap::new(ACTIVE_SESSION_TTL),
-            symmetric_keys: TransientMap::new(ACTIVE_SESSION_TTL),
+            private_keys: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
+            symmetric_keys: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
             rng: SystemRandom::new()
         }
     }
@@ -27,6 +27,7 @@ impl KeyStore {
         let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
         let public_key = my_private_key.compute_public_key().unwrap();
         // println!("Inserting private key: {index}");
+        self.private_keys.set_timer(index.clone());
         self.private_keys.map().lock().unwrap().insert(index, (my_private_key, tx));
         public_key
     }
@@ -77,11 +78,13 @@ impl KeyStore {
         let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value, nonce_tx));
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
         // println!("Inserting symmetric key: {index}");
+        self.symmetric_keys.set_timer(index.clone());
         self.symmetric_keys.map().lock().unwrap().insert(index, key_set);
         Ok(())
     }
 }
 
+#[derive(Debug)]
 struct KeySet { opening_key: aead::LessSafeKey, sealing_key: aead::SealingKey<CurrentNonce>, nonce_rx: mpsc::Receiver<aead::Nonce> }
 
 struct CurrentNonce(u128, mpsc::Sender<aead::Nonce>);

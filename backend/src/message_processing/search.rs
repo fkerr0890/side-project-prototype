@@ -2,9 +2,9 @@ use std::{collections::HashMap, net::SocketAddrV4};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{gateway::EmptyResult, message::{Id, Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientSet};
+use crate::{gateway::EmptyResult, message::{Id, Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientSet, TtlType}};
 
-use super::{send_error_response, MessageProcessor, ACTIVE_SESSION_TTL, SRP_TTL_MILLIS};
+use super::{send_error_response, MessageProcessor, ACTIVE_SESSION_TTL_SECONDS};
 
 pub struct SearchRequestProcessor {
     message_processor: MessageProcessor,
@@ -21,12 +21,12 @@ impl SearchRequestProcessor {
             from_staging,
             to_smp,
             local_hosts,
-            active_sessions: TransientSet::new(ACTIVE_SESSION_TTL)
+            active_sessions: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS))
         }
     }
 
     pub fn handle_search_request(&mut self, mut search_request: SearchMessage) -> EmptyResult {
-        if !self.message_processor.try_add_breadcrumb(None, search_request.id()) {
+        if !self.message_processor.try_add_breadcrumb(None, search_request.id(), search_request.sender()) {
             return Ok(())
         }
         if self.local_hosts.contains_key(search_request.host_name()) {
@@ -35,6 +35,7 @@ impl SearchRequestProcessor {
             let (uuid, host_name) = search_request.into_uuid_host_name();
             return self.return_search_responses(self.construct_search_response(uuid, dest, origin, host_name))
         }
+        println!("Sending request");
         self.message_processor.send_request(&mut search_request, None, true)
     }
 

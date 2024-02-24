@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientMap};
-use super::{MessageProcessor, ACTIVE_SESSION_TTL};
+use crate::{gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
+use super::{MessageProcessor, ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor {
     message_processor: MessageProcessor,
@@ -18,7 +18,7 @@ impl StreamMessageProcessor {
             from_staging,
             local_hosts,
             from_http_handler,
-            active_sessions: TransientMap::new(ACTIVE_SESSION_TTL)
+            active_sessions: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS))
         }
     }
 
@@ -104,6 +104,7 @@ impl StreamMessageProcessor {
     }
 }
 
+#[derive(Debug)]
 struct ActiveSessionInfo {
     dests: HashSet<SocketAddrV4>,
     cached_messages: TransientMap<Id, (StreamMessage, mpsc::UnboundedSender<SerdeHttpResponse>)>,
@@ -111,7 +112,7 @@ struct ActiveSessionInfo {
 }
 
 impl ActiveSessionInfo {
-    fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(30), resource_queue: VecDeque::new() } }
+    fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)), resource_queue: VecDeque::new() } }
     fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.clone() }
     fn handle_cached_message<'a>(uuid: &Id, cached_message: Option<&'a mut (StreamMessage, mpsc::UnboundedSender<SerdeHttpResponse>)>) -> Result<&'a mut StreamMessage, String> {
         let Some(cached_message) = cached_message else {

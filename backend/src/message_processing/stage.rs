@@ -1,8 +1,8 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, sync::{Arc, Mutex}};
 use tokio::sync::mpsc;
-use crate::{crypto::{Direction, Error, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::TransientMap};
+use crate::{crypto::{Direction, Error, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
 
-use super::SRP_TTL;
+use super::SRP_TTL_SECONDS;
 
 pub struct MessageStaging {
     from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, InboundMessage)>,
@@ -30,8 +30,8 @@ impl MessageStaging {
             to_dpp,
             to_smp,
             key_store: key_store.clone(),
-            message_staging: TransientMap::new(SRP_TTL),
-            cached_messages: TransientMap::new(SRP_TTL),
+            message_staging: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
+            cached_messages: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
             endpoint_pair,
         }
     }
@@ -130,8 +130,8 @@ impl MessageStaging {
             let uuid = inbound_message.separate_parts().id().to_owned();
             let staged_messages_len = {
                 self.message_staging.set_timer(uuid.clone());
-                let mut staged_messages = self.message_staging.map().lock().unwrap();
-                let staged_messages= staged_messages.entry(uuid.clone()).or_insert(HashMap::with_capacity(num_chunks));
+                let mut message_staging = self.message_staging.map().lock().unwrap();
+                let staged_messages= message_staging.entry(uuid.clone()).or_insert(HashMap::with_capacity(num_chunks));
                 staged_messages.insert(index, inbound_message);
                 staged_messages.len()
             };

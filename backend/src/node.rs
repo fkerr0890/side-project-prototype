@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, gateway::InboundGateway, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, MessageProcessor, DPP_TTL, SRP_TTL}, peer::{self, PeerOps}};
+use crate::{crypto::KeyStore, gateway::InboundGateway, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, MessageProcessor, DPP_TTL_MILLIS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     endpoint_pair: EndpointPair,
@@ -48,9 +48,9 @@ impl Node {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
         let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), &key_store, self.endpoint_pair);
-        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), SRP_TTL), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
-        let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), DPP_TTL), dpm_from_gateway);
-        let mut smp = StreamMessageProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, None, SRP_TTL), sm_from_gateway, local_hosts, tx_from_http_handler);
+        let mut srp = SearchRequestProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
+        let mut dpp = DiscoverPeerProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Millis(DPP_TTL_MILLIS)), dpm_from_gateway);
+        let mut smp = StreamMessageProcessor::new(MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts, tx_from_http_handler);
     
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&self.socket, to_staging.clone());
@@ -100,7 +100,7 @@ impl Node {
             }
         });
         
-        let heartbeat_mp = MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops), 0);
+        let heartbeat_mp = MessageProcessor::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops), TtlType::Secs(0));
         tokio::spawn(async move {
             loop {
                 if let Err(e) = heartbeat_mp.send_request(&mut Heartbeat::new(), None, true) {

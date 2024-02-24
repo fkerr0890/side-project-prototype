@@ -6,7 +6,7 @@ use std::mem;
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
-use crate::message_processing::SEARCH_TIMEOUT;
+use crate::message_processing::SEARCH_TIMEOUT_SECONDS;
 use crate::node::EndpointPair;
 
 pub const NO_POSITION: (usize, usize) = (0, 1);
@@ -20,7 +20,7 @@ pub trait Message {
     fn set_sender(&mut self, sender: SocketAddrV4);
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InboundMessage {
     payload: Vec<u8>,
     is_encrypted: IsEncrypted,
@@ -162,7 +162,7 @@ impl SearchMessage {
             hash,
             kind,
             origin,
-            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT)),
+            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT_SECONDS)),
         }
     }
 

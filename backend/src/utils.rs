@@ -1,16 +1,17 @@
-use std::{collections::{HashMap, HashSet}, fmt::Display, hash::Hash, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::{HashMap, HashSet}, fmt::{Debug, Display}, hash::Hash, sync::{Arc, Mutex}, time::Duration};
 
-use tokio::time::sleep;
+use tokio::time;
 
-pub struct TransientMap<K: Send + Hash + Eq + Display, V: Send> {
-    ttl: u64,
+#[derive(Debug, Clone)]
+pub struct TransientMap<K: Send + Hash + Eq + Display, V: Send + Debug> {
+    ttl: TtlType,
     map: Arc<Mutex<HashMap<K, V>>>
 }
 
-impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> TransientMap<K, V> {
-    pub fn new(ttl_secs: u64) -> Self {
+impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + Debug + 'static> TransientMap<K, V> {
+    pub fn new(ttl: TtlType) -> Self {
         Self {
-            ttl: ttl_secs,
+            ttl,
             map: Arc::new(Mutex::new(HashMap::new()))
         }
     }
@@ -30,11 +31,12 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
         // println!("TransientMap {}: Adding {}", name, key);
         let (map, ttl) = (self.map.clone(), self.ttl);
         tokio::spawn(async move {
-            sleep(Duration::from_secs(ttl)).await;
-            // println!("TransientMap: Removing {}", key);
-            let removed_value = map.lock().unwrap().remove(&key);
-            if let Some(send_action) = send_action {
+            ttl.sleep().await;
+            if let Some(mut send_action) = send_action {
                 send_action();
+            }
+            else {
+                map.lock().unwrap().remove(&key);
             }
         });
         true
@@ -44,14 +46,14 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
 }
 
 pub struct TransientSet<K: Send + Hash + Eq + Display> {
-    ttl: u64,
+    ttl: TtlType,
     set: Arc<Mutex<HashSet<K>>>
 }
 
 impl<K: Send + Hash + Eq + Clone + Display + 'static> TransientSet<K> {
-    pub fn new(ttl_secs: u64) -> Self {
+    pub fn new(ttl: TtlType) -> Self {
         Self {
-            ttl: ttl_secs,
+            ttl,
             set: Arc::new(Mutex::new(HashSet::new()))
         }
     }
@@ -62,7 +64,7 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static> TransientSet<K> {
         }
         let (set, ttl, key_owned) = (self.set.clone(), self.ttl, key.to_owned());
         tokio::spawn(async move {
-            sleep(Duration::from_secs(ttl)).await;
+            ttl.sleep().await;
             // println!("TransientSet: Removing {}", key_owned);
             set.lock().unwrap().remove(&key_owned);
         });
@@ -71,4 +73,18 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static> TransientSet<K> {
     }
 
     pub fn set(&self) -> &Arc<Mutex<HashSet<K>>> { &self.set }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TtlType {
+    Secs(u64),
+    Millis(u64)
+}
+impl TtlType {
+    pub fn sleep(&self) -> time::Sleep {
+        match self {
+            Self::Secs(secs) => time::sleep(Duration::from_secs(*secs)),
+            Self::Millis(millis) => time::sleep(Duration::from_millis(*millis)),
+        }
+    }
 }
