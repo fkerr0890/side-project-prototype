@@ -112,7 +112,9 @@ impl OutboundGateway {
 
     fn add_new_peers(&self, peers: Vec<EndpointPair>) {
         for peer in peers {
-            self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.endpoint_pair.public_endpoint, peer.public_endpoint));
+            if peer.public_endpoint != self.endpoint_pair.public_endpoint {
+                self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.endpoint_pair.public_endpoint, peer.public_endpoint));
+            }
         }
     }
 

@@ -46,12 +46,9 @@ impl DiscoverPeerProcessor {
         else if self.outbound_gateway.try_add_breadcrumb(Some(hairpin_response), request.id(), request.sender()) {
             self.outbound_gateway.send_request(&mut request, None, false)?;
         }
-        let endpoint_pair = if sender != EndpointPair::default_socket() {
-            EndpointPair::new(sender, sender)
-        } else {
-            EndpointPair::new(origin, origin)
-        };        
-        self.outbound_gateway.add_new_peers(vec![endpoint_pair]);
+        if sender == EndpointPair::default_socket() {
+            self.outbound_gateway.add_new_peers(vec![EndpointPair::new(origin, origin)]);
+        }
         Ok(())
     }
 

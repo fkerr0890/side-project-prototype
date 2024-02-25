@@ -2,5 +2,5 @@ backend/target
 test.bat
 .vscode/launch.json
 side-project-prototype.code-workspace
-peer_info
+peer_info*
 crypto-test/target

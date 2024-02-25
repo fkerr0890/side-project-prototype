@@ -1,8 +1,8 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, sync::{Arc, Mutex}};
 use tokio::sync::mpsc;
-use crate::{crypto::{Direction, Error, KeyStore}, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
+use crate::{crypto::{Direction, Error, KeyStore}, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, peer::PeerOps, utils::{TransientMap, TtlType}};
 
-use super::{EmptyResult, SRP_TTL_SECONDS};
+use super::{DiscoverPeerProcessor, EmptyResult, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
     from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, InboundMessage)>,
@@ -10,6 +10,7 @@ pub struct MessageStaging {
     to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     key_store: Arc<Mutex<KeyStore>>,
+    peer_ops: Arc<Mutex<PeerOps>>,
     message_staging: TransientMap<Id, HashMap<usize, InboundMessage>>,
     cached_messages: TransientMap<Id, Vec<InboundMessage>>,
     endpoint_pair: EndpointPair
@@ -22,6 +23,7 @@ impl MessageStaging {
         to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
         to_smp: mpsc::UnboundedSender<StreamMessage>,
         key_store: &Arc<Mutex<KeyStore>>,
+        peer_ops: Arc<Mutex<PeerOps>>,
         endpoint_pair: EndpointPair) -> Self
     {
         Self {
@@ -30,6 +32,7 @@ impl MessageStaging {
             to_dpp,
             to_smp,
             key_store: key_store.clone(),
+            peer_ops,
             message_staging: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
             cached_messages: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
             endpoint_pair,
@@ -50,7 +53,17 @@ impl MessageStaging {
 
     fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> EmptyResult {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
+        for sender in senders.iter() {
+            self.add_new_peer(*sender);
+        }
         self.deserialize_message(&message_bytes, false, senders, timestamp)
+    }
+
+    fn add_new_peer(&self, sender: SocketAddrV4) {
+        if sender != EndpointPair::default_socket() && sender != self.endpoint_pair.public_endpoint {
+            let endpoint_pair = EndpointPair::new(sender, sender);
+            self.peer_ops.lock().unwrap().add_peer(endpoint_pair, DiscoverPeerProcessor::get_score(self.endpoint_pair.public_endpoint, endpoint_pair.public_endpoint))
+        }
     }
 
     fn handle_key_agreement(&mut self, mut message: StreamMessage) -> EmptyResult {
