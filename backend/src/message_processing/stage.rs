@@ -38,6 +38,9 @@ impl MessageStaging {
 
     pub async fn receive(&mut self) -> EmptyResult {
         let (peer_addr, inbound_message) = self.from_gateway.recv().await.ok_or("MessageStaging: failed to receive message from gateway")?;
+        if inbound_message.separate_parts().sender() != peer_addr {
+            return Ok(())
+        }
         let res = self.stage_message(inbound_message);
         if let Some(message_parts) = res {
             return self.reassemble_message(message_parts);

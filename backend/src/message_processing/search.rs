@@ -33,7 +33,8 @@ impl SearchRequestProcessor {
             println!("Found host {} at {}, uuid: {}", search_request.host_name(), self.message_processor.endpoint_pair.public_endpoint.port(), search_request.id());
             let (dest, origin) = (search_request.sender(), search_request.origin());
             let (uuid, host_name) = search_request.into_uuid_host_name();
-            return self.return_search_responses(self.construct_search_response(uuid, dest, origin, host_name))
+            let Some(search_response) = self.construct_search_response(uuid, dest, origin, host_name) else { return Ok(()) };
+            return self.return_search_responses(search_response)
         }
         println!("Sending request");
         self.message_processor.send_request(&mut search_request, None, true)
@@ -45,7 +46,7 @@ impl SearchRequestProcessor {
             let origin = search_response.origin();
             let (uuid, host_name, peer_public_key) = search_response.into_uuid_host_name_public_key();
             let mut key_store = self.message_processor.key_store.lock().unwrap();
-            let my_public_key = key_store.requester_public_key(origin);
+            let Some(my_public_key) = key_store.requester_public_key(origin) else { return Ok(()) };
             key_store.agree(origin, peer_public_key).unwrap();
             let mut key_agreement_message = StreamMessage::new(host_name, uuid, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec());
             key_agreement_message.replace_dest(origin);
@@ -58,11 +59,11 @@ impl SearchRequestProcessor {
         }
     }
     
-    fn construct_search_response(&self, uuid: Id, dest: SocketAddrV4, origin: SocketAddrV4, host_name: String) -> SearchMessage {
+    fn construct_search_response(&self, uuid: Id, dest: SocketAddrV4, origin: SocketAddrV4, host_name: String) -> Option<SearchMessage> {
         let (tx, rx) = oneshot::channel();
         self.message_processor.send_nat_heartbeats(rx, origin);
-        let public_key = self.message_processor.key_store.lock().unwrap().host_public_key(origin, tx);
-        SearchMessage::key_response(dest, self.message_processor.endpoint_pair.public_endpoint, self.message_processor.endpoint_pair.public_endpoint, uuid, host_name, public_key.as_ref().to_vec())
+        let Some(public_key) = self.message_processor.key_store.lock().unwrap().host_public_key(origin, tx) else { return None };
+        Some(SearchMessage::key_response(dest, self.message_processor.endpoint_pair.public_endpoint, self.message_processor.endpoint_pair.public_endpoint, uuid, host_name, public_key.as_ref().to_vec()))
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {

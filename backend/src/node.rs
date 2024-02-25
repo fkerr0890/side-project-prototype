@@ -1,7 +1,7 @@
 use std::{net::{SocketAddrV4, Ipv4Addr, SocketAddr}, fmt::Display, sync::{Arc, Mutex}, collections::HashMap, time::Duration, future, str::FromStr};
 
 use serde::{Serialize, Deserialize};
-use tokio::{net::UdpSocket, sync::mpsc, time::sleep, fs};
+use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use uuid::Uuid;
 
 use crate::{crypto::KeyStore, gateway::InboundGateway, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, MessageProcessor, DPP_TTL_MILLIS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
@@ -16,7 +16,7 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(private_ip: String, private_port: String, public_ip: &str, uuid: Uuid, introducer: Option<&EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
+    pub async fn new(private_ip: String, private_port: String, public_ip: &str, uuid: Uuid, introducer: Option<EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
         let socket = Arc::new(UdpSocket::bind(private_ip.clone() + ":" + &private_port).await.unwrap());
         let public_endpoint = SocketAddrV4::new(public_ip.parse().unwrap(), socket.local_addr().unwrap().port());
         let private_endpoint = SocketAddrV4::new(private_ip.parse().unwrap(), socket.local_addr().unwrap().port());
@@ -26,14 +26,14 @@ impl Node {
             uuid: uuid.simple().to_string(),
             nat_kind: NatKind::Unknown,
             socket,
-            introducer: introducer.copied(),
+            introducer,
             initial_peers
         }
     }
 
     pub fn endpoint_pair(&self) -> EndpointPair { self.endpoint_pair }
 
-    pub async fn listen(&self, is_start: bool, is_end: bool) {
+    pub async fn listen(&self, is_start: bool, is_end: bool, report_trigger: Option<mpsc::Receiver<()>>) {
         let (srm_to_srp, srm_from_gateway) = mpsc::unbounded_channel();
         let (dpm_to_dpp, dpm_from_gateway) = mpsc::unbounded_channel();
         let (sm_to_smp, sm_from_gateway) = mpsc::unbounded_channel();
@@ -131,9 +131,14 @@ impl Node {
             println!("No introducer");
         }
 
-        sleep(Duration::from_secs(2)).await;
-        let node_info = self.as_node_info(peer_ops_clone, is_start, is_end);
-        fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
+        if let Some(mut report_trigger) = report_trigger {
+            let (port, uuid) = (self.endpoint_pair.public_endpoint.port(), self.uuid.clone());
+            tokio::spawn(async move {
+                report_trigger.recv().await;
+                let node_info = Self::as_node_info(peer_ops_clone, is_start, is_end, port, uuid);
+                fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
+            });
+        }
         
         if is_start {
             println!("Tcp listening");
@@ -145,12 +150,13 @@ impl Node {
         }
     }
 
-    pub fn as_node_info(&self, peer_ops: Arc<Mutex<PeerOps>>, is_start: bool, is_end: bool) -> NodeInfo {
-        let name = if is_start { String::from("START") } else if is_end { String::from("END") + &self.endpoint_pair.public_endpoint.port().to_string() } else { self.endpoint_pair.public_endpoint.port().to_string() };
+    pub fn as_node_info(peer_ops: Arc<Mutex<PeerOps>>, is_start: bool, is_end: bool, port: u16, uuid: String) -> NodeInfo {
+        let port_str = port.to_string();
+        let name = if is_start { String::from("START") } else if is_end { String::from("END") + &port_str } else { port_str };
         NodeInfo {
             name,
-            port: self.endpoint_pair.public_endpoint.port(),
-            uuid: self.uuid.clone(),
+            port,
+            uuid,
             peers: peer_ops.lock().unwrap().peers_and_scores().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect()
         }
     }

@@ -101,6 +101,7 @@ impl DiscoverPeerProcessor {
     }
 
     fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message_staging: &TransientMap<Id, DiscoverPeerMessage>, uuid: &Id) {
+        println!("Sending final response");
         let staged_message = {
             let mut message_staging = message_staging.map().lock().unwrap();
             message_staging.remove(uuid)

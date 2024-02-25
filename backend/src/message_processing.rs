@@ -10,7 +10,7 @@ use crate::{crypto::{Direction, KeyStore}, gateway::EmptyResult, message::{Disco
 pub use self::discover::DiscoverPeerProcessor;
 
 pub const SEARCH_TIMEOUT_SECONDS: i64 = 30;
-pub const DPP_TTL_MILLIS: u64 = 200;
+pub const DPP_TTL_MILLIS: u64 = 500;
 pub const SRP_TTL_SECONDS: u64 = 30;
 pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 3600;
 

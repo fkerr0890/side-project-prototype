@@ -23,20 +23,24 @@ impl KeyStore {
         }
     }
 
-    fn generate_key_pair(&mut self, index: String, tx: Option<oneshot::Sender<()>>) -> agreement::PublicKey {
+    fn generate_key_pair(&mut self, index: String, tx: Option<oneshot::Sender<()>>) -> Option<agreement::PublicKey> {
         let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
         let public_key = my_private_key.compute_public_key().unwrap();
         // println!("Inserting private key: {index}");
         self.private_keys.set_timer(index.clone());
-        self.private_keys.map().lock().unwrap().insert(index, (my_private_key, tx));
-        public_key
+        let mut private_keys = self.private_keys.map().lock().unwrap();
+        if private_keys.contains_key(&index) {
+            return None;
+        }
+        private_keys.insert(index, (my_private_key, tx));
+        Some(public_key)
     }
 
-    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4, tx: oneshot::Sender<()>) -> agreement::PublicKey {
+    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4, tx: oneshot::Sender<()>) -> Option<agreement::PublicKey> {
         self.generate_key_pair(peer_addr.to_string(), Some(tx))
     }
 
-    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> agreement::PublicKey {
+    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
         self.generate_key_pair(peer_addr.to_string(), None)
     }
 
@@ -79,7 +83,11 @@ impl KeyStore {
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
         // println!("Inserting symmetric key: {index}");
         self.symmetric_keys.set_timer(index.clone());
-        self.symmetric_keys.map().lock().unwrap().insert(index, key_set);
+        let mut symmetric_keys = self.symmetric_keys.map().lock().unwrap();
+        if symmetric_keys.contains_key(&index) {
+            return Ok(())
+        }
+        symmetric_keys.insert(index, key_set);
         Ok(())
     }
 }
