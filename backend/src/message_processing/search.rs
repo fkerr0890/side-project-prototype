@@ -36,7 +36,6 @@ impl SearchRequestProcessor {
             let Some(search_response) = self.construct_search_response(uuid, dest, origin, host_name) else { return Ok(()) };
             return self.return_search_responses(search_response)
         }
-        println!("Sending request");
         self.message_processor.send_request(&mut search_request, None, true)
     }
 

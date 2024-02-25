@@ -16,14 +16,14 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(private_ip: String, private_port: String, public_ip: &str, uuid: Uuid, introducer: Option<EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
+    pub async fn new(private_ip: String, private_port: String, public_ip: &str, uuid: String, introducer: Option<EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
         let socket = Arc::new(UdpSocket::bind(private_ip.clone() + ":" + &private_port).await.unwrap());
         let public_endpoint = SocketAddrV4::new(public_ip.parse().unwrap(), socket.local_addr().unwrap().port());
         let private_endpoint = SocketAddrV4::new(private_ip.parse().unwrap(), socket.local_addr().unwrap().port());
         println!("public: {:?}", public_endpoint);
         Self {
             endpoint_pair: EndpointPair::new(public_endpoint, private_endpoint),
-            uuid: uuid.simple().to_string(),
+            uuid,
             nat_kind: NatKind::Unknown,
             socket,
             introducer,
@@ -135,7 +135,7 @@ impl Node {
             let (port, uuid) = (self.endpoint_pair.public_endpoint.port(), self.uuid.clone());
             tokio::spawn(async move {
                 report_trigger.recv().await;
-                let node_info = Self::as_node_info(peer_ops_clone, is_start, is_end, port, uuid);
+                let node_info = NodeInfo::new(peer_ops_clone, is_start, is_end, port, uuid);
                 fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
             });
         }
@@ -150,15 +150,10 @@ impl Node {
         }
     }
 
-    pub fn as_node_info(peer_ops: Arc<Mutex<PeerOps>>, is_start: bool, is_end: bool, port: u16, uuid: String) -> NodeInfo {
-        let port_str = port.to_string();
-        let name = if is_start { String::from("START") } else if is_end { String::from("END") + &port_str } else { port_str };
-        NodeInfo {
-            name,
-            port,
-            uuid,
-            peers: peer_ops.lock().unwrap().peers_and_scores().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect()
-        }
+    pub async fn from_node_info(value: NodeInfo) -> (Self, bool, bool) {
+        let port = value.port.to_string();
+        let peers = value.peers.into_iter().map(|(peer_port, _)| String::from("127.0.0.1:") + &peer_port.to_string()).collect();
+        (Self::new(String::from("127.0.0.1"), port, "127.0.0.1", value.uuid, None, Some(peers)).await, value.is_start, value.is_end)
     }
 }
 
@@ -198,5 +193,21 @@ pub struct NodeInfo {
     pub name: String,
     port: u16,
     uuid: String,
-    peers: Vec<(u16, i32)>
+    peers: Vec<(u16, i32)>,
+    is_start: bool,
+    is_end: bool
+}
+impl NodeInfo {
+    pub fn new(peer_ops: Arc<Mutex<PeerOps>>, is_start: bool, is_end: bool, port: u16, uuid: String) -> NodeInfo {
+        let port_str = port.to_string();
+        let name = if is_start { String::from("START") } else if is_end { String::from("END") + &port_str } else { port_str };
+        NodeInfo {
+            name,
+            port,
+            uuid,
+            peers: peer_ops.lock().unwrap().peers_and_scores().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect(),
+            is_start,
+            is_end
+        }
+    }
 }

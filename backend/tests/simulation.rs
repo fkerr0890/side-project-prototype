@@ -1,6 +1,6 @@
 use std::{collections::HashSet, time::Duration, panic, process, future};
 
-use p2p::{self, message_processing::DPP_TTL_MILLIS, node::{EndpointPair, Node}};
+use p2p::{self, message_processing::DPP_TTL_MILLIS, node::{EndpointPair, Node, NodeInfo}};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, sync::mpsc, time::sleep};
 use uuid::Uuid;
@@ -28,7 +28,7 @@ async fn basic() {
         let host_indices = HashSet::<u16>::from_iter(indices.into_iter());
         for i in 0..num_nodes {
             let introducer = if introducers.len() > 0 { Some(introducers.get(rand::thread_rng().gen_range(0..introducers.len())).unwrap().0) } else { None };
-            let node = Node::new(String::from("127.0.0.1"), String::from("0"), "127.0.0.1", Uuid::new_v4(), introducer, None).await;
+            let node = Node::new(String::from("127.0.0.1"), String::from("0"), "127.0.0.1", Uuid::new_v4().simple().to_string(), introducer, None).await;
             let (tx, rx) = mpsc::channel(1);
             introducers.push((node.endpoint_pair(), tx));
             let is_end = host_indices.contains(&i);
@@ -40,6 +40,15 @@ async fn basic() {
         for (_, tx) in introducers {
             tx.send(()).await.unwrap();
         }
+    }
+    else {
+        let mut paths = fs::read_dir("../peer_info").await.unwrap();
+        while let Some(path) = paths.next_entry().await.unwrap() {
+            let node_info: NodeInfo = serde_json::from_slice(&fs::read(path.path()).await.unwrap()).unwrap();
+            let (node, is_start, is_end) = Node::from_node_info(node_info).await;
+            tokio::spawn(async move { node.listen(is_start, is_end, None).await });
+        }
+        println!("Setup complete");
     }
     future::pending::<()>().await;
 }
