@@ -6,7 +6,7 @@ use std::mem;
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
-use crate::message_processing::SEARCH_TIMEOUT_SECONDS;
+use crate::gateway::SEARCH_TIMEOUT_SECONDS;
 use crate::node::EndpointPair;
 
 pub const NO_POSITION: (usize, usize) = (0, 1);

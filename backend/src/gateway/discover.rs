@@ -2,20 +2,20 @@ use std::{net::SocketAddrV4, sync::{Arc, Mutex}};
 
 use tokio::{net::UdpSocket, sync::mpsc};
 
-use crate::{crypto::KeyStore, gateway::EmptyResult, message::{DiscoverPeerMessage, DpMessageKind, Id, Message}, node::EndpointPair, utils::{TransientMap, TtlType}};
+use crate::{crypto::KeyStore, message::{DiscoverPeerMessage, DpMessageKind, Id, Message}, node::EndpointPair, utils::{TransientMap, TtlType}};
 
-use super::{MessageProcessor, DPP_TTL_MILLIS};
+use super::{EmptyResult, OutboundGateway, DPP_TTL_MILLIS};
 
 pub struct DiscoverPeerProcessor {
-    message_processor: MessageProcessor,
+    outbound_gateway: OutboundGateway,
     from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>,
     message_staging: TransientMap<Id, DiscoverPeerMessage>
 }
 
 impl DiscoverPeerProcessor {
-    pub fn new(message_processor: MessageProcessor, from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>) -> Self {
+    pub fn new(outbound_gateway: OutboundGateway, from_staging: mpsc::UnboundedReceiver<DiscoverPeerMessage>) -> Self {
         Self {
-            message_processor,
+            outbound_gateway,
             from_staging,
             message_staging: TransientMap::new(TtlType::Millis(DPP_TTL_MILLIS * 2)),
         }
@@ -32,7 +32,7 @@ impl DiscoverPeerProcessor {
     }
 
     fn propagate_request(&mut self, mut request: DiscoverPeerMessage) -> EmptyResult {
-        request = request.set_origin_if_unset(self.message_processor.endpoint_pair.public_endpoint);
+        request = request.set_origin_if_unset(self.outbound_gateway.endpoint_pair.public_endpoint);
         let (sender, origin) = (request.sender(), request.origin());
         let mut hairpin_response = DiscoverPeerMessage::new(DpMessageKind::Response,
             request.origin(),
@@ -43,15 +43,15 @@ impl DiscoverPeerProcessor {
             // gateway::log_debug("At hairpin");
             self.return_response(hairpin_response, Some(request.sender()))?;
         }
-        else if self.message_processor.try_add_breadcrumb(Some(hairpin_response), request.id(), request.sender()) {
-            self.message_processor.send_request(&mut request, None, false)?;
+        else if self.outbound_gateway.try_add_breadcrumb(Some(hairpin_response), request.id(), request.sender()) {
+            self.outbound_gateway.send_request(&mut request, None, false)?;
         }
         let endpoint_pair = if sender != EndpointPair::default_socket() {
             EndpointPair::new(sender, sender)
         } else {
             EndpointPair::new(origin, origin)
         };        
-        self.message_processor.add_new_peers(vec![endpoint_pair]);
+        self.outbound_gateway.add_new_peers(vec![endpoint_pair]);
         Ok(())
     }
 
@@ -65,7 +65,7 @@ impl DiscoverPeerProcessor {
                 break 'b1 staged_message.peer_list().len();
             }
             let message_staging_clone = self.message_staging.clone();
-            let (socket, key_store, uuid, dest, sender) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), message.id().to_owned(), self.message_processor.get_dest(message.id()).unwrap(), self.message_processor.endpoint_pair.public_endpoint);
+            let (socket, key_store, uuid, dest, sender) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), message.id().to_owned(), self.outbound_gateway.get_dest(message.id()).unwrap(), self.outbound_gateway.endpoint_pair.public_endpoint);
             self.message_staging.set_timer_with_send_action(uuid.clone(), move || { Self::send_final_response_static(&socket, &key_store, dest, sender, &message_staging_clone, &uuid); });
             0
         };
@@ -81,9 +81,9 @@ impl DiscoverPeerProcessor {
     }
 
     fn return_response(&mut self, mut response: DiscoverPeerMessage, dest: Option<SocketAddrV4>) -> EmptyResult {
-        response.add_peer(self.message_processor.endpoint_pair);
-        let Some(dest) = (if dest.is_some() { dest } else { self.message_processor.get_dest(response.id()) }) else { return Ok(()) };
-        if response.origin() == self.message_processor.endpoint_pair.public_endpoint {
+        response.add_peer(self.outbound_gateway.endpoint_pair);
+        let Some(dest) = (if dest.is_some() { dest } else { self.outbound_gateway.get_dest(response.id()) }) else { return Ok(()) };
+        if response.origin() == self.outbound_gateway.endpoint_pair.public_endpoint {
             let uuid = response.id().to_owned();
             if self.stage_message(response) {
                 self.send_final_response(&uuid);
@@ -91,13 +91,13 @@ impl DiscoverPeerProcessor {
             Ok(())
         }
         else {
-            self.message_processor.send(dest, &mut response, false, false)
+            self.outbound_gateway.send(dest, &mut response, false, false)
         }
     }
 
     fn send_final_response(&self, uuid: &Id) {
-        let dest = self.message_processor.get_dest(uuid).unwrap();
-        Self::send_final_response_static(&self.message_processor.socket, &self.message_processor.key_store, dest, self.message_processor.endpoint_pair.public_endpoint, &self.message_staging, uuid);
+        let dest = self.outbound_gateway.get_dest(uuid).unwrap();
+        Self::send_final_response_static(&self.outbound_gateway.socket, &self.outbound_gateway.key_store, dest, self.outbound_gateway.endpoint_pair.public_endpoint, &self.message_staging, uuid);
     }
 
     fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message_staging: &TransientMap<Id, DiscoverPeerMessage>, uuid: &Id) {
@@ -107,14 +107,14 @@ impl DiscoverPeerProcessor {
             message_staging.remove(uuid)
         };
         if let Some(staged_message) = staged_message {
-            MessageProcessor::send_static(socket, key_store, dest, sender, &mut staged_message.set_kind(DpMessageKind::IveGotSome), false, false).ok();
+            OutboundGateway::send_static(socket, key_store, dest, sender, &mut staged_message.set_kind(DpMessageKind::IveGotSome), false, false).ok();
         }
     }
 
     fn request_new_peers(&self, mut message: DiscoverPeerMessage) -> EmptyResult {
         // gateway::log_debug(&format!("Got INeedSome, introducer = {}", message.peer_list()[0].public_endpoint));
         let introducer = message.get_last_peer();
-        self.message_processor.send(introducer.public_endpoint, 
+        self.outbound_gateway.send(introducer.public_endpoint, 
             &mut message
                 .set_kind(DpMessageKind::Request),
             false,
@@ -122,7 +122,7 @@ impl DiscoverPeerProcessor {
     }
 
     fn add_new_peers(&self, message: DiscoverPeerMessage) -> EmptyResult {
-        self.message_processor.add_new_peers(message.into_peer_list());
+        self.outbound_gateway.add_new_peers(message.into_peer_list());
         Ok(())
     }
 }

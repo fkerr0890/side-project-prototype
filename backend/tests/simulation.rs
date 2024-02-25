@@ -1,6 +1,6 @@
 use std::{collections::HashSet, time::Duration, panic, process, future};
 
-use p2p::{self, message_processing::DPP_TTL_MILLIS, node::{EndpointPair, Node, NodeInfo}};
+use p2p::{self, gateway::DPP_TTL_MILLIS, node::{EndpointPair, Node, NodeInfo}};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, sync::mpsc, time::sleep};
 use uuid::Uuid;

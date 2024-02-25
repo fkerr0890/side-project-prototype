@@ -3,7 +3,7 @@ use std::{net::SocketAddrV4, sync::mpsc, fmt::Display};
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 use tokio::sync::oneshot;
 
-use crate::{message_processing::ACTIVE_SESSION_TTL_SECONDS, utils::{TransientMap, TtlType}};
+use crate::{gateway::ACTIVE_SESSION_TTL_SECONDS, utils::{TransientMap, TtlType}};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,

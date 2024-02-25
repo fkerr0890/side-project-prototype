@@ -1,20 +1,20 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{gateway::EmptyResult, http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
-use super::{MessageProcessor, ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS};
+use crate::{http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
+use super::{EmptyResult, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor {
-    message_processor: MessageProcessor,
+    outbound_gateway: OutboundGateway,
     from_staging: mpsc::UnboundedReceiver<StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
     from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<SerdeHttpResponse>>,
     active_sessions: TransientMap<String, ActiveSessionInfo>
 }
 impl StreamMessageProcessor {
-    pub fn new(message_processor: MessageProcessor, from_staging: mpsc::UnboundedReceiver<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<SerdeHttpResponse>>) -> Self {
+    pub fn new(outbound_gateway: OutboundGateway, from_staging: mpsc::UnboundedReceiver<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<SerdeHttpResponse>>) -> Self {
         Self
         {
-            message_processor,
+            outbound_gateway,
             from_staging,
             local_hosts,
             from_http_handler,
@@ -36,8 +36,8 @@ impl StreamMessageProcessor {
         let mut active_sessions = self.active_sessions.map().lock().unwrap();
         let active_session = active_sessions.get_mut(message.host_name()).unwrap();
         match active_session.initial_request(dest, message, |message, cached_message, dest| {
-            self.message_processor.send(dest, message, false, false)?;
-            self.message_processor.send(dest, cached_message, true, true)
+            self.outbound_gateway.send(dest, message, false, false)?;
+            self.outbound_gateway.send(dest, cached_message, true, true)
         }) {
             Ok(_) => Ok(()),
             Err(e) => { println!("{}", e); Ok(()) }
@@ -45,7 +45,7 @@ impl StreamMessageProcessor {
     }
 
     fn start_follow_ups(&self, host_name: String, uuid: Id) {
-        let (socket, key_store, sender, active_sessions) = (self.message_processor.socket.clone(), self.message_processor.key_store.clone(), self.message_processor.endpoint_pair.public_endpoint, self.active_sessions.map().clone());
+        let (socket, key_store, sender, active_sessions) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.endpoint_pair.public_endpoint, self.active_sessions.map().clone());
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
@@ -54,7 +54,7 @@ impl StreamMessageProcessor {
                 if !active_session.follow_up(&uuid, |request, dests| {                  
                     for dest in dests.iter() {
                         println!("Sending follow up for {} to {}", request.id(), dest);
-                        MessageProcessor::send_static(&socket, &key_store, *dest, sender, request, true, true).ok();
+                        OutboundGateway::send_static(&socket, &key_store, *dest, sender, request, true, true).ok();
                     }
                 }) {
                     return
@@ -70,7 +70,7 @@ impl StreamMessageProcessor {
             let mut active_sessions = self.active_sessions.map().lock().unwrap();
             let active_session_info = active_sessions.entry(host_name.clone()).or_default();
             let dests = active_session_info.dests();
-            let set_timer = if dests.len() > 0 { self.message_processor.send_request(&mut message, Some(dests), true)?; true } else { false };
+            let set_timer = if dests.len() > 0 { self.outbound_gateway.send_request(&mut message, Some(dests), true)?; true } else { false };
             println!("Pushed: {}", message.id());
             let Ok(to_http_handler) = self.from_http_handler.try_recv() else { panic!("Oh fuck nah") };
             active_session_info.push_resource(message, set_timer, to_http_handler)?;
@@ -91,7 +91,7 @@ impl StreamMessageProcessor {
             uuid,
             StreamMessageKind::Response,
             response_bytes);
-        self.message_processor.send(dest, &mut response, true, true)
+        self.outbound_gateway.send(dest, &mut response, true, true)
     }
 
     fn return_resource(&self, message: StreamMessage) -> EmptyResult {

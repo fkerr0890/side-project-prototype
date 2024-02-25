@@ -1,8 +1,8 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, sync::{Arc, Mutex}};
 use tokio::sync::mpsc;
-use crate::{crypto::{Direction, Error, KeyStore}, gateway::EmptyResult, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
+use crate::{crypto::{Direction, Error, KeyStore}, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
 
-use super::SRP_TTL_SECONDS;
+use super::{EmptyResult, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
     from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, InboundMessage)>,
