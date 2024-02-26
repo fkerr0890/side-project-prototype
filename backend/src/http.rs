@@ -157,34 +157,6 @@ impl ServerContext {
     }
 }
 
-// struct ResourceQueue {
-//     resource_queue: VecDeque<Id>,
-//     cached_messages: TransientMap<Id, StreamMessage>
-// }
-// impl ResourceQueue {
-//     fn new() -> Self { Self { resource_queue: VecDeque::new(), cached_messages: TransientMap::new(30)}}
-//     fn push_resource(&mut self, hash: &Id) {
-//         if self.resource_queue.contains(hash) {
-//             self.resource_queue.clear();
-//         }
-//         self.resource_queue.push_back(hash.to_owned());
-//     }
-//     fn pop_resource(&mut self, message: StreamMessage) -> Vec<StreamMessage> {
-//         let mut cached_messages = self.cached_messages.map().lock().unwrap();
-//         if self.resource_queue.front().unwrap() != message.id() {
-//             cached_messages.insert(message.id().to_owned(), message);
-//             return Vec::with_capacity(0)
-//         }
-//         let cached_message = if let Some(cached_message) = cached_messages.remove(&self.resource_queue.pop_front().unwrap()) { cached_message } else { message };
-//         let mut popped_resources = vec![cached_message];
-//         while let Some(_) = self.resource_queue.front() {
-//             let Some(cached_message) = cached_messages.remove(&self.resource_queue.pop_front().unwrap()) else { break };
-//             popped_resources.push(cached_message);
-//         }
-//         popped_resources
-//     }
-// }
-
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
     let request_version = request.version().clone();
     let mut request = match SerdeHttpRequest::from_hyper_request(request).await {

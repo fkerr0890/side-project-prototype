@@ -41,4 +41,6 @@ impl PeerOps {
             self.peers.push(endpoint_pair, score);
         }
     }
+
+    pub fn has_peer(&self, endpoint_pair: EndpointPair) -> bool { self.peers.get(&endpoint_pair).is_some() }
 }

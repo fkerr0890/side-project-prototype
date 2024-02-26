@@ -5,7 +5,7 @@ use ring::aead;
 use serde::Serialize;
 use tokio::{sync::mpsc, net::UdpSocket};
 
-use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::{TransientMap, TtlType}};
+use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, Id, InboundMessage, IsEncrypted, Message, Peer, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::{TransientMap, TtlType}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -67,17 +67,17 @@ pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str,
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
-    endpoint_pair: EndpointPair,
+    myself: Peer,
     breadcrumbs: TransientMap<Id, SocketAddrV4>,
     key_store: Arc<Mutex<KeyStore>>,
     peer_ops: Option<Arc<Mutex<PeerOps>>>
 }
 
 impl OutboundGateway {
-    pub fn new(socket: Arc<UdpSocket>, endpoint_pair: EndpointPair, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>, ttl: TtlType) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, origin: Peer, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>, ttl: TtlType) -> Self {
         Self {
             socket: socket.clone(),
-            endpoint_pair,
+            myself: origin,
             breadcrumbs: TransientMap::new(ttl),
             key_store: key_store.clone(),
             peer_ops
@@ -85,7 +85,8 @@ impl OutboundGateway {
     } 
 
     fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: &Id, dest: SocketAddrV4) -> bool {
-        let (early_return_dest, sender, id) = (self.endpoint_pair.public_endpoint, self.endpoint_pair.public_endpoint, id.to_owned());
+        let endpoint_pair = self.myself.endpoint_pair();
+        let (early_return_dest, sender, id) = (endpoint_pair.public_endpoint, endpoint_pair.public_endpoint, id.to_owned());
         let (socket, key_store) = (self.socket.clone(), self.key_store.clone());
         let contains_key = if let Some(mut message) = early_return_message {
             self.breadcrumbs.set_timer_with_send_action(id.clone(), move || { Self::send_static(&socket, &key_store, early_return_dest, sender, &mut message, false, false).ok(); })
@@ -111,20 +112,14 @@ impl OutboundGateway {
         Ok(())
     }
 
-    fn add_new_peers(&self, peers: Vec<EndpointPair>) {
-        for peer in peers {
-            self.add_new_peer(peer);
-        }
-    }
-
     fn add_new_peer(&self, peer: EndpointPair) {
-        if peer.public_endpoint != EndpointPair::default_socket() && peer.public_endpoint != self.endpoint_pair.public_endpoint {
-            self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.endpoint_pair.public_endpoint, peer.public_endpoint))
+        if peer.public_endpoint != EndpointPair::default_socket() && peer.public_endpoint != self.myself.public_endpoint {
+            self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.public_endpoint, peer.public_endpoint))
         }
     }
 
     pub fn send(&self, dest: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) -> EmptyResult {
-        Self::send_static(&self.socket, &self.key_store, dest, self.endpoint_pair.public_endpoint, message, to_be_encrypted, to_be_chunked)
+        Self::send_static(&self.socket, &self.key_store, dest, self.myself.public_endpoint, message, to_be_encrypted, to_be_chunked)
     }
 
     pub fn send_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, sender: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) -> EmptyResult {

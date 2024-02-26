@@ -113,7 +113,7 @@ impl Node {
 
         if let Some(introducer) = self.introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
-                EndpointPair::default_socket(),
+                None,
                 Id(Uuid::new_v4().as_bytes().to_vec()),
                 (peer::MAX_PEERS, peer::MAX_PEERS));
             message.add_peer(introducer);
@@ -160,7 +160,7 @@ impl Node {
 #[derive(Hash, Clone, Serialize, Deserialize, Copy, Eq, PartialEq, Debug)]
 pub struct EndpointPair {
     pub public_endpoint: SocketAddrV4,
-    pub private_endpoint: SocketAddrV4,
+    pub private_endpoint: SocketAddrV4
 }
 
 impl EndpointPair {

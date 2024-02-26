@@ -45,7 +45,7 @@ impl StreamMessageProcessor {
     }
 
     fn start_follow_ups(&self, host_name: String, uuid: Id) {
-        let (socket, key_store, sender, active_sessions) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.endpoint_pair.public_endpoint, self.active_sessions.map().clone());
+        let (socket, key_store, sender, active_sessions) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself.public_endpoint, self.active_sessions.map().clone());
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;

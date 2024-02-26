@@ -34,10 +34,10 @@ impl InboundMessage {
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn separate_parts(&self) -> &SeparateParts { &self.separate_parts }
 
-    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, HashSet<SocketAddrV4>, String) {
+    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, HashSet<Sender>, String) {
         let timestamp = messages.iter().map(|m| DateTime::parse_from_rfc3339(&m.separate_parts.timestamp).unwrap()).min().unwrap();
         messages.sort_by(|a, b| a.separate_parts.position.0.cmp(&b.separate_parts.position.0));
-        let (bytes, senders): (Vec<Vec<u8>>, Vec<SocketAddrV4>) = messages
+        let (bytes, senders): (Vec<Vec<u8>>, Vec<Sender>) = messages
             .into_iter()
             .map(|m| { let parts = m.into_parts(); (parts.0, parts.2.sender) })
             .unzip();
@@ -61,20 +61,35 @@ impl Default for IsEncrypted {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SeparateParts {
-    sender: SocketAddrV4,
+    sender: Sender,
     id: Id,
     position: (usize, usize),
     timestamp: String
 }
 
 impl SeparateParts {
-    pub fn new(sender: SocketAddrV4, id: Id) -> Self { Self { sender, id, position: NO_POSITION, timestamp: datetime_to_timestamp(Utc::now()) } }
-    pub fn into_parts(self) -> (SocketAddrV4, Id, (usize, usize))  { (self.sender, self.id, self.position) }
+    pub fn new(sender: Sender, id: Id) -> Self { Self { sender, id, position: NO_POSITION, timestamp: datetime_to_timestamp(Utc::now()) } }
+    pub fn into_parts(self) -> (Sender, Id, (usize, usize))  { (self.sender, self.id, self.position) }
     pub fn position(&self) -> (usize, usize) { self.position }
     pub fn id(&self) -> &Id { &self.id}
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn sender(&self) -> &Sender { &self.sender }
     
     pub fn set_position(mut self, position: (usize, usize)) -> Self { self.position = position; self }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct Sender {
+    socket: SocketAddrV4,
+    uuid: String
+}
+
+impl Sender {
+    pub fn new(socket: SocketAddrV4, uuid: String) -> Self {
+        Self { socket, uuid }
+    }
+
+    pub fn socket(&self) -> SocketAddrV4 { self.socket }
+    pub fn uuid(&self) -> &String { &self.uuid }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -143,6 +158,22 @@ impl Message for StreamMessage {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Peer {
+    endpoint_pair: EndpointPair,
+    uuid: String
+}
+
+impl Peer {
+    pub fn new(endpoint_pair: EndpointPair, uuid: String) -> Self {
+        Self { endpoint_pair, uuid }
+    }
+
+    pub fn endpoint_pair(&self) -> EndpointPair { self.endpoint_pair }
+    pub fn uuid(&self) -> &String { &self.uuid }
+    pub fn into_parts(self) -> (EndpointPair, String) { (self.endpoint_pair, self.uuid )}
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMessage {
     pub kind: SearchMessageKind,
     dest: SocketAddrV4,
@@ -150,11 +181,11 @@ pub struct SearchMessage {
     timestamp: String,
     hash: Id,
     host_name: String,
-    origin: SocketAddrV4,
+    origin: Option<Peer>,
     expiry: String,
 }
 impl SearchMessage {
-    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, host_name: String, hash: Id, kind: SearchMessageKind) -> Self {
+    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: Option<Peer>, host_name: String, hash: Id, kind: SearchMessageKind) -> Self {
         let datetime = Utc::now();
         Self {
             dest,
@@ -171,18 +202,18 @@ impl SearchMessage {
     pub fn initial_search_request(host_name: String) -> Self {
         // let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
         let hash = Id(Uuid::new_v4().as_bytes().to_vec());
-        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), EndpointPair::default_socket(),
+        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), None,
             host_name, hash, SearchMessageKind::Request)
     }
 
-    pub fn key_response(dest: SocketAddrV4, sender: SocketAddrV4, origin: SocketAddrV4, hash: Id, host_name: String, public_key: Vec<u8>) -> Self {
-        Self::new(dest, sender, origin, host_name, hash, SearchMessageKind::Response(public_key))
+    pub fn key_response(origin: Peer, hash: Id, host_name: String, public_key: Vec<u8>) -> Self {
+        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(origin), host_name, hash, SearchMessageKind::Response(public_key))
     }
 
-    pub fn set_origin(&mut self, origin: SocketAddrV4) { self.origin = origin; }
+    pub fn set_origin(&mut self, origin: Peer) { self.origin = Some(origin); }
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
-    pub fn origin(&self) -> SocketAddrV4 { self.origin }
+    pub fn origin(&self) -> Option<Peer> { self.origin }
     pub fn into_uuid_host_name_public_key(self) -> (Id, String, Vec<u8>) {
         let public_key = if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() };
         (self.hash, self.host_name, public_key)
@@ -216,13 +247,13 @@ pub struct DiscoverPeerMessage {
     sender: SocketAddrV4,
     timestamp: String,
     uuid: Id,
-    origin: SocketAddrV4,
-    peer_list: Vec<EndpointPair>,
+    origin: Option<EndpointPair>,
+    peer_list: Vec<Peer>,
     hop_count: (u16, u16)
 }
 
 impl DiscoverPeerMessage {
-    pub fn new(kind: DpMessageKind, origin: SocketAddrV4, uuid: Id, target_peer_count: (u16, u16)) -> Self {
+    pub fn new(kind: DpMessageKind, origin: Option<EndpointPair>, uuid: Id, target_peer_count: (u16, u16)) -> Self {
         Self {
             kind,
             dest: EndpointPair::default_socket(),
@@ -236,27 +267,27 @@ impl DiscoverPeerMessage {
     }
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
-    pub fn origin(&self) -> SocketAddrV4 { self.origin }
-    pub fn peer_list(&self) -> &Vec<EndpointPair> { &self.peer_list }
+    pub fn origin(&self) -> Option<EndpointPair> { self.origin }
+    pub fn peer_list(&self) -> &Vec<Peer> { &self.peer_list }
     pub fn hop_count(&self) -> (u16, u16) { self.hop_count }
-    pub fn get_last_peer(&mut self) -> EndpointPair { self.peer_list.pop().unwrap() }
-    pub fn into_peer_list(self) -> Vec<EndpointPair> { self.peer_list }
+    pub fn get_last_peer(&mut self) -> Peer { self.peer_list.pop().unwrap() }
+    pub fn into_peer_list(self) -> Vec<Peer> { self.peer_list }
 
-    pub fn add_peer(&mut self, endpoint_pair: EndpointPair) { self.peer_list.push(endpoint_pair); }
+    pub fn add_peer(&mut self, peer: Peer) { self.peer_list.push(peer); }
 
     pub fn try_decrement_hop_count(&mut self) -> bool {
         self.hop_count.0 -= 1;
         self.hop_count.0 != 0
     }
     
-    pub fn set_origin_if_unset(mut self, origin: SocketAddrV4) -> Self {
-        if self.origin == EndpointPair::default_socket() {
-            self.origin = origin;
+    pub fn set_origin_if_unset(mut self, origin: EndpointPair) -> Self {
+        if let None = self.origin {
+            self.origin = Some(origin);
         }
         self
     }
 
-    pub fn set_kind(mut self, kind: DpMessageKind) -> Self { self.kind = kind; self }
+    pub fn set_kind(&mut self, kind: DpMessageKind) { self.kind = kind; }
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
 
