@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, gateway::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     endpoint_pair: EndpointPair,

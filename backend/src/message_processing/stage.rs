@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{crypto::{Direction, Error}, gateway::HEARTBEAT_INTERVAL_SECONDS, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TransientSet, TtlType}};
+use crate::{crypto::{Direction, Error}, message_processing::HEARTBEAT_INTERVAL_SECONDS, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TransientSet, TtlType}};
 
 use super::{EmptyResult, OutboundGateway, SRP_TTL_SECONDS};
 
