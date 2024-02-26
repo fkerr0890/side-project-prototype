@@ -32,8 +32,7 @@ impl DiscoverPeerProcessor {
     }
 
     fn propagate_request(&mut self, mut request: DiscoverPeerMessage) -> EmptyResult {
-        request = request.set_origin_if_unset(self.outbound_gateway.endpoint_pair.public_endpoint);
-        let (sender, origin) = (request.sender(), request.origin());
+        let sender = if request.sender() == request.origin() { EndpointPair::default_socket() } else { request.sender() };
         let mut hairpin_response = DiscoverPeerMessage::new(DpMessageKind::Response,
             request.origin(),
             request.id().to_owned(),
@@ -43,11 +42,8 @@ impl DiscoverPeerProcessor {
             // gateway::log_debug("At hairpin");
             self.return_response(hairpin_response, Some(request.sender()))?;
         }
-        else if self.outbound_gateway.try_add_breadcrumb(Some(hairpin_response), request.id(), request.sender()) {
+        else if self.outbound_gateway.try_add_breadcrumb(Some(hairpin_response), request.id(), sender) {
             self.outbound_gateway.send_request(&mut request, None, false)?;
-        }
-        if sender == EndpointPair::default_socket() {
-            self.outbound_gateway.add_new_peers(vec![EndpointPair::new(origin, origin)]);
         }
         Ok(())
     }
@@ -62,7 +58,7 @@ impl DiscoverPeerProcessor {
                 break 'b1 staged_message.peer_list().len();
             }
             let message_staging_clone = self.message_staging.clone();
-            let (socket, key_store, uuid, dest, sender) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), message.id().to_owned(), self.outbound_gateway.get_dest(message.id()).unwrap(), self.outbound_gateway.endpoint_pair.public_endpoint);
+            let (socket, key_store, uuid, dest, sender) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), message.id().to_owned(), message.origin(), self.outbound_gateway.endpoint_pair.public_endpoint);
             self.message_staging.set_timer_with_send_action(uuid.clone(), move || { Self::send_final_response_static(&socket, &key_store, dest, sender, &message_staging_clone, &uuid); });
             0
         };
@@ -80,10 +76,10 @@ impl DiscoverPeerProcessor {
     fn return_response(&mut self, mut response: DiscoverPeerMessage, dest: Option<SocketAddrV4>) -> EmptyResult {
         response.add_peer(self.outbound_gateway.endpoint_pair);
         let Some(dest) = (if dest.is_some() { dest } else { self.outbound_gateway.get_dest(response.id()) }) else { return Ok(()) };
-        if response.origin() == self.outbound_gateway.endpoint_pair.public_endpoint {
-            let uuid = response.id().to_owned();
+        if dest == EndpointPair::default_socket() {
+            let (uuid, origin) = (response.id().to_owned(), response.origin());
             if self.stage_message(response) {
-                self.send_final_response(&uuid);
+                self.send_final_response(&uuid, origin);
             }
             Ok(())
         }
@@ -92,8 +88,7 @@ impl DiscoverPeerProcessor {
         }
     }
 
-    fn send_final_response(&self, uuid: &Id) {
-        let dest = self.outbound_gateway.get_dest(uuid).unwrap();
+    fn send_final_response(&self, uuid: &Id, dest: SocketAddrV4) {
         Self::send_final_response_static(&self.outbound_gateway.socket, &self.outbound_gateway.key_store, dest, self.outbound_gateway.endpoint_pair.public_endpoint, &self.message_staging, uuid);
     }
 
@@ -111,9 +106,9 @@ impl DiscoverPeerProcessor {
     fn request_new_peers(&self, mut message: DiscoverPeerMessage) -> EmptyResult {
         // gateway::log_debug(&format!("Got INeedSome, introducer = {}", message.peer_list()[0].public_endpoint));
         let introducer = message.get_last_peer();
-        self.outbound_gateway.send(introducer.public_endpoint, 
+        self.outbound_gateway.send(introducer.public_endpoint,
             &mut message
-                .set_kind(DpMessageKind::Request),
+                .set_kind(DpMessageKind::Request).set_origin_if_unset(self.outbound_gateway.endpoint_pair.public_endpoint),
             false,
             false)
     }

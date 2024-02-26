@@ -1,11 +1,11 @@
-use std::{collections::HashSet, net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashSet, net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use ring::aead;
 use serde::Serialize;
-use tokio::{sync::{oneshot, mpsc}, time::sleep, net::UdpSocket};
+use tokio::{sync::mpsc, net::UdpSocket};
 
-use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::{TransientMap, TtlType}};
+use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::{TransientMap, TtlType}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -13,6 +13,7 @@ pub const SEARCH_TIMEOUT_SECONDS: i64 = 30;
 pub const DPP_TTL_MILLIS: u64 = 250;
 pub const SRP_TTL_SECONDS: u64 = 30;
 pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 3600;
+pub const HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
 
 pub mod stage;
 pub mod stream;
@@ -112,9 +113,13 @@ impl OutboundGateway {
 
     fn add_new_peers(&self, peers: Vec<EndpointPair>) {
         for peer in peers {
-            if peer.public_endpoint != self.endpoint_pair.public_endpoint {
-                self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.endpoint_pair.public_endpoint, peer.public_endpoint));
-            }
+            self.add_new_peer(peer);
+        }
+    }
+
+    fn add_new_peer(&self, peer: EndpointPair) {
+        if peer.public_endpoint != EndpointPair::default_socket() && peer.public_endpoint != self.endpoint_pair.public_endpoint {
+            self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.endpoint_pair.public_endpoint, peer.public_endpoint))
         }
     }
 
@@ -135,17 +140,6 @@ impl OutboundGateway {
             tokio::spawn(async move { if let Err(e) = socket_clone.send_to(&chunk, dest).await { println!("Message processor send error: {}", e.to_string()) } });
         }
         Ok(())
-    }
-
-    pub fn send_nat_heartbeats(&self, mut rx: oneshot::Receiver<()>, dest: SocketAddrV4) {
-        let (socket, key_store, sender) = (self.socket.clone(), self.key_store.clone(), self.endpoint_pair.public_endpoint);
-        tokio::spawn(async move {
-            while let Err(_) = rx.try_recv() {
-                let mut message = Heartbeat::new();
-                OutboundGateway::send_static(&socket, &key_store, dest, sender, &mut message, false, true).ok();
-                sleep(Duration::from_secs(29)).await;
-            }
-        });
     }
 
     fn chunked(key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_encrypted: bool, to_be_chunked: bool) -> Result<Vec<Vec<u8>>, String> {

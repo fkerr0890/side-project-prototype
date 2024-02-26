@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddrV4};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::{message::{Id, Message, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientSet, TtlType}};
 
@@ -59,16 +59,14 @@ impl SearchRequestProcessor {
     }
     
     fn construct_search_response(&self, uuid: Id, dest: SocketAddrV4, origin: SocketAddrV4, host_name: String) -> Option<SearchMessage> {
-        let (tx, rx) = oneshot::channel();
-        self.outbound_gateway.send_nat_heartbeats(rx, origin);
-        let Some(public_key) = self.outbound_gateway.key_store.lock().unwrap().host_public_key(origin, tx) else { return None };
+        let Some(public_key) = self.outbound_gateway.key_store.lock().unwrap().host_public_key(origin) else { return None };
         Some(SearchMessage::key_response(dest, self.outbound_gateway.endpoint_pair.public_endpoint, self.outbound_gateway.endpoint_pair.public_endpoint, uuid, host_name, public_key.as_ref().to_vec()))
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
         let mut message = self.from_staging.recv().await.ok_or("SearchRequestProcessor: failed to receive message from gateway")?;
         if message.origin() == EndpointPair::default_socket() {
-            if !self.active_sessions.insert(message.host_name()) {
+            if !self.active_sessions.insert(message.host_name().clone()) {
                 println!("SearchMessageProcessor: Blocked search request for {}, reason: active session exists, {:?}", message.host_name(), message);
                 return Ok(());
             }

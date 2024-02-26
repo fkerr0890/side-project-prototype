@@ -1,7 +1,6 @@
 use std::{net::SocketAddrV4, sync::mpsc, fmt::Display};
 
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
-use tokio::sync::oneshot;
 
 use crate::{gateway::ACTIVE_SESSION_TTL_SECONDS, utils::{TransientMap, TtlType}};
 
@@ -10,7 +9,7 @@ const INITIAL_SALT: [u8; 20] = [
     0xbe, 0xf9, 0xf5, 0x02,
     ];
 pub struct KeyStore {
-    private_keys: TransientMap<String, (agreement::EphemeralPrivateKey, Option<oneshot::Sender<()>>)>,
+    private_keys: TransientMap<String, agreement::EphemeralPrivateKey>,
     symmetric_keys: TransientMap<String, KeySet>,
     rng: SystemRandom
 }
@@ -23,7 +22,7 @@ impl KeyStore {
         }
     }
 
-    fn generate_key_pair(&mut self, index: String, tx: Option<oneshot::Sender<()>>) -> Option<agreement::PublicKey> {
+    fn generate_key_pair(&mut self, index: String) -> Option<agreement::PublicKey> {
         let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
         let public_key = my_private_key.compute_public_key().unwrap();
         // println!("Inserting private key: {index}");
@@ -32,16 +31,16 @@ impl KeyStore {
         if private_keys.contains_key(&index) {
             return None;
         }
-        private_keys.insert(index, (my_private_key, tx));
+        private_keys.insert(index, my_private_key);
         Some(public_key)
     }
 
-    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4, tx: oneshot::Sender<()>) -> Option<agreement::PublicKey> {
-        self.generate_key_pair(peer_addr.to_string(), Some(tx))
+    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
+        self.generate_key_pair(peer_addr.to_string())
     }
 
     pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
-        self.generate_key_pair(peer_addr.to_string(), None)
+        self.generate_key_pair(peer_addr.to_string())
     }
 
     pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
@@ -64,10 +63,7 @@ impl KeyStore {
         // println!("{:?}, finding: {}", self.private_keys, peer_addr.to_string());
         let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let index = peer_addr.to_string();
-        let Some((my_private_key, stop_heartbeats)) = self.private_keys.map().lock().unwrap().remove(&index) else { return Err(Error::NoKey) };
-        if let Some(tx) = stop_heartbeats {
-            tx.send(()).ok();
-        }
+        let Some(my_private_key) = self.private_keys.map().lock().unwrap().remove(&index) else { return Err(Error::NoKey) };
         let symmetric_key = agreement::agree_ephemeral(my_private_key, &peer_public_key, |key_material| {
             hkdf::Salt::new(HKDF_SHA256, &INITIAL_SALT).extract(key_material)
         })?;

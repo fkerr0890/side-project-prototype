@@ -1,6 +1,6 @@
 use std::{collections::HashSet, time::Duration, panic, process, future};
 
-use p2p::{self, gateway::DPP_TTL_MILLIS, node::{EndpointPair, Node, NodeInfo}};
+use p2p::{self, gateway::{DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, sync::mpsc, time::sleep};
 use uuid::Uuid;
@@ -14,7 +14,7 @@ async fn basic() {
         println!("{}", panic_info);
         process::exit(1);
     }));
-    let regenerate = false;
+    let regenerate = true;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();
@@ -37,6 +37,7 @@ async fn basic() {
             sleep(Duration::from_millis(DPP_TTL_MILLIS*6)).await;
             println!();
         }
+        sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
         for (_, tx) in introducers {
             tx.send(()).await.unwrap();
         }

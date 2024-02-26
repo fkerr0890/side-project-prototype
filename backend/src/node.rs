@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, gateway::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, gateway::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     endpoint_pair: EndpointPair,
@@ -47,7 +47,7 @@ impl Node {
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
-        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), &key_store, peer_ops.clone(), self.endpoint_pair);
+        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
         let mut srp = SearchRequestProcessor::new(OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
         let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Millis(DPP_TTL_MILLIS)), dpm_from_gateway);
         let mut smp = StreamMessageProcessor::new(OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts, tx_from_http_handler);
@@ -103,7 +103,7 @@ impl Node {
         let heartbeat_gateway = OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops), TtlType::Secs(0));
         tokio::spawn(async move {
             loop {
-                sleep(Duration::from_secs(29)).await;
+                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
                 if let Err(e) = heartbeat_gateway.send_request(&mut Heartbeat::new(), None, true) {
                     println!("Heartbeats stopped: {}", e);
                     return;
