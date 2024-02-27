@@ -31,8 +31,7 @@ impl SearchRequestProcessor {
         }
         if self.local_hosts.contains_key(search_request.host_name()) {
             println!("Found host {} at {:?}, uuid: {}", search_request.host_name(), self.outbound_gateway.myself, search_request.id());
-            let origin = search_request.origin();
-            let (uuid, host_name) = search_request.into_uuid_host_name();
+            let (uuid, host_name, origin) = search_request.into_uuid_host_name_origin();
             let Some(search_response) = self.construct_search_response(uuid, origin, host_name) else { return Ok(()) };
             return self.return_search_responses(search_response)
         }
@@ -42,8 +41,8 @@ impl SearchRequestProcessor {
     fn return_search_responses(&mut self, mut search_response: SearchMessage) -> EmptyResult {
         let Some(dest) = self.outbound_gateway.get_dest(search_response.id()) else { return Ok(()) };
         if dest == EndpointPair::default_socket() {
-            let (origin, sender) = (search_response.origin().unwrap(), search_response.sender());
-            let (uuid, host_name, peer_public_key) = search_response.into_uuid_host_name_public_key();
+            let sender = search_response.sender();
+            let (uuid, host_name, peer_public_key, origin) = search_response.into_uuid_host_name_public_key_origin();
             let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
             let origin = if sender == origin.endpoint_pair().private_endpoint { sender } else { origin.endpoint_pair().public_endpoint };
             let Some(my_public_key) = key_store.requester_public_key(origin) else { return Ok(()) };
@@ -55,14 +54,14 @@ impl SearchRequestProcessor {
                 .map_err(|e| send_error_response(e, file!(), line!()))
         }
         else {
-            self.outbound_gateway.send(dest, &mut search_response, false, false)
+            self.outbound_gateway.send_individual(dest, &mut search_response, false, false)
         }
     }
     
     fn construct_search_response(&self, uuid: Id, origin: Option<Peer>, host_name: String) -> Option<SearchMessage> {
         let endpoint_pair = origin.unwrap().endpoint_pair();
         if let Some(mut search_response) = self.build_response(uuid.clone(), endpoint_pair.private_endpoint, host_name.clone()) {
-            self.outbound_gateway.send(endpoint_pair.private_endpoint, &mut search_response, false, false).ok();
+            self.outbound_gateway.send_individual(endpoint_pair.private_endpoint, &mut search_response, false, false).ok();
         }
         self.build_response(uuid, endpoint_pair.public_endpoint, host_name)
     }

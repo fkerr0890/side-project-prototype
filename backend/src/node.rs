@@ -4,36 +4,28 @@ use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, SeparateParts}, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
-    endpoint_pair: EndpointPair,
-    uuid: String,
-    nat_kind: NatKind,
-    socket: Arc<UdpSocket>,
-    introducer: Option<EndpointPair>,
-    initial_peers: Option<Vec<String>>
+    nat_kind: NatKind
 }
 
 impl Node {
-    pub async fn new(private_ip: String, private_port: String, public_ip: &str, uuid: String, introducer: Option<EndpointPair>, initial_peers: Option<Vec<String>>) -> Self {
+    pub fn new() -> Self {
+        Self {
+            nat_kind: NatKind::Unknown
+        }
+    }
+
+    pub async fn get_socket(private_ip: String, private_port: String, public_ip: &str) -> (EndpointPair, Arc<UdpSocket>) {
         let socket = Arc::new(UdpSocket::bind(private_ip.clone() + ":" + &private_port).await.unwrap());
         let public_endpoint = SocketAddrV4::new(public_ip.parse().unwrap(), socket.local_addr().unwrap().port());
         let private_endpoint = SocketAddrV4::new(private_ip.parse().unwrap(), socket.local_addr().unwrap().port());
         println!("public: {:?}", public_endpoint);
-        Self {
-            endpoint_pair: EndpointPair::new(public_endpoint, private_endpoint),
-            uuid,
-            nat_kind: NatKind::Unknown,
-            socket,
-            introducer,
-            initial_peers
-        }
+        (EndpointPair::new(public_endpoint, private_endpoint), socket)
     }
 
-    pub fn endpoint_pair(&self) -> EndpointPair { self.endpoint_pair }
-
-    pub async fn listen(&self, is_start: bool, is_end: bool, report_trigger: Option<mpsc::Receiver<()>>) {
+    pub async fn listen(&self, is_start: bool, is_end: bool, report_trigger: Option<mpsc::Receiver<()>>, introducer: Option<Peer>, uuid: String, initial_peers: Vec<(String, String)>, endpoint_pair: EndpointPair, socket: Arc<UdpSocket>) {
         let (srm_to_srp, srm_from_gateway) = mpsc::unbounded_channel();
         let (dpm_to_dpp, dpm_from_gateway) = mpsc::unbounded_channel();
         let (sm_to_smp, sm_from_gateway) = mpsc::unbounded_channel();
@@ -47,13 +39,14 @@ impl Node {
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
-        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
-        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
-        let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops.clone()), TtlType::Millis(DPP_TTL_MILLIS)), dpm_from_gateway);
-        let mut smp = StreamMessageProcessor::new(OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts, tx_from_http_handler);
+        let myself = Peer::new(endpoint_pair, uuid.clone());
+        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
+        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
+        let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Millis(DPP_TTL_MILLIS)), dpm_from_gateway);
+        let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts, tx_from_http_handler);
     
         for _ in 0..225 {
-            let mut inbound_gateway = InboundGateway::new(&self.socket, to_staging.clone());
+            let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
             tokio::spawn(async move {
                 loop {
                     if let Err(e) = inbound_gateway.receive().await {
@@ -100,7 +93,7 @@ impl Node {
             }
         });
         
-        let heartbeat_gateway = OutboundGateway::new(self.socket.clone(), self.endpoint_pair, &key_store, Some(peer_ops), TtlType::Secs(0));
+        let heartbeat_gateway = OutboundGateway::new(socket.clone(), myself, &key_store, Some(peer_ops), TtlType::Secs(0));
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
@@ -111,28 +104,28 @@ impl Node {
             }
         });
 
-        if let Some(introducer) = self.introducer {
+        if let Some(introducer) = introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
                 None,
                 Id(Uuid::new_v4().as_bytes().to_vec()),
                 (peer::MAX_PEERS, peer::MAX_PEERS));
             message.add_peer(introducer);
-            let inbound_message = InboundMessage::new(bincode::serialize(&message).unwrap(), IsEncrypted::False, SeparateParts::new(self.endpoint_pair.public_endpoint, message.id().to_owned()));
-            self.socket.send_to(&bincode::serialize(&inbound_message).unwrap(), self.endpoint_pair.public_endpoint).await.unwrap();
-        }
-        else if let Some(initial_peers) = &self.initial_peers {
-            for peer in initial_peers {
-                let public_endpoint = SocketAddrV4::from_str(peer).unwrap();
-                let private_endpoint = SocketAddrV4::from_str(peer).unwrap();
-                peer_ops_clone.lock().unwrap().add_initial_peer(EndpointPair::new(public_endpoint, private_endpoint));
-            }
+            let inbound_message = InboundMessage::new(bincode::serialize(&message).unwrap(), IsEncrypted::False, SeparateParts::new(Sender::new(endpoint_pair.private_endpoint, uuid.clone()), message.id().to_owned()));
+            socket.send_to(&bincode::serialize(&inbound_message).unwrap(), endpoint_pair.private_endpoint).await.unwrap();
         }
         else {
             println!("No introducer");
         }
 
+        for (peer, uuid) in initial_peers {
+            let public_endpoint = SocketAddrV4::from_str(&peer).unwrap();
+            let private_endpoint = SocketAddrV4::from_str(&peer).unwrap();
+            let peer = Peer::new(EndpointPair::new(public_endpoint, private_endpoint), uuid);
+            peer_ops_clone.lock().unwrap().add_initial_peer(peer);
+        }
+
         if let Some(mut report_trigger) = report_trigger {
-            let (port, uuid) = (self.endpoint_pair.public_endpoint.port(), self.uuid.clone());
+            let (port, uuid) = (endpoint_pair.public_endpoint.port(), uuid.clone());
             tokio::spawn(async move {
                 report_trigger.recv().await;
                 let node_info = NodeInfo::new(peer_ops_clone, is_start, is_end, port, uuid);
@@ -150,10 +143,10 @@ impl Node {
         }
     }
 
-    pub async fn from_node_info(value: NodeInfo) -> (Self, bool, bool) {
-        let port = value.port.to_string();
-        let peers = value.peers.into_iter().map(|(peer_port, _)| String::from("127.0.0.1:") + &peer_port.to_string()).collect();
-        (Self::new(String::from("127.0.0.1"), port, "127.0.0.1", value.uuid, None, Some(peers)).await, value.is_start, value.is_end)
+    pub fn read_node_info(value: NodeInfo) -> (u16, String, Vec<(String, String)>, bool, bool) {
+        let port = value.port;
+        let peers = value.peers.into_iter().map(|(peer_port, _, uuid)| (String::from("127.0.0.1:") + &peer_port.to_string(), uuid)).collect();
+        (port, value.uuid, peers, value.is_start, value.is_end)
     }
 }
 
@@ -193,7 +186,7 @@ pub struct NodeInfo {
     pub name: String,
     port: u16,
     uuid: String,
-    peers: Vec<(u16, i32)>,
+    peers: Vec<(u16, i32, String)>,
     is_start: bool,
     is_end: bool
 }
@@ -205,7 +198,7 @@ impl NodeInfo {
             name,
             port,
             uuid,
-            peers: peer_ops.lock().unwrap().peers_and_scores().iter().map(|(endpoint_pair, score)| (endpoint_pair.public_endpoint.port(), *score)).collect(),
+            peers: peer_ops.lock().unwrap().peers_and_scores().into_iter().map(|(endpoint_pair, score, uuid)| (endpoint_pair.public_endpoint.port(), score, uuid)).collect(),
             is_start,
             is_end
         }

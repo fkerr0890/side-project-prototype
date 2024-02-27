@@ -213,13 +213,13 @@ impl SearchMessage {
     pub fn set_origin(&mut self, origin: Peer) { self.origin = Some(origin); }
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
-    pub fn origin(&self) -> Option<Peer> { self.origin }
-    pub fn into_uuid_host_name_public_key(self) -> (Id, String, Vec<u8>) {
+    pub fn origin(&self) -> Option<&Peer> { self.origin.as_ref() }
+    pub fn into_uuid_host_name_public_key_origin(self) -> (Id, String, Vec<u8>, Peer) {
         let public_key = if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() };
-        (self.hash, self.host_name, public_key)
+        (self.hash, self.host_name, public_key, self.origin.unwrap())
     }
     pub fn host_name(&self) -> &String { &self.host_name }
-    pub fn into_uuid_host_name(self) -> (Id, String) { (self.hash, self.host_name) }
+    pub fn into_uuid_host_name_origin(self) -> (Id, String, Option<Peer>) { (self.hash, self.host_name, self.origin) }
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
 
@@ -247,13 +247,13 @@ pub struct DiscoverPeerMessage {
     sender: SocketAddrV4,
     timestamp: String,
     uuid: Id,
-    origin: Option<EndpointPair>,
+    origin: Option<Peer>,
     peer_list: Vec<Peer>,
     hop_count: (u16, u16)
 }
 
 impl DiscoverPeerMessage {
-    pub fn new(kind: DpMessageKind, origin: Option<EndpointPair>, uuid: Id, target_peer_count: (u16, u16)) -> Self {
+    pub fn new(kind: DpMessageKind, origin: Option<Peer>, uuid: Id, target_peer_count: (u16, u16)) -> Self {
         Self {
             kind,
             dest: EndpointPair::default_socket(),
@@ -267,7 +267,7 @@ impl DiscoverPeerMessage {
     }
 
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
-    pub fn origin(&self) -> Option<EndpointPair> { self.origin }
+    pub fn origin(&self) -> Option<&Peer> { self.origin.as_ref() }
     pub fn peer_list(&self) -> &Vec<Peer> { &self.peer_list }
     pub fn hop_count(&self) -> (u16, u16) { self.hop_count }
     pub fn get_last_peer(&mut self) -> Peer { self.peer_list.pop().unwrap() }
@@ -280,7 +280,7 @@ impl DiscoverPeerMessage {
         self.hop_count.0 != 0
     }
     
-    pub fn set_origin_if_unset(mut self, origin: EndpointPair) -> Self {
+    pub fn set_origin_if_unset(mut self, origin: Peer) -> Self {
         if let None = self.origin {
             self.origin = Some(origin);
         }

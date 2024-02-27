@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
+use crate::{http::{self, SerdeHttpResponse}, message::{Id, Message, Sender, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
 use super::{EmptyResult, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor {
@@ -36,8 +36,8 @@ impl StreamMessageProcessor {
         let mut active_sessions = self.active_sessions.map().lock().unwrap();
         let active_session = active_sessions.get_mut(message.host_name()).unwrap();
         match active_session.initial_request(dest, message, |message, cached_message, dest| {
-            self.outbound_gateway.send(dest, message, false, false)?;
-            self.outbound_gateway.send(dest, cached_message, true, true)
+            self.outbound_gateway.send_individual(dest, message, false, false)?;
+            self.outbound_gateway.send_individual(dest, cached_message, true, true)
         }) {
             Ok(_) => Ok(()),
             Err(e) => { println!("{}", e); Ok(()) }
@@ -45,7 +45,7 @@ impl StreamMessageProcessor {
     }
 
     fn start_follow_ups(&self, host_name: String, uuid: Id) {
-        let (socket, key_store, sender, active_sessions) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself.public_endpoint, self.active_sessions.map().clone());
+        let (socket, key_store, sender, active_sessions, my_uuid) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself.endpoint_pair(), self.active_sessions.map().clone(), self.outbound_gateway.myself.uuid().to_owned());
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
@@ -54,7 +54,8 @@ impl StreamMessageProcessor {
                 if !active_session.follow_up(&uuid, |request, dests| {                  
                     for dest in dests.iter() {
                         println!("Sending follow up for {} to {}", request.id(), dest);
-                        OutboundGateway::send_static(&socket, &key_store, *dest, sender, request, true, true).ok();
+                        let sender = if dest.ip().is_private() { sender.private_endpoint } else { sender.public_endpoint };
+                        OutboundGateway::send_static(&socket, &key_store, *dest, Sender::new(sender, my_uuid.clone()), request, true, true).ok();
                     }
                 }) {
                     return
@@ -91,7 +92,7 @@ impl StreamMessageProcessor {
             uuid,
             StreamMessageKind::Response,
             response_bytes);
-        self.outbound_gateway.send(dest, &mut response, true, true)
+        self.outbound_gateway.send_individual(dest, &mut response, true, true)
     }
 
     fn return_resource(&self, message: StreamMessage) -> EmptyResult {
