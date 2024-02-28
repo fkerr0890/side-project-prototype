@@ -131,7 +131,7 @@ impl StreamMessage {
         Self {
             dest: EndpointPair::default_socket(),
             senders: Vec::new(),
-            timestamp: datetime_to_timestamp(Utc::now()),
+            timestamp: String::new(),
             host_name,
             hash,
             kind,
@@ -190,7 +190,7 @@ impl SearchMessage {
         Self {
             dest,
             sender,
-            timestamp: datetime_to_timestamp(datetime),
+            timestamp: String::new(),
             host_name,
             hash,
             kind,
@@ -234,7 +234,7 @@ impl Message for SearchMessage {
 
     fn check_expiry(&self) -> bool {
         let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&self.expiry).unwrap().into();
-        return expiry <= Utc::now()
+        expiry <= Utc::now()
     }
 
     fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
@@ -258,7 +258,7 @@ impl DiscoverPeerMessage {
             kind,
             dest: EndpointPair::default_socket(),
             sender: EndpointPair::default_socket(),
-            timestamp: datetime_to_timestamp(Utc::now()),
+            timestamp: String::new(),
             uuid,
             origin,
             peer_list: Vec::new(),

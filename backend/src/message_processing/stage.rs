@@ -72,11 +72,11 @@ impl MessageStaging {
         self.unconfirmed_peers.set_timer(uuid.clone());
         self.unconfirmed_peers.map().lock().unwrap().insert(uuid.clone(), peer_endpoint_pair);
         let unconfirmed_peers = self.unconfirmed_peers.map().clone();
-        let (socket, key_store, my_endpoint_pair, my_uuid) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself.endpoint_pair(), self.outbound_gateway.myself.uuid().to_owned());
+        let (socket, key_store, myself) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself.clone());
         tokio::spawn(async move {
             while unconfirmed_peers.lock().unwrap().contains_key(&uuid) {
-                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.public_endpoint, Sender::new(my_endpoint_pair.public_endpoint, my_uuid.clone()), &mut Heartbeat::new(), false, true).ok();
-                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.private_endpoint, Sender::new(my_endpoint_pair.private_endpoint, my_uuid.clone()), &mut Heartbeat::new(), false, true).ok();
+                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.public_endpoint, &myself, &mut Heartbeat::new(), false, true).ok();
+                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.private_endpoint, &myself, &mut Heartbeat::new(), false, true).ok();
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
             }
         });

@@ -35,7 +35,7 @@ impl SearchRequestProcessor {
             let Some(search_response) = self.construct_search_response(uuid, origin, host_name) else { return Ok(()) };
             return self.return_search_responses(search_response)
         }
-        self.outbound_gateway.send_request(&mut search_request, None, true)
+        self.outbound_gateway.send_request(&mut search_request, None)
     }
 
     fn return_search_responses(&mut self, mut search_response: SearchMessage) -> EmptyResult {

@@ -97,7 +97,7 @@ impl Node {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
-                if let Err(e) = heartbeat_gateway.send_request(&mut Heartbeat::new(), None, true) {
+                if let Err(e) = heartbeat_gateway.send_request(&mut Heartbeat::new(), None) {
                     println!("Heartbeats stopped: {}", e);
                     return;
                 };

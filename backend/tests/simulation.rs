@@ -14,7 +14,7 @@ async fn basic() {
         println!("{}", panic_info);
         process::exit(1);
     }));
-    let regenerate = false;
+    let regenerate = true;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();
