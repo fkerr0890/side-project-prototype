@@ -1,9 +1,9 @@
-use std::{collections::HashSet, net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}};
+use std::{collections::HashSet, net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use ring::aead;
 use serde::Serialize;
-use tokio::{sync::mpsc, net::UdpSocket};
+use tokio::{net::UdpSocket, sync::mpsc, time};
 
 use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, node::EndpointPair, peer::PeerOps, utils::{TransientMap, TtlType}};
 
@@ -87,9 +87,16 @@ impl OutboundGateway {
     fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: &Id, dest: SocketAddrV4) -> bool {
         let endpoint_pair = self.myself.endpoint_pair();
         let (early_return_dest, id, myself) = (endpoint_pair.private_endpoint, id.to_owned(), self.myself.clone());
-        let (socket, key_store) = (self.socket.clone(), self.key_store.clone());
+        let (socket, key_store, breadcrumbs, id_clone) = (self.socket.clone(), self.key_store.clone(), self.breadcrumbs.map().clone(), id.clone());
         let contains_key = if let Some(mut message) = early_return_message {
-            self.breadcrumbs.set_timer_with_send_action(id.clone(), move || { Self::send_static(&socket, &key_store, early_return_dest, &myself, &mut message, false, false).ok(); })
+            self.breadcrumbs.set_timer_with_send_action(id.clone(), move || {
+                Self::send_static(&socket, &key_store, early_return_dest, &myself, &mut message, false, false).ok();
+                let (breadcrumbs, id_clone) = (breadcrumbs.clone(), id_clone.clone());
+                tokio::spawn(async move {
+                    time::sleep(Duration::from_secs(2)).await;
+                    breadcrumbs.lock().unwrap().remove(&id_clone);
+                });
+            })
         }
         else {
             self.breadcrumbs.set_timer(id.clone())

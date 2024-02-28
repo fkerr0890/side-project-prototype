@@ -36,7 +36,6 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + Debug + 'static>
                 send_action();
             }
             else {
-                //TODO: fix this
                 map.lock().unwrap().remove(&key);
             }
         });

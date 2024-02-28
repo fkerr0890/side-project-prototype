@@ -107,7 +107,6 @@ impl DiscoverPeerProcessor {
     }
 
     fn request_new_peers(&mut self, mut message: DiscoverPeerMessage) -> EmptyResult {
-        //TODO: Keep connection with introducer alive
         self.outbound_gateway.try_add_breadcrumb(None, message.id(), self.outbound_gateway.myself.endpoint_pair().private_endpoint);
         let introducer = message.get_last_peer();
         message.set_kind(DpMessageKind::Request);
