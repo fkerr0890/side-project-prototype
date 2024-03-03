@@ -203,11 +203,12 @@ impl SearchMessage {
         // let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
         let hash = Id(Uuid::new_v4().as_bytes().to_vec());
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), None,
-            host_name, hash, SearchMessageKind::Request)
+            host_name, hash, SearchMessageKind::Resource(SearchMessageInnerKind::Request))
     }
 
     pub fn key_response(origin: Peer, hash: Id, host_name: String, public_key: Vec<u8>) -> Self {
-        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(origin), host_name, hash, SearchMessageKind::Response(public_key))
+        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(origin), host_name,
+            hash, SearchMessageKind::Resource(SearchMessageInnerKind::Response(public_key)))
     }
 
     pub fn set_origin(&mut self, origin: Peer) { self.origin = Some(origin); }
@@ -215,8 +216,15 @@ impl SearchMessage {
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn origin(&self) -> Option<&Peer> { self.origin.as_ref() }
     pub fn into_uuid_host_name_public_key_origin(self) -> (Id, String, Vec<u8>, Peer) {
-        let public_key = if let SearchMessageKind::Response(public_key) = self.kind { public_key } else { panic!() };
+        let public_key = Self::public_key(self.kind);
         (self.hash, self.host_name, public_key, self.origin.unwrap())
+    }
+    fn public_key(kind: SearchMessageKind) -> Vec<u8> {
+        match kind {
+            SearchMessageKind::Resource(SearchMessageInnerKind::Response(public_key)) => public_key,
+            SearchMessageKind::Distribution(SearchMessageInnerKind::Response(public_key)) => public_key,
+            _ => panic!()
+        }
     }
     pub fn host_name(&self) -> &String { &self.host_name }
     pub fn into_uuid_host_name_origin(self) -> (Id, String, Option<Peer>) { (self.hash, self.host_name, self.origin) }
@@ -306,6 +314,12 @@ impl Message for DiscoverPeerMessage {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SearchMessageKind {
+    Resource(SearchMessageInnerKind),
+    Distribution(SearchMessageInnerKind),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SearchMessageInnerKind {
     Request,
     Response(Vec<u8>)
 }
@@ -320,6 +334,12 @@ pub enum DpMessageKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum StreamMessageKind {
+    Resource(StreamMessageInnerKind),
+    Distribution(StreamMessageInnerKind)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum StreamMessageInnerKind {
     KeyAgreement,
     Request,
     Response

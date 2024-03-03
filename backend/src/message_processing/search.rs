@@ -1,44 +1,46 @@
-use std::{collections::HashMap, net::SocketAddrV4};
+use std::net::SocketAddrV4;
 
 use tokio::sync::mpsc;
 
-use crate::{message::{Id, Message, Peer, SearchMessage, SearchMessageKind, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientSet, TtlType}};
+use crate::{message::{Id, Message, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, utils::{TransientSet, TtlType}};
 
 use super::{EmptyResult, send_error_response, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
-pub struct SearchRequestProcessor {
+pub struct SearchRequestProcessor<F: Fn(&SearchMessage) -> bool> {
     outbound_gateway: OutboundGateway,
     from_staging: mpsc::UnboundedReceiver<SearchMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
-    local_hosts: HashMap<String, SocketAddrV4>,
-    active_sessions: TransientSet<String>
+    active_sessions: TransientSet<String>,
+    stop_condition: F
 }
 
-impl SearchRequestProcessor {
-    pub fn new(outbound_gateway: OutboundGateway, from_staging: mpsc::UnboundedReceiver<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>) -> Self {
+impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
+    pub fn new(outbound_gateway: OutboundGateway, from_staging: mpsc::UnboundedReceiver<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, stop_condition: F) -> Self {
         Self {
             outbound_gateway,
             from_staging,
             to_smp,
-            local_hosts,
-            active_sessions: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS))
+            active_sessions: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
+            stop_condition
         }
     }
 
-    pub fn handle_search_request(&mut self, mut search_request: SearchMessage) -> EmptyResult {
+    pub fn handle_search_request(&mut self, mut search_request: SearchMessage, is_resource_kind: bool) -> EmptyResult {
         if !self.outbound_gateway.try_add_breadcrumb(None, search_request.id(), search_request.sender()) {
+            println!("Blocked");
             return Ok(())
         }
-        if self.local_hosts.contains_key(search_request.host_name()) {
+        if (self.stop_condition)(&search_request) {
             println!("Found host {} at {:?}, uuid: {}", search_request.host_name(), self.outbound_gateway.myself, search_request.id());
             let (uuid, host_name, origin) = search_request.into_uuid_host_name_origin();
             let Some(search_response) = self.construct_search_response(uuid, origin, host_name) else { return Ok(()) };
-            return self.return_search_responses(search_response)
+            return self.return_search_responses(search_response, is_resource_kind)
         }
+        println!("sneing reequest");
         self.outbound_gateway.send_request(&mut search_request, None)
     }
 
-    fn return_search_responses(&mut self, mut search_response: SearchMessage) -> EmptyResult {
+    fn return_search_responses(&mut self, mut search_response: SearchMessage, is_resource_kind: bool) -> EmptyResult {
         let Some(dest) = self.outbound_gateway.get_dest(search_response.id()) else { return Ok(()) };
         if dest == EndpointPair::default_socket() {
             let sender = search_response.sender();
@@ -47,7 +49,8 @@ impl SearchRequestProcessor {
             let origin = if sender == origin.endpoint_pair().private_endpoint { sender } else { origin.endpoint_pair().public_endpoint };
             let Some(my_public_key) = key_store.requester_public_key(origin) else { return Ok(()) };
             key_store.agree(origin, peer_public_key).unwrap();
-            let mut key_agreement_message = StreamMessage::new(host_name, uuid, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec());
+            let kind = if is_resource_kind { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) } else { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) };
+            let mut key_agreement_message = StreamMessage::new(host_name, uuid, kind, my_public_key.as_ref().to_vec());
             key_agreement_message.replace_dest(origin);
             self.to_smp
                 .send(key_agreement_message)
@@ -73,16 +76,20 @@ impl SearchRequestProcessor {
 
     pub async fn receive(&mut self) -> EmptyResult  {
         let mut message = self.from_staging.recv().await.ok_or("SearchRequestProcessor: failed to receive message from gateway")?;
+        println!("Received {}", message.id());
         if let None = message.origin() {
             if !self.active_sessions.insert(message.host_name().clone()) {
                 println!("SearchMessageProcessor: Blocked search request for {}, reason: active session exists, {:?}", message.host_name(), message);
                 return Ok(());
             }
-            message.set_origin(self.outbound_gateway.myself.clone())
+            message.set_origin(self.outbound_gateway.myself.clone());
+            message.replace_dest(self.outbound_gateway.myself.endpoint_pair().public_endpoint);
         }
         match message {
-            SearchMessage { kind: SearchMessageKind::Request, ..} => self.handle_search_request(message),
-            SearchMessage { kind: SearchMessageKind::Response(_), .. } => self.return_search_responses(message)
+            SearchMessage { kind: SearchMessageKind::Resource(SearchMessageInnerKind::Request), ..} => self.handle_search_request(message, true),
+            SearchMessage { kind: SearchMessageKind::Resource(SearchMessageInnerKind::Response(_)), .. } => self.return_search_responses(message, true),
+            SearchMessage { kind: SearchMessageKind::Distribution(SearchMessageInnerKind::Request), ..} => self.handle_search_request(message, false),
+            SearchMessage { kind: SearchMessageKind::Distribution(SearchMessageInnerKind::Response(_)), .. } => self.return_search_responses(message, false)
         }
     }
 }

@@ -1,33 +1,37 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, net::SocketAddrV4, time::Duration};
-use tokio::{sync::mpsc, time::sleep};
-use crate::{http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
+use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV4}, time::Duration};
+use tokio::{fs, sync::mpsc, time::sleep};
+use crate::{http::{self, SerdeHttpResponse}, message::{Id, Message, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, utils::{TransientMap, TtlType}};
 use super::{EmptyResult, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS};
 
-pub struct StreamMessageProcessor {
+pub struct StreamMessageProcessor
+{
     outbound_gateway: OutboundGateway,
     from_staging: mpsc::UnboundedReceiver<StreamMessage>,
     local_hosts: HashMap<String, SocketAddrV4>,
     from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<SerdeHttpResponse>>,
-    active_sessions: TransientMap<String, ActiveSessionInfo>
+    active_sessions: TransientMap<String, ActiveSessionInfo>,
+    mode: StreamMode
 }
-impl StreamMessageProcessor {
-    pub fn new(outbound_gateway: OutboundGateway, from_staging: mpsc::UnboundedReceiver<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<SerdeHttpResponse>>) -> Self {
+impl StreamMessageProcessor
+{
+    pub fn new(outbound_gateway: OutboundGateway, from_staging: mpsc::UnboundedReceiver<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<SerdeHttpResponse>>, mode: StreamMode) -> Self {
         Self
         {
             outbound_gateway,
             from_staging,
             local_hosts,
             from_http_handler,
-            active_sessions: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS))
+            active_sessions: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
+            mode
         }
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
         let message = self.from_staging.recv().await.ok_or("StreamMessageProcessor: failed to receive message from gateway")?;
         match message {
-            StreamMessage { kind: StreamMessageKind::KeyAgreement, ..} => self.handle_key_agreement(message),
-            StreamMessage { kind: StreamMessageKind::Request, .. } => self.handle_request(message).await,
-            StreamMessage { kind: StreamMessageKind::Response, ..} => self.return_resource(message)
+            StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::KeyAgreement), ..} => self.handle_key_agreement(message),
+            StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::Request) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request), .. } => self.handle_request(message).await,
+            StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::Response) | StreamMessageKind::Distribution(StreamMessageInnerKind::Response), ..} => self.return_resource(message)
         }
     }
 
@@ -81,17 +85,15 @@ impl StreamMessageProcessor {
         }
     }
 
-    async fn send_response(&self, payload: &[u8], dest: SocketAddrV4, host_name: String, uuid: Id) -> EmptyResult {
-        let Ok(request) = bincode::deserialize(payload) else { return Ok(()) };
-        let socket = self.local_hosts.get(&host_name).unwrap();
-        let response = http::make_request(request, &socket.to_string()).await;
-        let Ok(response_bytes) = bincode::serialize(&response) else { return Ok(()) };
-        let mut response = StreamMessage::new(
-            host_name,
-            uuid,
-            StreamMessageKind::Response,
-            response_bytes);
-        self.outbound_gateway.send_individual(dest, &mut response, true, true)
+    async fn send_response(&mut self, payload: &[u8], dest: SocketAddrV4, host_name: String, uuid: Id) -> EmptyResult {
+        let response = match self.mode {
+            StreamMode::Http => self.http_response_action(payload, host_name, uuid).await,
+            StreamMode::Distribution => self.distribution_respose_action(payload, host_name, uuid).await
+        };
+        if let Some(mut response) = response {
+            self.outbound_gateway.send_individual(dest, &mut response, true, true)?;
+        }
+        Ok(())
     }
 
     fn return_resource(&self, message: StreamMessage) -> EmptyResult {
@@ -101,6 +103,24 @@ impl StreamMessageProcessor {
             println!("{}", e);
         }
         Ok(())
+    }
+
+    async fn http_response_action(&self, payload: &[u8], host_name: String, uuid: Id) -> Option<StreamMessage> {
+        let Ok(request) = bincode::deserialize(payload) else { return None };
+        let socket = self.local_hosts.get(&host_name).unwrap();
+        let response = http::make_request(request, &socket.to_string()).await;
+        let Ok(response_bytes) = bincode::serialize(&response) else { return None };
+        Some(StreamMessage::new(
+            host_name,
+            uuid,
+            StreamMessageKind::Resource(StreamMessageInnerKind::Response),
+            response_bytes))
+    }
+    
+    async fn distribution_respose_action(&mut self, payload: &[u8], host_name: String, uuid: Id) -> Option<StreamMessage> {
+        let result = if fs::write("C:/Users/fredk/Downloads/p2p-dump.tar.gz", payload).await.is_ok() { 1u8 } else { 0u8 };
+        self.local_hosts.insert(host_name.clone(), SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3000));
+        Some(StreamMessage::new(host_name, uuid, StreamMessageKind::Distribution(StreamMessageInnerKind::Response), vec![result]))
     }
 }
 
@@ -118,7 +138,7 @@ impl ActiveSessionInfo {
         let Some(cached_message) = cached_message else {
             return Err(format!("StreamMessageProcessor: prevented request from client, reason: request expired for resource {}", uuid));
         };
-        if let StreamMessageKind::Request = cached_message.0.kind {
+        if let StreamMessageKind::Resource(StreamMessageInnerKind::Request) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request) = cached_message.0.kind {
             return Ok(&mut cached_message.0)
         }
         Err(format!("StreamMessageProcessor: prevented request from client, reason: already received resource {}", uuid))
@@ -156,7 +176,7 @@ impl ActiveSessionInfo {
         *cached_message = message;
         let mut result = Ok(());
         while let Some(uuid) = self.resource_queue.front() {
-            if let StreamMessageKind::Response = cached_messages.get(uuid).unwrap().0.kind {
+            if let StreamMessageKind::Resource(StreamMessageInnerKind::Response) | StreamMessageKind::Distribution(StreamMessageInnerKind::Response) = cached_messages.get(uuid).unwrap().0.kind {
                 let (cached_message, tx) = cached_messages.remove(&self.resource_queue.pop_front().unwrap()).unwrap();
                 println!("Popped: {}", cached_message.id());
                 let response = bincode::deserialize(cached_message.payload()).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
@@ -174,4 +194,9 @@ impl Default for ActiveSessionInfo {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub enum StreamMode {
+    Http,
+    Distribution
 }

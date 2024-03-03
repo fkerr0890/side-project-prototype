@@ -1,10 +1,10 @@
-use std::{net::{SocketAddrV4, Ipv4Addr, SocketAddr}, fmt::Display, sync::{Arc, Mutex}, collections::HashMap, time::Duration, future, str::FromStr};
+use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{Arc, Mutex}, time::Duration};
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::{StreamMessageProcessor, StreamMode}, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     nat_kind: NatKind
@@ -31,6 +31,9 @@ impl Node {
         let (sm_to_smp, sm_from_gateway) = mpsc::unbounded_channel();
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
         let (tx_to_smp, tx_from_http_handler) = mpsc::unbounded_channel();
+        let (srm_to_srp2, srm_from_staging) = mpsc::unbounded_channel();
+        let (sm_to_smp2, sm_from_staging) = mpsc::unbounded_channel();
+        let (tx_to_smp2, tx_from_dp) = mpsc::unbounded_channel();
     
         let key_store = Arc::new(Mutex::new(KeyStore::new()));
         let peer_ops = Arc::new(Mutex::new(PeerOps::new()));
@@ -39,11 +42,15 @@ impl Node {
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
+
         let myself = Peer::new(endpoint_pair, uuid.clone());
-        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
-        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), local_hosts.clone());
+        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
+        let local_hosts_clone = local_hosts.clone();
+        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), move |m| local_hosts_clone.contains_key(m.host_name()));
         let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Millis(DPP_TTL_MILLIS)), dpm_from_gateway);
-        let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts, tx_from_http_handler);
+        let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts.clone(), tx_from_http_handler, StreamMode::Http);
+        let mut dsrp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_staging, sm_to_smp2.clone(), |m| {println!("{} {}", m.origin().unwrap().endpoint_pair(), m.dest()); m.origin().unwrap().endpoint_pair().private_endpoint != m.dest() && m.origin().unwrap().endpoint_pair().public_endpoint != m.dest()});
+        let mut dsmp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_staging, local_hosts, tx_from_dp, StreamMode::Distribution);
     
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
@@ -104,6 +111,24 @@ impl Node {
             }
         });
 
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = dsrp.receive().await {
+                    println!("Distribution search processor stopped: {}", e);
+                    return;
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = dsmp.receive().await {
+                    println!("Distribution stream processor stopped: {}", e);
+                    return;
+                }
+            }
+        });
+
         if let Some(introducer) = introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
                 None,
@@ -134,9 +159,13 @@ impl Node {
         }
         
         if is_start {
-            println!("Tcp listening");
-            let server_context = ServerContext::new(srm_to_srp, sm_to_smp, tx_to_smp);
-            http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
+            // println!("Tcp listening");
+            // let server_context = ServerContext::new(srm_to_srp, sm_to_smp, tx_to_smp);
+            // http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
+            sleep(Duration::from_secs(4)).await;
+            println!("Starting distribution");
+            let server_context = ServerContext::new(srm_to_srp2, sm_to_smp2, tx_to_smp2);
+            server_context.distribute_app().await;
         }
         else {
             future::pending::<()>().await;

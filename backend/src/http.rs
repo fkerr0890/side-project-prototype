@@ -4,7 +4,7 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
 
-use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageKind}, node::EndpointPair};
+use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -142,9 +142,9 @@ fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> Result<Heade
 
 #[derive(Clone)]
 pub struct ServerContext {
-    to_srp: mpsc::UnboundedSender<SearchMessage>,
-    to_smp: mpsc::UnboundedSender<StreamMessage>,
-    tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<SerdeHttpResponse>>
+    pub to_srp: mpsc::UnboundedSender<SearchMessage>,
+    pub to_smp: mpsc::UnboundedSender<StreamMessage>,
+    pub tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<SerdeHttpResponse>>
 }
 
 impl ServerContext {
@@ -191,7 +191,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     let mut sm = StreamMessage::new(
         host_name.to_owned(),
         search_request.id().to_owned(),
-        StreamMessageKind::Request,
+        StreamMessageKind::Resource(StreamMessageInnerKind::Request),
         payload);
     sm.set_sender(EndpointPair::default_socket());
     let (tx, mut rx) = mpsc::unbounded_channel();

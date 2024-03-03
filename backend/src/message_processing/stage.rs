@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, SearchMessage, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, utils::{TransientMap, TtlType}};
+use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, utils::{TransientMap, TtlType}};
 
 use super::{EmptyResult, OutboundGateway, SRP_TTL_SECONDS};
 
@@ -9,6 +9,8 @@ pub struct MessageStaging {
     to_srp: mpsc::UnboundedSender<SearchMessage>,
     to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
+    to_dsrp: mpsc::UnboundedSender<SearchMessage>,
+    to_dsmp: mpsc::UnboundedSender<StreamMessage>,
     message_staging: TransientMap<Id, HashMap<usize, InboundMessage>>,
     message_caching: TransientMap<Id, Vec<InboundMessage>>,
     unconfirmed_peers: TransientMap<String, EndpointPair>,
@@ -21,6 +23,8 @@ impl MessageStaging {
         to_srp: mpsc::UnboundedSender<SearchMessage>,
         to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
         to_smp: mpsc::UnboundedSender<StreamMessage>,
+        to_dsrp: mpsc::UnboundedSender<SearchMessage>,
+        to_dsmp: mpsc::UnboundedSender<StreamMessage>,
         outbound_gateway: OutboundGateway) -> Self
     {
         Self {
@@ -28,6 +32,8 @@ impl MessageStaging {
             to_srp,
             to_dpp,
             to_smp,
+            to_dsrp,
+            to_dsmp,
             message_staging: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
             message_caching: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
             unconfirmed_peers: TransientMap::new(TtlType::Secs(HEARTBEAT_INTERVAL_SECONDS*2)),
@@ -107,7 +113,10 @@ impl MessageStaging {
             message.set_sender(senders.drain().next().unwrap().socket());
             self.traverse_nat(message.origin());
             message.set_timestamp(timestamp);
-            self.to_srp.send(message).map_err(|e| { e.to_string() } )
+            match message {
+                SearchMessage { kind: SearchMessageKind::Resource(_), .. } => self.to_srp.send(message).map_err(|e| { e.to_string() } ),
+                SearchMessage { kind: SearchMessageKind::Distribution(_), ..} => self.to_dsrp.send(message).map_err(|e| { e.to_string() } )
+            }            
         }
         else if let Ok(mut message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
             // println!("Received dp message, uuid: {} at {:?}, {:?}", message.id(), self.outbound_gateway.myself, message.kind);
@@ -137,8 +146,9 @@ impl MessageStaging {
             }
             message.set_timestamp(timestamp);
             match message {
-                StreamMessage { kind: StreamMessageKind::KeyAgreement, .. } => { println!("Received key agreement message, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.handle_key_agreement(message) },
-                _ => { println!("Received stream message, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.to_smp.send(message).map_err(|e| { e.to_string() } ) }
+                StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::KeyAgreement), .. } => { println!("Received key agreement message, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.handle_key_agreement(message) },
+                StreamMessage { kind: StreamMessageKind::Resource(_), .. } => { println!("Received stream message, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.to_smp.send(message).map_err(|e| { e.to_string() } ) }
+                StreamMessage { kind: StreamMessageKind::Distribution(_), .. } => { println!("Received stream dmessage, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.to_dsmp.send(message).map_err(|e| { e.to_string() } ) }
             }
         }
         else {

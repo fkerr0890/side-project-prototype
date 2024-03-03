@@ -19,6 +19,7 @@ pub mod stage;
 pub mod stream;
 pub mod search;
 pub mod discover;
+pub mod distribute;
 
 pub type EmptyResult = Result<(), String>;
 
@@ -85,6 +86,7 @@ impl OutboundGateway {
     } 
 
     fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: &Id, dest: SocketAddrV4) -> bool {
+        println!("Trying to add breadcubm");
         let endpoint_pair = self.myself.endpoint_pair();
         let (early_return_dest, id, myself) = (endpoint_pair.private_endpoint, id.to_owned(), self.myself.clone());
         let (socket, key_store, breadcrumbs, id_clone) = (self.socket.clone(), self.key_store.clone(), self.breadcrumbs.map().clone(), id.clone());
@@ -104,6 +106,7 @@ impl OutboundGateway {
         if contains_key {
             self.breadcrumbs.map().lock().unwrap().insert(id, dest);
         }
+        println!("Donw");
         contains_key
     }
 
@@ -133,7 +136,7 @@ impl OutboundGateway {
     }
 
     pub fn send(&self, dest: EndpointPair, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) -> EmptyResult {
-        Self::send_static(&self.socket, &self.key_store, dest.public_endpoint, &self.myself, message, to_be_encrypted, to_be_chunked)?;
+        // Self::send_static(&self.socket, &self.key_store, dest.public_endpoint, &self.myself, message, to_be_encrypted, to_be_chunked)?;
         Self::send_static(&self.socket, &self.key_store, dest.private_endpoint, &self.myself, message, to_be_encrypted, to_be_chunked)
     }
 
