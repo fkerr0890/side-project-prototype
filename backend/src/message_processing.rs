@@ -86,7 +86,6 @@ impl OutboundGateway {
     } 
 
     fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: &Id, dest: SocketAddrV4) -> bool {
-        println!("Trying to add breadcubm");
         let endpoint_pair = self.myself.endpoint_pair();
         let (early_return_dest, id, myself) = (endpoint_pair.private_endpoint, id.to_owned(), self.myself.clone());
         let (socket, key_store, breadcrumbs, id_clone) = (self.socket.clone(), self.key_store.clone(), self.breadcrumbs.map().clone(), id.clone());
@@ -106,7 +105,6 @@ impl OutboundGateway {
         if contains_key {
             self.breadcrumbs.map().lock().unwrap().insert(id, dest);
         }
-        println!("Donw");
         contains_key
     }
 
@@ -153,7 +151,8 @@ impl OutboundGateway {
         let serialized = bincode::serialize(message).map_err(|e| e.to_string())?;
         let sender = if dest.ip().is_private() { myself.endpoint_pair().private_endpoint } else { myself.endpoint_pair().public_endpoint };
         let separate_parts = SeparateParts::new(Sender::new(sender, myself.uuid().clone()), message.id().clone());
-        for chunk in Self::chunked(key_store, dest, serialized, separate_parts, to_be_encrypted, to_be_chunked)? {
+        let chunks = Self::chunked(key_store, dest, serialized, separate_parts, to_be_encrypted, to_be_chunked)?;
+        for chunk in chunks {
             let socket_clone = socket.clone();
             tokio::spawn(async move { if let Err(e) = socket_clone.send_to(&chunk, dest).await { println!("Message processor send error: {}", e.to_string()) } });
         }

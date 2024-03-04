@@ -5,12 +5,6 @@ use std::{env, panic, process};
 
 #[tokio::main]
 async fn main() {
-    // let socket = UdpSocket::bind("192.168.0.104:0").await.unwrap();
-    // socket.send_to(b"hello", String::from("192.168.0.104:") + &socket.local_addr().unwrap().port().to_string()).await.unwrap();
-    // let mut buf = [0u8; 1024];
-    // socket.recv(&mut buf).await.unwrap();
-    // println!("{:?}", buf);
-    // return;
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         // invoke the default handler and exit the process

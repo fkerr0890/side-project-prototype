@@ -4,7 +4,7 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
 
-use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair};
+use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::stream::StreamResponseType, node::EndpointPair};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -144,11 +144,11 @@ fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> Result<Heade
 pub struct ServerContext {
     pub to_srp: mpsc::UnboundedSender<SearchMessage>,
     pub to_smp: mpsc::UnboundedSender<StreamMessage>,
-    pub tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<SerdeHttpResponse>>
+    pub tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<StreamResponseType>>
 }
 
 impl ServerContext {
-    pub fn new(to_srp: mpsc::UnboundedSender<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<SerdeHttpResponse>>) -> Self {
+    pub fn new(to_srp: mpsc::UnboundedSender<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<StreamResponseType>>) -> Self {
         Self {
             to_srp,
             to_smp,
@@ -174,7 +174,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     println!("http: Request uri is {}", request.uri());
     let (host_name, path) = get_host_name_and_path(request.uri());
     request.set_uri(path);
-    let search_request = SearchMessage::initial_search_request(host_name.to_owned());
+    let search_request = SearchMessage::initial_search_request(host_name.to_owned(), true);
     let payload = match bincode::serialize(&request) {
         Ok(request) => request,
         Err(e) => {
@@ -211,7 +211,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
                 .unwrap())
         }
     };
-    Ok(response.to_hyper_response())
+    Ok(response.unwrap_http().to_hyper_response())
 }
 
 pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {

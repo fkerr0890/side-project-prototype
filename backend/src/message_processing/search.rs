@@ -27,16 +27,14 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
 
     pub fn handle_search_request(&mut self, mut search_request: SearchMessage, is_resource_kind: bool) -> EmptyResult {
         if !self.outbound_gateway.try_add_breadcrumb(None, search_request.id(), search_request.sender()) {
-            println!("Blocked");
             return Ok(())
         }
         if (self.stop_condition)(&search_request) {
             println!("Found host {} at {:?}, uuid: {}", search_request.host_name(), self.outbound_gateway.myself, search_request.id());
             let (uuid, host_name, origin) = search_request.into_uuid_host_name_origin();
-            let Some(search_response) = self.construct_search_response(uuid, origin, host_name) else { return Ok(()) };
+            let Some(search_response) = self.construct_search_response(uuid, origin, host_name, is_resource_kind) else { return Ok(()) };
             return self.return_search_responses(search_response, is_resource_kind)
         }
-        println!("sneing reequest");
         self.outbound_gateway.send_request(&mut search_request, None)
     }
 
@@ -61,22 +59,21 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
         }
     }
     
-    fn construct_search_response(&self, uuid: Id, origin: Option<Peer>, host_name: String) -> Option<SearchMessage> {
+    fn construct_search_response(&self, uuid: Id, origin: Option<Peer>, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
         let endpoint_pair = origin.unwrap().endpoint_pair();
-        if let Some(mut search_response) = self.build_response(uuid.clone(), endpoint_pair.private_endpoint, host_name.clone()) {
+        if let Some(mut search_response) = self.build_response(uuid.clone(), endpoint_pair.private_endpoint, host_name.clone(), is_resource_kind) {
             self.outbound_gateway.send_individual(endpoint_pair.private_endpoint, &mut search_response, false, false).ok();
         }
-        self.build_response(uuid, endpoint_pair.public_endpoint, host_name)
+        self.build_response(uuid, endpoint_pair.public_endpoint, host_name, is_resource_kind)
     }
 
-    fn build_response(&self, uuid: Id, peer_addr: SocketAddrV4, host_name: String) -> Option<SearchMessage> {
+    fn build_response(&self, uuid: Id, peer_addr: SocketAddrV4, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
         let Some(public_key) = self.outbound_gateway.key_store.lock().unwrap().host_public_key(peer_addr) else { return None };
-        Some(SearchMessage::key_response(self.outbound_gateway.myself.clone(), uuid, host_name, public_key.as_ref().to_vec()))
+        Some(SearchMessage::key_response(self.outbound_gateway.myself.clone(), uuid, host_name, public_key.as_ref().to_vec(), is_resource_kind))
     }
 
     pub async fn receive(&mut self) -> EmptyResult  {
         let mut message = self.from_staging.recv().await.ok_or("SearchRequestProcessor: failed to receive message from gateway")?;
-        println!("Received {}", message.id());
         if let None = message.origin() {
             if !self.active_sessions.insert(message.host_name().clone()) {
                 println!("SearchMessageProcessor: Blocked search request for {}, reason: active session exists, {:?}", message.host_name(), message);

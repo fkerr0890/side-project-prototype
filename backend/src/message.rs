@@ -144,6 +144,7 @@ impl StreamMessage {
     pub fn only_sender(&mut self) -> SocketAddrV4 { self.senders.pop().unwrap() }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn into_hash_payload(self) -> (Id, Vec<u8>) { (self.hash, self.payload) }
+    pub fn into_hash_payload_host_name_kind(self) -> (Id, Vec<u8>, String, StreamMessageKind) { (self.hash, self.payload, self.host_name, self.kind) }
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
 impl Message for StreamMessage {
@@ -199,16 +200,18 @@ impl SearchMessage {
         }
     }
 
-    pub fn initial_search_request(host_name: String) -> Self {
+    pub fn initial_search_request(host_name: String, is_resource_kind: bool) -> Self {
         // let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
         let hash = Id(Uuid::new_v4().as_bytes().to_vec());
+        let kind = if is_resource_kind { SearchMessageKind::Resource(SearchMessageInnerKind::Request) } else { SearchMessageKind::Distribution(SearchMessageInnerKind::Request) };
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), None,
-            host_name, hash, SearchMessageKind::Resource(SearchMessageInnerKind::Request))
+            host_name, hash, kind)
     }
 
-    pub fn key_response(origin: Peer, hash: Id, host_name: String, public_key: Vec<u8>) -> Self {
+    pub fn key_response(origin: Peer, hash: Id, host_name: String, public_key: Vec<u8>, is_resource_kind: bool) -> Self {
+        let kind = if is_resource_kind { SearchMessageKind::Resource(SearchMessageInnerKind::Response(public_key)) } else { SearchMessageKind::Distribution(SearchMessageInnerKind::Response(public_key)) };
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(origin), host_name,
-            hash, SearchMessageKind::Resource(SearchMessageInnerKind::Response(public_key)))
+            hash, kind)
     }
 
     pub fn set_origin(&mut self, origin: Peer) { self.origin = Some(origin); }
