@@ -174,7 +174,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     println!("http: Request uri is {}", request.uri());
     let (host_name, path) = get_host_name_and_path(request.uri());
     request.set_uri(path);
-    let search_request = SearchMessage::initial_search_request(host_name.to_owned(), true);
+    let search_request = SearchMessage::initial_search_request(host_name.to_owned(), true, None);
     let payload = match bincode::serialize(&request) {
         Ok(request) => request,
         Err(e) => {

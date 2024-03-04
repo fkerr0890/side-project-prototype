@@ -200,9 +200,9 @@ impl SearchMessage {
         }
     }
 
-    pub fn initial_search_request(host_name: String, is_resource_kind: bool) -> Self {
+    pub fn initial_search_request(host_name: String, is_resource_kind: bool, id: Option<Id>) -> Self {
         // let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
-        let hash = Id(Uuid::new_v4().as_bytes().to_vec());
+        let hash = if let Some(id) = id { id } else { Id(Uuid::new_v4().as_bytes().to_vec()) };
         let kind = if is_resource_kind { SearchMessageKind::Resource(SearchMessageInnerKind::Request) } else { SearchMessageKind::Distribution(SearchMessageInnerKind::Request) };
         Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), None,
             host_name, hash, kind)
@@ -303,6 +303,47 @@ impl DiscoverPeerMessage {
 }
 
 impl Message for DiscoverPeerMessage {
+    const ENCRYPTION_REQUIRED: bool = false;
+    fn dest(&self) -> SocketAddrV4 { self.dest }
+    fn id(&self) -> &Id { &self.uuid }
+
+    fn replace_dest(&mut self, dest: SocketAddrV4) {
+        self.dest = dest;
+    }
+
+    fn check_expiry(&self) -> bool { false }
+    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DistributionMessage {
+    dest: SocketAddrV4,
+    sender: SocketAddrV4,
+    timestamp: String,
+    host_name: String,
+    uuid: Id,
+    hop_count: u16
+}
+impl DistributionMessage {
+    pub fn new(uuid: Id, target_hop_count: u16, host_name: String) -> Self {
+        Self {
+            dest: EndpointPair::default_socket(),
+            sender: EndpointPair::default_socket(),
+            timestamp: String::new(),
+            uuid,
+            hop_count: target_hop_count,
+            host_name
+        }
+    }
+
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn hop_count(&self) -> u16 { self.hop_count }
+    pub fn host_name(&self) -> &String { &self.host_name }
+    pub fn into_host_name_hop_count_uuid(self) -> (String, u16, Id) { (self.host_name, self.hop_count, self.uuid) }
+
+    pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
+}
+impl Message for DistributionMessage {
     const ENCRYPTION_REQUIRED: bool = false;
     fn dest(&self) -> SocketAddrV4 { self.dest }
     fn id(&self) -> &Id { &self.uuid }

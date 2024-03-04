@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, message_processing::{search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     nat_kind: NatKind
@@ -34,6 +34,7 @@ impl Node {
         let (srm_to_srp2, srm_from_staging) = mpsc::unbounded_channel();
         let (sm_to_smp2, sm_from_staging) = mpsc::unbounded_channel();
         let (tx_to_smp2, tx_from_dp) = mpsc::unbounded_channel();
+        let (dm_to_dh, dm_from_staging) = mpsc::unbounded_channel();
     
         let key_store = Arc::new(Mutex::new(KeyStore::new()));
         let peer_ops = Arc::new(Mutex::new(PeerOps::new()));
@@ -44,13 +45,14 @@ impl Node {
         }
 
         let myself = Peer::new(endpoint_pair, uuid.clone());
-        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
+        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), dm_to_dh.clone(), OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
         let local_hosts_clone = local_hosts.clone();
         let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), move |m| { println!("here"); local_hosts_clone.contains_key(m.host_name()) });
         let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Millis(DPP_TTL_MILLIS)), dpm_from_gateway);
         let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts.clone(), tx_from_http_handler);
         let mut dsrp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_staging, sm_to_smp2.clone(), |m| m.origin().unwrap().endpoint_pair().private_endpoint != m.dest() && m.origin().unwrap().endpoint_pair().public_endpoint != m.dest());
         let mut dsmp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_staging, local_hosts, tx_from_dp);
+        let mut distribution_handler = DistributionHandler::new(dm_from_staging, srm_to_srp2, sm_to_smp2, tx_to_smp2, OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
     
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
@@ -129,6 +131,15 @@ impl Node {
             }
         });
 
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = distribution_handler.receive().await {
+                    println!("Distribution handler stopped: {}", e);
+                    return;
+                }
+            }
+        });
+
         if let Some(introducer) = introducer {
             let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
                 None,
@@ -159,13 +170,12 @@ impl Node {
         }
         
         if is_start {
+            // println!("Starting distribution");
+            // let dmessage = DistributionMessage::new(Id(Uuid::new_v4().as_bytes().to_vec()), 2, String::from("Apple Cover Letter.pdf"));
+            // dm_to_dh.send(dmessage).unwrap();
             println!("Tcp listening");
             let server_context = ServerContext::new(srm_to_srp, sm_to_smp, tx_to_smp);
             http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
-            // sleep(Duration::from_secs(4)).await;
-            // println!("Starting distribution");
-            // let server_context = ServerContext::new(srm_to_srp2, sm_to_smp2, tx_to_smp2);
-            // server_context.distribute_app().await;
         }
         else {
             future::pending::<()>().await;

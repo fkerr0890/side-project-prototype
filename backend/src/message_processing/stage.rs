@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, utils::{TransientMap, TtlType}};
+use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, utils::{TransientMap, TtlType}};
 
 use super::{EmptyResult, OutboundGateway, SRP_TTL_SECONDS};
 
@@ -11,6 +11,7 @@ pub struct MessageStaging {
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     to_dsrp: mpsc::UnboundedSender<SearchMessage>,
     to_dsmp: mpsc::UnboundedSender<StreamMessage>,
+    to_dh: mpsc::UnboundedSender<DistributionMessage>,
     message_staging: TransientMap<Id, HashMap<usize, InboundMessage>>,
     message_caching: TransientMap<Id, Vec<InboundMessage>>,
     unconfirmed_peers: TransientMap<String, EndpointPair>,
@@ -25,6 +26,7 @@ impl MessageStaging {
         to_smp: mpsc::UnboundedSender<StreamMessage>,
         to_dsrp: mpsc::UnboundedSender<SearchMessage>,
         to_dsmp: mpsc::UnboundedSender<StreamMessage>,
+        to_dh: mpsc::UnboundedSender<DistributionMessage>,
         outbound_gateway: OutboundGateway) -> Self
     {
         Self {
@@ -34,6 +36,7 @@ impl MessageStaging {
             to_smp,
             to_dsrp,
             to_dsmp,
+            to_dh,
             message_staging: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
             message_caching: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
             unconfirmed_peers: TransientMap::new(TtlType::Secs(HEARTBEAT_INTERVAL_SECONDS*2)),
@@ -131,6 +134,12 @@ impl MessageStaging {
             self.traverse_nat(message.origin());
             message.set_timestamp(timestamp);
             self.to_dpp.send(message).map_err(|e| { e.to_string() } )
+        }
+        else if let Ok(mut message) = bincode::deserialize::<DistributionMessage>(message_bytes) {
+            if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
+            message.set_sender(senders.drain().next().unwrap().socket());
+            message.set_timestamp(timestamp);
+            self.to_dh.send(message).map_err(|e| { e.to_string() } )
         }
         else if let Ok(mut message) = bincode::deserialize::<Heartbeat>(message_bytes) {
             if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
