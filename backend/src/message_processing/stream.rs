@@ -149,6 +149,9 @@ impl ActiveSessionInfo {
         Err(format!("StreamMessageProcessor: prevented request from client, reason: already received resource {}", uuid))
     }
     fn initial_request(&mut self, dest: SocketAddrV4, mut key_agreement: StreamMessage, action: impl Fn(&mut StreamMessage, &mut StreamMessage, SocketAddrV4) -> EmptyResult) -> EmptyResult {
+        if self.dests.contains(&dest) {
+            return Ok(())
+        }
         self.dests.insert(dest);
         self.cached_messages.set_timer(key_agreement.id().to_owned());
         let mut cached_messages = self.cached_messages.map().lock().unwrap();

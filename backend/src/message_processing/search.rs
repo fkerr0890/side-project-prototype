@@ -45,7 +45,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let (uuid, host_name, peer_public_key, origin) = search_response.into_uuid_host_name_public_key_origin();
             let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
             let origin = if sender == origin.endpoint_pair().private_endpoint { sender } else { origin.endpoint_pair().public_endpoint };
-            let Some(my_public_key) = key_store.requester_public_key(origin) else { return Ok(()) };
+            let my_public_key = key_store.requester_public_key(origin);
             key_store.agree(origin, peer_public_key).unwrap();
             let kind = if is_resource_kind { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) } else { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) };
             let mut key_agreement_message = StreamMessage::new(host_name, uuid, kind, my_public_key.as_ref().to_vec());
@@ -68,7 +68,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
     }
 
     fn build_response(&self, uuid: Id, peer_addr: SocketAddrV4, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
-        let Some(public_key) = self.outbound_gateway.key_store.lock().unwrap().host_public_key(peer_addr) else { return None };
+        let public_key = self.outbound_gateway.key_store.lock().unwrap().host_public_key(peer_addr);
         Some(SearchMessage::key_response(self.outbound_gateway.myself.clone(), uuid, host_name, public_key.as_ref().to_vec(), is_resource_kind))
     }
 

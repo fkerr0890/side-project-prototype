@@ -22,24 +22,26 @@ impl KeyStore {
         }
     }
 
-    fn generate_key_pair(&mut self, index: String) -> Option<agreement::PublicKey> {
-        let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
-        let public_key = my_private_key.compute_public_key().unwrap();
-        // println!("Inserting private key: {index}");
-        self.private_keys.set_timer(index.clone());
+    fn generate_key_pair(&mut self, index: String) -> agreement::PublicKey {
+        let is_new_key = self.private_keys.set_timer(index.clone());
         let mut private_keys = self.private_keys.map().lock().unwrap();
-        if private_keys.contains_key(&index) {
-            return None;
+        if is_new_key {
+            let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
+            let public_key = my_private_key.compute_public_key().unwrap();
+            println!("Inserting new key for {index}");
+            private_keys.insert(index, my_private_key);
+            public_key
         }
-        private_keys.insert(index, my_private_key);
-        Some(public_key)
+        else {
+            private_keys.get(&index).unwrap().compute_public_key().unwrap()
+        }
     }
 
-    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
+    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4) -> agreement::PublicKey {
         self.generate_key_pair(peer_addr.to_string())
     }
 
-    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
+    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> agreement::PublicKey {
         self.generate_key_pair(peer_addr.to_string())
     }
 
@@ -61,9 +63,9 @@ impl KeyStore {
 
     pub fn agree(&mut self, peer_addr: SocketAddrV4, peer_public_key: Vec<u8>) -> Result<(), Error> {
         // println!("{:?}, finding: {}", self.private_keys, peer_addr.to_string());
-        let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let index = peer_addr.to_string();
-        let Some(my_private_key) = self.private_keys.map().lock().unwrap().remove(&index) else { return Err(Error::NoKey) };
+        let Some(my_private_key) = self.private_keys.map().lock().unwrap().remove(&index) else { return Ok(()) };
+        let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let symmetric_key = agreement::agree_ephemeral(my_private_key, &peer_public_key, |key_material| {
             hkdf::Salt::new(HKDF_SHA256, &INITIAL_SALT).extract(key_material)
         })?;
@@ -77,13 +79,10 @@ impl KeyStore {
         let (nonce_tx, nonce_rx) = mpsc::channel();
         let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value, nonce_tx));
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
-        // println!("Inserting symmetric key: {index}");
-        self.symmetric_keys.set_timer(index.clone());
-        let mut symmetric_keys = self.symmetric_keys.map().lock().unwrap();
-        if symmetric_keys.contains_key(&index) {
+        if !self.symmetric_keys.set_timer(index.clone()) {
             return Ok(())
         }
-        symmetric_keys.insert(index, key_set);
+        self.symmetric_keys.map().lock().unwrap().insert(index, key_set);
         Ok(())
     }
 }
