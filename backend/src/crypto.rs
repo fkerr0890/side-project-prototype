@@ -28,7 +28,6 @@ impl KeyStore {
         if is_new_key {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
             let public_key = my_private_key.compute_public_key().unwrap();
-            println!("Inserting new key for {index}");
             private_keys.insert(index, my_private_key);
             public_key
         }

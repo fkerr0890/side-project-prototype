@@ -47,7 +47,7 @@ impl Node {
         let myself = Peer::new(endpoint_pair, uuid.clone());
         let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), dm_to_dh.clone(), OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(0)));
         let local_hosts_clone = local_hosts.clone();
-        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), move |m| { println!("here"); local_hosts_clone.contains_key(m.host_name()) });
+        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_gateway, sm_to_smp.clone(), move |m| local_hosts_clone.contains_key(m.host_name()));
         let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Millis(DPP_TTL_MILLIS)), dpm_from_gateway);
         let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, None, TtlType::Secs(SRP_TTL_SECONDS)), sm_from_gateway, local_hosts.clone(), tx_from_http_handler);
         let mut dsrp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself.clone(), &key_store, Some(peer_ops.clone()), TtlType::Secs(SRP_TTL_SECONDS)), srm_from_staging, sm_to_smp2.clone(), |m| m.origin().unwrap().endpoint_pair().private_endpoint != m.dest() && m.origin().unwrap().endpoint_pair().public_endpoint != m.dest());
