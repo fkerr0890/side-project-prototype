@@ -88,3 +88,35 @@ impl TtlType {
         }
     }
 }
+
+#[macro_export]
+macro_rules! option {
+    ($expr:expr, $ret_expr:expr) => {
+        {
+            let Some(val) = $expr else { $ret_expr; return };
+            val
+        }
+    };
+    ($expr:expr) => {
+        {
+            let Some(val) = $expr else { return };
+            val
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! result {
+    ($expr:expr, $ret_expr:expr) => {
+        {
+            let Ok(val) = $expr else { $ret_expr; return };
+            val
+        }
+    };
+    ($expr:expr) => {
+        {
+            let Ok(val) = $expr else { return };
+            val
+        }
+    };
+}

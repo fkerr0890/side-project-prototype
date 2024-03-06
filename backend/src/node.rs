@@ -86,10 +86,7 @@ impl Node {
     
         tokio::spawn(async move {
             loop {
-                if let Err(e) = dpp.receive().await {
-                    println!("Discover peer processor stopped: {}", e);
-                    return;
-                }
+                dpp.receive().await;
             }
         });
 

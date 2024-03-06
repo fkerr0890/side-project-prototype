@@ -3,6 +3,8 @@ use std::{collections::HashSet, future, net::SocketAddrV4, panic, process, sync:
 use p2p::{self, message::Peer, message_processing::{DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
+use tracing::Level;
+use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -14,7 +16,12 @@ async fn basic() {
         println!("{}", panic_info);
         process::exit(1);
     }));
-    let regenerate: bool = false;
+
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::NEW)
+        .with_max_level(Level::TRACE).init();
+
+    let regenerate: bool = true;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();
