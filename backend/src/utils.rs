@@ -107,16 +107,12 @@ macro_rules! option {
 
 #[macro_export]
 macro_rules! result {
-    ($expr:expr, $ret_expr:expr) => {
-        {
-            let Ok(val) = $expr else { $ret_expr; return };
-            val
-        }
-    };
     ($expr:expr) => {
         {
-            let Ok(val) = $expr else { return };
-            val
+            match $expr {
+                Ok(val) => val,
+                Err(error) => { error!(?error); return }
+            }
         }
     };
 }

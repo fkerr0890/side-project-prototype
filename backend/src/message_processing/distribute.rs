@@ -1,9 +1,10 @@
 use tokio::{fs, sync::mpsc};
+use tracing::{debug, error, instrument};
 use uuid::Uuid;
 
-use crate::{http::ServerContext, message::{DistributionMessage, Id, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair};
+use crate::{http::ServerContext, message::{DistributionMessage, Id, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, option, result};
 
-use super::{stream::StreamResponseType, EmptyResult, OutboundGateway};
+use super::{stream::StreamResponseType, OutboundGateway};
 
 pub struct DistributionHandler {
     from_staging: mpsc::UnboundedReceiver<DistributionMessage>,
@@ -17,25 +18,26 @@ impl DistributionHandler {
         Self { from_staging, to_srp, to_smp, tx_to_smp, outbound_gateway }
     }
     
-    pub async fn receive(&mut self) -> EmptyResult  {
-        let message = self.from_staging.recv().await.ok_or("DistributionHandler: failed to receive message from gateway")?;
+    #[instrument(level = "trace", skip(self))]
+    pub async fn receive(&mut self) {
+        let message = option!(self.from_staging.recv().await, error!("Failed to receive message from gateway"));
         if message.hop_count() <= 0 || !self.outbound_gateway.try_add_breadcrumb(None, message.id(), message.sender()) {
-            return Ok(())
+            return;
         }
         let context = ServerContext::new(self.to_srp.clone(), self.to_smp.clone(), self.tx_to_smp.clone());
         let (host_name, mut hop_count, uuid) = message.into_host_name_hop_count_uuid();
-        context.distribute_app(host_name.clone(), uuid.clone()).await?;
+        result!(context.distribute_app(host_name.clone(), uuid.clone()).await);
         hop_count -= 1;
         if hop_count > 0 {
-            println!("Propagating distribution");
-            self.outbound_gateway.send_request(&mut DistributionMessage::new(uuid, hop_count, host_name), None)?;
+            debug!("Propagating distribution");
+            self.outbound_gateway.send_request(&mut DistributionMessage::new(uuid, hop_count, host_name), None);
         }
-        Ok(())
     }
 }
 
 impl ServerContext {
-    pub async fn distribute_app(&self, host_name: String, uuid: Id) -> EmptyResult {
+    #[instrument(level = "trace", skip(self))]
+    pub async fn distribute_app(&self, host_name: String, uuid: Id) -> Result<(), Error> {
         let payload = fs::read(format!("C:/Users/fredk/Downloads/{host_name}.gz")).await.unwrap();
         let search_message = SearchMessage::initial_search_request(host_name, false, Some(uuid));
         let chunks = payload.chunks(1024);
@@ -54,9 +56,9 @@ impl ServerContext {
             }
             let response_id = rx.recv().await.unwrap().unwrap_distribution();
             if id != response_id {
-                return Err(String::from("Id mismatch"));
+                return Err(Error::IdMismatch);
             }
-            println!("Distributed {} of {}", i, chunks_len)
+            debug!("Distributed {} of {}", i, chunks_len)
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.tx_to_smp.send(tx).unwrap();
@@ -68,7 +70,13 @@ impl ServerContext {
             Ok(())
         }
         else {
-            Err(format!("Distribution error {result}"))
+            Err(Error::HostInstall)
         }
     }
+}
+
+#[derive(Debug)]
+enum Error {
+    IdMismatch,
+    HostInstall
 }

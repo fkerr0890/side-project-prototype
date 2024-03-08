@@ -130,10 +130,7 @@ impl Node {
 
         tokio::spawn(async move {
             loop {
-                if let Err(e) = distribution_handler.receive().await {
-                    println!("Distribution handler stopped: {}", e);
-                    return;
-                }
+                distribution_handler.receive().await;
             }
         });
 
@@ -167,9 +164,9 @@ impl Node {
         }
         
         if is_start {
-            // println!("Starting distribution");
-            // let dmessage = DistributionMessage::new(Id(Uuid::new_v4().as_bytes().to_vec()), 2, String::from("Apple Cover Letter.pdf"));
-            // dm_to_dh.send(dmessage).unwrap();
+            println!("Starting distribution");
+            let dmessage = DistributionMessage::new(Id(Uuid::new_v4().as_bytes().to_vec()), 2, String::from("Apple Cover Letter.pdf"));
+            dm_to_dh.send(dmessage).unwrap();
             println!("Tcp listening");
             let server_context = ServerContext::new(srm_to_srp, sm_to_smp, tx_to_smp);
             http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
