@@ -103,6 +103,7 @@ pub struct Heartbeat {
 impl Heartbeat {
     pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: EndpointPair::default_socket(), timestamp: String::new(), uuid: Id(Uuid::new_v4().as_bytes().to_vec()) } }
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
+    pub fn sender(&self) -> SocketAddrV4 { self.sender }
 }
 
 impl Message for Heartbeat {

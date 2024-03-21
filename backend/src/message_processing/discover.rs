@@ -1,11 +1,11 @@
 use std::{net::SocketAddrV4, sync::{Arc, Mutex}};
 
 use tokio::{net::UdpSocket, sync::mpsc};
-use tracing::{error, instrument, warn};
+use tracing::{instrument, warn};
 
-use crate::{crypto::KeyStore, message::{DiscoverPeerMessage, DpMessageKind, Id, Message, Peer}, node::EndpointPair, option, utils::{TransientMap, TtlType}};
+use crate::{crypto::KeyStore, message::{DiscoverPeerMessage, DpMessageKind, Id, Message, Peer}, node::EndpointPair, option_early_return, utils::{TransientMap, TtlType}};
 
-use super::{EmptyResult, OutboundGateway, DPP_TTL_MILLIS};
+use super::{EmptyOption, OutboundGateway, DPP_TTL_MILLIS};
 
 pub struct DiscoverPeerProcessor {
     outbound_gateway: OutboundGateway,
@@ -22,15 +22,15 @@ impl DiscoverPeerProcessor {
         }
     }
 
-    #[instrument(level = "trace", skip(self))]
-    pub async fn receive(&mut self) {
-        let message = option!(self.from_staging.recv().await, error!("Failed to receive message from staging"));
+    pub async fn receive(&mut self) -> EmptyOption {
+        let message = self.from_staging.recv().await?;
         match message {
-            DiscoverPeerMessage { kind: DpMessageKind::INeedSome, .. } => { self.request_new_peers(message); },
-            DiscoverPeerMessage { kind: DpMessageKind::Request, ..} => { self.propagate_request(message); },
-            DiscoverPeerMessage { kind: DpMessageKind::Response, .. } => { self.return_response(message, None); },
-            _ => { warn!(?message, "Received unsupported message"); }
-        };
+            DiscoverPeerMessage { kind: DpMessageKind::INeedSome, .. } => self.request_new_peers(message),
+            DiscoverPeerMessage { kind: DpMessageKind::Request, ..} => self.propagate_request(message),
+            DiscoverPeerMessage { kind: DpMessageKind::Response, .. } => self.return_response(message, None),
+            _ => warn!(?message, "Received unsupported message")
+        }
+        Some(())
     }
 
     #[instrument(level = "trace", skip(self))]
@@ -79,7 +79,7 @@ impl DiscoverPeerProcessor {
     fn return_response(&mut self, mut response: DiscoverPeerMessage, dest: Option<SocketAddrV4>) {
         response.add_peer(self.outbound_gateway.myself.clone());
         let dest = if dest.is_some() { dest } else { self.outbound_gateway.get_dest(response.id()) };
-        let dest = option!(dest);
+        let dest = option_early_return!(dest);
         if dest == EndpointPair::default_socket() {
             let (uuid, origin) = (response.id().to_owned(), response.origin().unwrap().endpoint_pair());
             if self.stage_message(response) {
@@ -103,19 +103,19 @@ impl DiscoverPeerProcessor {
         };
         if let Some(mut staged_message) = staged_message {
             staged_message.set_kind(DpMessageKind::IveGotSome);
-            OutboundGateway::send_static(socket, key_store, dest.public_endpoint, myself, &mut staged_message, false, false).ok();
-            OutboundGateway::send_static(socket, key_store, dest.private_endpoint, myself, &mut staged_message, false, false).ok();
+            OutboundGateway::send_static(socket, key_store, dest.public_endpoint, myself, &mut staged_message, false, false);
+            OutboundGateway::send_static(socket, key_store, dest.private_endpoint, myself, &mut staged_message, false, false);
         }
     }
 
     #[instrument(level = "trace", skip(self))]
-    fn request_new_peers(&mut self, mut message: DiscoverPeerMessage) -> EmptyResult {
+    fn request_new_peers(&mut self, mut message: DiscoverPeerMessage) {
         self.outbound_gateway.try_add_breadcrumb(None, message.id(), self.outbound_gateway.myself.endpoint_pair().private_endpoint);
         let introducer = message.get_last_peer();
         message.set_kind(DpMessageKind::Request);
         self.outbound_gateway.send(introducer.endpoint_pair(),
             &mut message.set_origin_if_unset(self.outbound_gateway.myself.clone()),
             false,
-            false)
+            false);
     }
 }

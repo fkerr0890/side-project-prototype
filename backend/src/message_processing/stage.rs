@@ -1,8 +1,9 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
-use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, utils::{TransientMap, TtlType}};
+use tracing::{debug, error, instrument, trace, warn};
+use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{TransientMap, TtlType}};
 
-use super::{EmptyResult, OutboundGateway, SRP_TTL_SECONDS};
+use super::{EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
     from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, InboundMessage)>,
@@ -44,10 +45,10 @@ impl MessageStaging {
         }
     }
 
-    pub async fn receive(&mut self) -> EmptyResult {
-        let (peer_addr, inbound_message) = self.from_gateway.recv().await.ok_or("MessageStaging: failed to receive message from gateway")?;
+    pub async fn receive(&mut self) -> EmptyOption {
+        let (peer_addr, inbound_message) = self.from_gateway.recv().await?;
         if inbound_message.separate_parts().sender().socket() != peer_addr {
-            return Ok(())
+            return Some(warn!(sender = %inbound_message.separate_parts().sender().socket(), actual_sender = %peer_addr, "Sender doesn't match actual sender"));
         }
         if let Some(endpoint_pair) = self.unconfirmed_peers.map().lock().unwrap().remove(inbound_message.separate_parts().sender().uuid()) {
             // println!("Confirmed peer {}", inbound_message.separate_parts().sender().uuid());
@@ -55,14 +56,14 @@ impl MessageStaging {
         }
         let res = self.stage_message(inbound_message);
         if let Some(message_parts) = res {
-            return self.reassemble_message(message_parts);
+            self.reassemble_message(message_parts);
         }
-        Ok(())
+        Some(())
     }
 
-    fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> EmptyResult {
+    fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
-        self.deserialize_message(&message_bytes, false, senders, timestamp)
+        self.deserialize_message(&message_bytes, false, senders, timestamp);
     }
 
     fn traverse_nat(&self, peer: Option<&Peer>) {
@@ -84,69 +85,69 @@ impl MessageStaging {
         let (socket, key_store, myself) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself.clone());
         tokio::spawn(async move {
             while unconfirmed_peers.lock().unwrap().contains_key(&uuid) {
-                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.public_endpoint, &myself, &mut Heartbeat::new(), false, true).ok();
-                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.private_endpoint, &myself, &mut Heartbeat::new(), false, true).ok();
+                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.public_endpoint, &myself, &mut Heartbeat::new(), false, true);
+                OutboundGateway::send_static(&socket, &key_store, peer_endpoint_pair.private_endpoint, &myself, &mut Heartbeat::new(), false, true);
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
             }
         });
     }
 
-    fn handle_key_agreement(&mut self, mut message: StreamMessage) -> EmptyResult {
+    #[instrument(level = "trace", skip_all, fields(message.sender = %message.senders()[0], message.host_name = message.host_name()))]
+    fn handle_key_agreement(&mut self, mut message: StreamMessage) {
         let sender = message.only_sender();
         let (uuid, peer_public_key) = message.into_hash_payload();
-        self.outbound_gateway.key_store.lock().unwrap().agree(sender, peer_public_key).map_err(|e| e.error_response(file!(), line!()))?;
+        result_early_return!(self.outbound_gateway.key_store.lock().unwrap().agree(sender, peer_public_key));
         let cached_messages = self.message_caching.map().lock().unwrap().remove(&uuid);
         if let Some(cached_messages) = cached_messages {
-            println!("Staging cached messages");
+            debug!("Staging cached messages");
             let mut res = None;
             for message in cached_messages {
                 res = self.stage_message(message);
             }
             if let Some(message_parts) = res {
-                return self.reassemble_message(message_parts)
+                self.reassemble_message(message_parts);
             }
         }
-        Ok(())
     }
 
-    fn deserialize_message(&mut self, message_bytes: &[u8], was_encrypted: bool, mut senders: HashSet<Sender>, timestamp: String) -> EmptyResult {
+    #[instrument(level = "trace", skip(self, message_bytes))]
+    fn deserialize_message(&mut self, message_bytes: &[u8], was_encrypted: bool, mut senders: HashSet<Sender>, timestamp: String) {
         if let Ok(mut message) = bincode::deserialize::<SearchMessage>(message_bytes) {
-            println!("Received search message, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself);
-            if SearchMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
+            debug!(uuid = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received search message");
+            if SearchMessage::ENCRYPTION_REQUIRED && !was_encrypted { return }
             message.set_sender(senders.drain().next().unwrap().socket());
             self.traverse_nat(message.origin());
             message.set_timestamp(timestamp);
-            match message {
-                SearchMessage { kind: SearchMessageKind::Resource(_), .. } => self.to_srp.send(message).map_err(|e| { e.to_string() } ),
-                SearchMessage { kind: SearchMessageKind::Distribution(_), ..} => self.to_dsrp.send(message).map_err(|e| { e.to_string() } )
-            }            
+            result_early_return!(match message {
+                SearchMessage { kind: SearchMessageKind::Resource(_), .. } => self.to_srp.send(message),
+                SearchMessage { kind: SearchMessageKind::Distribution(_), ..} => self.to_dsrp.send(message)
+            });
         }
         else if let Ok(mut message) = bincode::deserialize::<DiscoverPeerMessage>(message_bytes) {
-            // println!("Received dp message, uuid: {} at {:?}, {:?}", message.id(), self.outbound_gateway.myself, message.kind);
-            if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
+            // debug!(uuid = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received dp message");
+            if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return }
             if let DiscoverPeerMessage { kind: DpMessageKind::IveGotSome, .. } = message {
                 for peer in message.into_peer_list() {
                     self.send_nat_heartbeats(&peer);
                 }
-                return Ok(());
+                return;
             }
             message.set_sender(senders.drain().next().unwrap().socket());
             self.traverse_nat(message.origin());
             message.set_timestamp(timestamp);
-            self.to_dpp.send(message).map_err(|e| { e.to_string() } )
+            result_early_return!(self.to_dpp.send(message));
         }
         else if let Ok(mut message) = bincode::deserialize::<DistributionMessage>(message_bytes) {
-            if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
+            if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return }
             message.set_sender(senders.drain().next().unwrap().socket());
             message.set_timestamp(timestamp);
-            self.to_dh.send(message).map_err(|e| { e.to_string() } )
+            result_early_return!(self.to_dh.send(message));
         }
         else if let Ok(mut message) = bincode::deserialize::<Heartbeat>(message_bytes) {
-            if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
+            if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return }
             message.set_sender(senders.drain().next().unwrap().socket());
             message.set_timestamp(timestamp);
-            // Ok(println!("{:?}", message))
-            Ok(())
+            trace!(sender = %message.sender(), curr_node = ?self.outbound_gateway.myself, "Received heartbeat");
         }
         else if let Ok(mut message) = bincode::deserialize::<StreamMessage>(message_bytes) {
             // if StreamMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
@@ -155,16 +156,17 @@ impl MessageStaging {
             }
             message.set_timestamp(timestamp);
             match message {
-                StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::KeyAgreement), .. } => { println!("Received key agreement message, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.handle_key_agreement(message) },
-                StreamMessage { kind: StreamMessageKind::Resource(_), .. } => { println!("Received stream message, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.to_smp.send(message).map_err(|e| { e.to_string() } ) }
-                StreamMessage { kind: StreamMessageKind::Distribution(_), .. } => { println!("Received stream dmessage, uuid: {} at {:?}", message.id(), self.outbound_gateway.myself); self.to_dsmp.send(message).map_err(|e| { e.to_string() } ) }
+                StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::KeyAgreement), .. } => { debug!(uuid = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received key agreement message"); self.handle_key_agreement(message) },
+                StreamMessage { kind: StreamMessageKind::Resource(_), .. } => { debug!(uuid = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received stream message"); result_early_return!(self.to_smp.send(message)); }
+                StreamMessage { kind: StreamMessageKind::Distribution(_), .. } => { debug!(uuid = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received stream dmessage"); result_early_return!(self.to_dsmp.send(message)); }
             }
         }
         else {
-            Err(String::from("Unable to deserialize received message to a supported type"))
+            error!("Unable to deserialize received message to a supported type");
         }
     }
 
+    #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
     fn stage_message(&mut self, mut inbound_message: InboundMessage) -> Option<Vec<InboundMessage>> {
         let (is_encrypted, sender) = (inbound_message.take_is_encrypted(), inbound_message.separate_parts().sender().socket());
         if let IsEncrypted::True(nonce) = is_encrypted {
@@ -178,10 +180,10 @@ impl MessageStaging {
                     let cached_messages = message_caching.entry(inbound_message.separate_parts().id().to_owned()).or_default();
                     inbound_message.set_is_encrypted_true(nonce);
                     cached_messages.push(inbound_message);
-                    println!("no key");
+                    debug!("no key");
                     return None;
                 },
-                Err(e) => { println!("{e}"); return None }
+                Err(error) => { error!(?error); return None; }
             };
         }
         let (index, num_chunks) = inbound_message.separate_parts().position();

@@ -3,6 +3,7 @@ use std::{collections::HashMap, str::FromStr, convert::Infallible, net::SocketAd
 use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, header::{HeaderName, HeaderValue}, service::{make_service_fn, service_fn}, Server, Client, Method, Uri};
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
+use tracing::{debug, error};
 
 use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::stream::StreamResponseType, node::EndpointPair};
 
@@ -171,7 +172,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
                 .unwrap())
         }
     };
-    println!("http: Request uri is {}", request.uri());
+    debug!(uri = request.uri());
     let (host_name, path) = get_host_name_and_path(request.uri());
     request.set_uri(path);
     let search_request = SearchMessage::initial_search_request(host_name.to_owned(), true, None);
@@ -201,7 +202,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     let response = match rx.recv().await {
         Some(response) => response,
         None => {
-            println!("Sending error response");
+            error!("SMP to http channel closed");
             return Ok(Response::builder()
                 .status(500)
                 .version(request_version)
@@ -230,7 +231,7 @@ pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpR
     let client = Client::new();
     let request_version = request.version.clone();
     let hyper_request = match request.to_hyper_request(String::from("http://") + socket) { Ok(request) => request, Err(e) => return construct_error_response(e.to_string(), request_version) };
-    println!("{:?}", hyper_request);
+    debug!("{:?}", hyper_request);
     let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => return construct_error_response(e.to_string(), request_version) };
     match SerdeHttpResponse::from_hyper_response(response).await {
         Ok(response) => response,
@@ -238,9 +239,9 @@ pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpR
     }
 }
 
-pub fn construct_error_response(e: String, request_version: String) -> SerdeHttpResponse {
-    println!("http error: {}", e);
-    let body = format!("<h1>{}</h1>", e);
+pub fn construct_error_response(error: String, request_version: String) -> SerdeHttpResponse {
+    error!(error);
+    let body = format!("<h1>{}</h1>", error);
     SerdeHttpResponse::builder(500, request_version)
         .header("Content-Type", "text/html")
         .header("Content-Length", &body.len().to_string())

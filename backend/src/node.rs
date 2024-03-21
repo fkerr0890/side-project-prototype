@@ -2,9 +2,10 @@ use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
+use tracing::error;
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, Id, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     nat_kind: NatKind
@@ -58,44 +59,32 @@ impl Node {
             let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
             tokio::spawn(async move {
                 loop {
-                    if let Err(e) = inbound_gateway.receive().await {
-                        println!("Inbound gateway stopped: {}", e);
-                        return;
-                    }
+                    inbound_gateway.receive().await;
                 }
             });
         }
 
         tokio::spawn(async move {
             loop {
-                if let Err(e) = message_staging.receive().await {
-                    println!("MessageStaging stopped: {}", e);
-                    return;
-                }
+                option_early_return!(message_staging.receive().await, error!("Staging channel closed"));
             }
         });
     
         tokio::spawn(async move {
             loop {
-                if let Err(e) = srp.receive().await {
-                    println!("Search request processor stopped: {}", e);
-                    return;
-                }
+                option_early_return!(srp.receive().await, error!("SRP channel closed"));
             }
         });
     
         tokio::spawn(async move {
             loop {
-                dpp.receive().await;
+                option_early_return!(dpp.receive().await, error!("DPP channel closed"));
             }
         });
 
         tokio::spawn(async move {
             loop {
-                if let Err(e) = smp.receive().await {
-                    println!("Stream message processor stopped: {}", e);
-                    return;
-                }
+                option_early_return!(smp.receive().await, error!("SMP channel closed"));
             }
         });
         
@@ -103,34 +92,25 @@ impl Node {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
-                if let Err(e) = heartbeat_gateway.send_request(&mut Heartbeat::new(), None) {
-                    println!("Heartbeats stopped: {}", e);
-                    return;
-                };
+                heartbeat_gateway.send_request(&mut Heartbeat::new(), None);
             }
         });
 
         tokio::spawn(async move {
             loop {
-                if let Err(e) = dsrp.receive().await {
-                    println!("Distribution search processor stopped: {}", e);
-                    return;
-                }
+                option_early_return!(dsrp.receive().await, error!("DSRP channel closed"));
             }
         });
 
         tokio::spawn(async move {
             loop {
-                if let Err(e) = dsmp.receive().await {
-                    println!("Distribution stream processor stopped: {}", e);
-                    return;
-                }
+                option_early_return!(dsmp.receive().await, error!("DSMP channel closed"));
             }
         });
 
         tokio::spawn(async move {
             loop {
-                distribution_handler.receive().await;
+                option_early_return!(distribution_handler.receive().await, error!("Distribution channel closed"));
             }
         });
 
@@ -164,9 +144,9 @@ impl Node {
         }
         
         if is_start {
-            println!("Starting distribution");
-            let dmessage = DistributionMessage::new(Id(Uuid::new_v4().as_bytes().to_vec()), 2, String::from("Apple Cover Letter.pdf"));
-            dm_to_dh.send(dmessage).unwrap();
+            // println!("Starting distribution");
+            // let dmessage = DistributionMessage::new(Id(Uuid::new_v4().as_bytes().to_vec()), 2, String::from("Apple Cover Letter.pdf"));
+            // dm_to_dh.send(dmessage).unwrap();
             println!("Tcp listening");
             let server_context = ServerContext::new(srm_to_srp, sm_to_smp, tx_to_smp);
             http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;

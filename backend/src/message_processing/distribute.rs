@@ -1,10 +1,12 @@
+use std::fmt::Display;
+
 use tokio::{fs, sync::mpsc};
 use tracing::{debug, error, instrument};
 use uuid::Uuid;
 
-use crate::{http::ServerContext, message::{DistributionMessage, Id, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, option, result};
+use crate::{http::ServerContext, message::{DistributionMessage, Id, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, result_early_return};
 
-use super::{stream::StreamResponseType, OutboundGateway};
+use super::{stream::StreamResponseType, EmptyOption, OutboundGateway};
 
 pub struct DistributionHandler {
     from_staging: mpsc::UnboundedReceiver<DistributionMessage>,
@@ -19,19 +21,20 @@ impl DistributionHandler {
     }
     
     #[instrument(level = "trace", skip(self))]
-    pub async fn receive(&mut self) {
-        let message = option!(self.from_staging.recv().await, error!("Failed to receive message from gateway"));
+    pub async fn receive(&mut self) -> EmptyOption {
+        let message = self.from_staging.recv().await?;
         if message.hop_count() <= 0 || !self.outbound_gateway.try_add_breadcrumb(None, message.id(), message.sender()) {
-            return;
+            return Some(());
         }
         let context = ServerContext::new(self.to_srp.clone(), self.to_smp.clone(), self.tx_to_smp.clone());
         let (host_name, mut hop_count, uuid) = message.into_host_name_hop_count_uuid();
-        result!(context.distribute_app(host_name.clone(), uuid.clone()).await);
+        result_early_return!(context.distribute_app(host_name.clone(), uuid.clone()).await, Some(()));
         hop_count -= 1;
         if hop_count > 0 {
             debug!("Propagating distribution");
             self.outbound_gateway.send_request(&mut DistributionMessage::new(uuid, hop_count, host_name), None);
         }
+        Some(())
     }
 }
 
@@ -78,5 +81,10 @@ impl ServerContext {
 #[derive(Debug)]
 enum Error {
     IdMismatch,
-    HostInstall
+    HostInstall,
+}
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }

@@ -90,7 +90,7 @@ impl TtlType {
 }
 
 #[macro_export]
-macro_rules! option {
+macro_rules! option_early_return {
     ($expr:expr, $ret_expr:expr) => {
         {
             let Some(val) = $expr else { $ret_expr; return };
@@ -106,13 +106,17 @@ macro_rules! option {
 }
 
 #[macro_export]
-macro_rules! result {
+macro_rules! result_early_return {
+    ($expr:expr, $ret_expr:expr) => {
+        match $expr {
+            Ok(val) => val,
+            Err(error) => { error!(%error); return $ret_expr; }
+        }
+    };
     ($expr:expr) => {
-        {
-            match $expr {
-                Ok(val) => val,
-                Err(error) => { error!(?error); return }
-            }
+        match $expr {
+            Ok(val) => val,
+            Err(error) => { error!(%error); return; }
         }
     };
 }
