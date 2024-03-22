@@ -191,7 +191,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     };
     let mut sm = StreamMessage::new(
         host_name.to_owned(),
-        search_request.id().to_owned(),
+        search_request.id(),
         StreamMessageKind::Resource(StreamMessageInnerKind::Request),
         payload);
     sm.set_sender(EndpointPair::default_socket());
