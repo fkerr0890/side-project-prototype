@@ -1,8 +1,8 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV4}, time::Duration};
+use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV4, UdpSocket}, sync::Arc, time::Duration};
 use tokio::{fs, sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{http::{self, SerdeHttpResponse}, message::{NumId, Message, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, option_early_return, result_early_return, utils::{TransientMap, TtlType}};
-use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS};
+use crate::{http::{self, SerdeHttpResponse}, message::{Heartbeat, Message, NumId, Peer, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::ToBeEncrypted, node::EndpointPair, option_early_return, result_early_return, utils::{TransientMap, TransientSet, TtlType}};
+use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor
 {
@@ -11,7 +11,8 @@ pub struct StreamMessageProcessor
     local_hosts: HashMap<String, SocketAddrV4>,
     from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<StreamResponseType>>,
     active_sessions: TransientMap<String, ActiveSessionInfo>,
-    dmessage_staging: DMessageStaging
+    dmessage_staging: DMessageStaging,
+    transient_peers: TransientSet<SocketAddrV4>
 }
 impl StreamMessageProcessor
 {
@@ -59,7 +60,7 @@ impl StreamMessageProcessor
                 if !active_session.follow_up(id, |request, dests| {                  
                     for dest in dests.iter() {
                         debug!(id = %request.id(), %dest, "Sending follow up");
-                        OutboundGateway::send_static(&socket, &key_store, *dest, myself, request, true, true);
+                        OutboundGateway::send_static(&socket, *dest, myself, request, ToBeEncrypted::True(key_store.clone()), true);
                     }
                 }) {
                     return
@@ -78,12 +79,7 @@ impl StreamMessageProcessor
             let active_session_info = active_sessions.entry(host_name.clone()).or_default();
             let dests = active_session_info.dests();
             let set_timer = if dests.len() > 0 {
-                {
-                    let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
-                    for dest in dests.iter() {
-                        key_store.reset_expiration(*dest);
-                    }
-                }
+                self.persist_peer_conns(&dests);
                 self.outbound_gateway.send_request(&mut message, Some(dests)); true
             } else {
                 false
@@ -94,9 +90,18 @@ impl StreamMessageProcessor
             self.start_follow_ups(host_name, id);
         }
         else {
+            self.persist_peer_conns(&HashSet::from([message.only_sender()]));
             let (id, payload, host_name, kind) = message.into_hash_payload_host_name_kind();
             self.send_response(payload, dest, host_name, id, kind).await;
         }
+    }
+
+    fn persist_peer_conns(&self, peers: &HashSet<SocketAddrV4>) {       
+        let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
+        for peer in peers {
+            key_store.reset_expiration(*peer);
+            self.add_transient_peer(peer);
+        }        
     }
 
     #[instrument(level = "trace", skip(self, payload))]
@@ -140,15 +145,15 @@ impl StreamMessageProcessor
 
 #[derive(Debug)]
 struct ActiveSessionInfo {
-    dests: HashSet<SocketAddrV4>,
+    dests: TransientSet<SocketAddrV4>,
     cached_messages: TransientMap<NumId, (StreamMessage, mpsc::UnboundedSender<StreamResponseType>)>,
     //TODO: Make transient
     resource_queue: VecDeque<NumId>
 }
 
 impl ActiveSessionInfo {
-    fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS), false), resource_queue: VecDeque::new() } }
-    fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.clone() }
+    fn new() -> Self { Self { dests: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true), cached_messages: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS), false), resource_queue: VecDeque::new() } }
+    fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.set().lock().unwrap().clone() }
     fn handle_cached_message<'a>(id: NumId, cached_message: Option<&'a mut (StreamMessage, mpsc::UnboundedSender<StreamResponseType>)>) -> Option<&'a mut StreamMessage> {
         let Some(cached_message) = cached_message else {
             debug!(%id, "Prevented request from client, reason: request expired for resource"); return None;
@@ -158,8 +163,27 @@ impl ActiveSessionInfo {
         }
         debug!(%id, "Prevented request from client, reason: already received resource"); None
     }
-    fn initial_request(&mut self, dest: SocketAddrV4, mut key_agreement: StreamMessage, action: impl Fn(&mut StreamMessage, &mut StreamMessage, SocketAddrV4)) {
-        if self.dests.contains(&dest) {
+    pub fn add_dest(&mut self, peer: SocketAddrV4, is_host: bool, socket: Arc<UdpSocket>, myself: Peer) {
+        let contains_key = self.dests.insert(peer);
+        if contains_key || self.dests.set().lock().unwrap().len() != 1 {
+            return true;
+        }
+        let dests_clone = self.dests.set().clone();
+        tokio::spawn(async move {
+            loop {
+                for peer in dests_clone.lock().unwrap().iter() {
+                    OutboundGateway::send_static(&socket, *peer, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
+                }
+                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
+                if dests_clone.lock().unwrap().len() == 0 {
+                    return;
+                }
+            }
+        });
+        false
+    }
+    fn initial_request(&mut self, dest: SocketAddrV4, mut key_agreement: StreamMessage, socket: Arc<UdpSocket>, myself: Peer, ) {
+        if self.add_dest(peer, is_host, socket, myself) {
             return;
         }
         self.dests.insert(dest);

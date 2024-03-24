@@ -56,6 +56,7 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + Debug + 'static>
     pub fn map(&self) -> &Arc<Mutex<HashMap<K, V>>> { &self.map }
 }
 
+#[derive(Debug)]
 pub struct TransientSet<K: Send + Hash + Eq + Display> {
     ttl: TtlType,
     set: Arc<Mutex<HashSet<K>>>,

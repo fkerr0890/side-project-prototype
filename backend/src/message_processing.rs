@@ -82,10 +82,10 @@ impl OutboundGateway {
     fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: NumId, dest: SocketAddrV4) -> bool {
         let endpoint_pair = self.myself.endpoint_pair;
         let (early_return_dest, myself) = (endpoint_pair.private_endpoint, self.myself);
-        let (socket, key_store, breadcrumbs) = (self.socket.clone(), self.key_store.clone(), self.breadcrumbs.map().clone());
+        let (socket, breadcrumbs) = (self.socket.clone(), self.breadcrumbs.map().clone());
         let contains_key = if let Some(mut message) = early_return_message {
             self.breadcrumbs.set_timer_with_send_action(id, move || {
-                Self::send_static(&socket, &key_store, early_return_dest, myself, &mut message, false, false);
+                Self::send_static(&socket, early_return_dest, myself, &mut message, ToBeEncrypted::False, false);
                 let breadcrumbs = breadcrumbs.clone();
                 tokio::spawn(async move {
                     time::sleep(Duration::from_secs(2)).await;
@@ -128,15 +128,21 @@ impl OutboundGateway {
     }
 
     pub fn send(&self, dest: EndpointPair, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) {
-        // Self::send_static(&self.socket, &self.key_store, dest.public_endpoint, &self.myself, message, to_be_encrypted, to_be_chunked)?;
-        Self::send_static(&self.socket, &self.key_store, dest.private_endpoint, self.myself, message, to_be_encrypted, to_be_chunked);
+        let to_be_encrypted = if to_be_encrypted { ToBeEncrypted::True(self.key_store.clone()) } else { ToBeEncrypted::False };
+        Self::send_private_public_static(&self.socket, dest, self.myself, message, to_be_encrypted, to_be_chunked)
+    }
+
+    pub fn send_private_public_static(socket: &Arc<UdpSocket>, dest: EndpointPair, myself: Peer, message: &mut(impl Message + Serialize), to_be_encrypted: ToBeEncrypted, to_be_chunked: bool) {
+        Self::send_static(socket, dest.public_endpoint, myself, message, to_be_encrypted, to_be_chunked);
+        // Self::send_static(socket, dest.private_endpoint, myself, message, to_be_encrypted, to_be_chunked);
     }
 
     pub fn send_individual(&self, dest: SocketAddrV4, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) {
-        Self::send_static(&self.socket, &self.key_store, dest, self.myself, message, to_be_encrypted, to_be_chunked);
+        let to_be_encrypted = if to_be_encrypted { ToBeEncrypted::True(self.key_store.clone()) } else { ToBeEncrypted::False };
+        Self::send_static(&self.socket, dest, self.myself, message, to_be_encrypted, to_be_chunked);
     }
 
-    pub fn send_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, myself: Peer, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) {
+    pub fn send_static(socket: &Arc<UdpSocket>, dest: SocketAddrV4, myself: Peer, message: &mut(impl Message + Serialize), to_be_encrypted: ToBeEncrypted, to_be_chunked: bool) {
         message.replace_dest(dest);
         if message.check_expiry() {
             info!("PeerOps: Message expired: {}", message.id());
@@ -144,21 +150,21 @@ impl OutboundGateway {
         let serialized = result_early_return!(bincode::serialize(message));
         let sender = if dest.ip().is_private() { myself.endpoint_pair.private_endpoint } else { myself.endpoint_pair.public_endpoint };
         let separate_parts = SeparateParts::new(Sender::new(sender, myself.id), message.id());
-        let chunks = option_early_return!(Self::chunked(key_store, dest, serialized, separate_parts, to_be_encrypted, to_be_chunked));
+        let chunks = option_early_return!(Self::chunked(dest, serialized, separate_parts, to_be_encrypted, to_be_chunked));
         for chunk in chunks {
             let socket_clone = socket.clone();
             tokio::spawn(async move { result_early_return!(socket_clone.send_to(&chunk, dest).await); });
         }
     }
 
-    fn chunked(key_store: &Arc<Mutex<KeyStore>>, dest: SocketAddrV4, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_encrypted: bool, to_be_chunked: bool) -> Option<Vec<Vec<u8>>> {
-        let base_is_encrypted = if to_be_encrypted { IsEncrypted::True([0u8; aead::NONCE_LEN].to_vec()) } else { IsEncrypted::False };
+    fn chunked(dest: SocketAddrV4, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_encrypted: ToBeEncrypted, to_be_chunked: bool) -> Option<Vec<Vec<u8>>> {
+        let (base_is_encrypted, key_store) = if let ToBeEncrypted::True(key_store) = to_be_encrypted { (IsEncrypted::True([0u8; aead::NONCE_LEN].to_vec()), Some(key_store)) } else { (IsEncrypted::False, None) };
         let chunk_size = if to_be_chunked { 975 - (bincode::serialized_size(&base_is_encrypted).unwrap() + bincode::serialized_size(&separate_parts).unwrap()) as usize } else { bytes.len() };
         let chunks = bytes.chunks(chunk_size);
         let num_chunks = chunks.len();
         let (mut messages, errors): (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>) = chunks
             .enumerate()
-            .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store.clone(), dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks), to_be_encrypted))
+            .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store.clone(), dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks), matches!(base_is_encrypted, IsEncrypted::True(_))))
             .map(|r| { match r { Ok(bytes) => (bytes, String::new()), Err(e) => (Vec::new(), e) } })
             .partition(|r| r.0.len() > 0);
         if errors.len() > 0 {
@@ -168,9 +174,9 @@ impl OutboundGateway {
         Some(messages.into_iter().map(|o| o.0).collect())
     }
 
-    fn generate_inbound_message_bytes(key_store: Arc<Mutex<KeyStore>>, dest: SocketAddrV4, mut chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize), to_be_encrypted: bool) -> Result<Vec<u8>, String> {
+    fn generate_inbound_message_bytes(key_store: Option<Arc<Mutex<KeyStore>>>, dest: SocketAddrV4, mut chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize), to_be_encrypted: bool) -> Result<Vec<u8>, String> {
         let is_encrypted = if to_be_encrypted {
-            let nonce = key_store.lock().unwrap().transform(dest, &mut chunk, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
+            let nonce = key_store.unwrap().lock().unwrap().transform(dest, &mut chunk, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
             IsEncrypted::True(nonce)
         }
         else {
@@ -180,4 +186,8 @@ impl OutboundGateway {
     }
 }
 
-
+#[derive(Clone)]
+pub enum ToBeEncrypted {
+    True(Arc<Mutex<KeyStore>>),
+    False
+}

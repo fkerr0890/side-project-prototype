@@ -3,9 +3,9 @@ use std::{collections::HashMap, net::SocketAddrV4, sync::{Arc, Mutex}};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{instrument, warn};
 
-use crate::{crypto::KeyStore, message::{DiscoverPeerMessage, DpMessageKind, NumId, Message, Peer}, node::EndpointPair, option_early_return, utils::{TransientMap, TtlType}};
+use crate::{message::{DiscoverPeerMessage, DpMessageKind, NumId, Message, Peer}, node::EndpointPair, option_early_return, utils::{TransientMap, TtlType}};
 
-use super::{EmptyOption, OutboundGateway, DPP_TTL_MILLIS};
+use super::{EmptyOption, OutboundGateway, ToBeEncrypted, DPP_TTL_MILLIS};
 
 pub struct DiscoverPeerProcessor {
     outbound_gateway: OutboundGateway,
@@ -62,8 +62,8 @@ impl DiscoverPeerProcessor {
                 break 'b1 staged_message.peer_list().len();
             }
             let message_staging_clone = self.message_staging.map().clone();
-            let (socket, key_store, dest, myself, id) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), message.origin().unwrap().endpoint_pair, self.outbound_gateway.myself, message.id());
-            self.message_staging.set_timer_with_send_action(message.id(), move || { Self::send_final_response_static(&socket, &key_store, dest, myself, &message_staging_clone, id); });
+            let (socket, dest, myself, id) = (self.outbound_gateway.socket.clone(), message.origin().unwrap().endpoint_pair, self.outbound_gateway.myself, message.id());
+            self.message_staging.set_timer_with_send_action(message.id(), move || { Self::send_final_response_static(&socket, dest, myself, &message_staging_clone, id); });
             0
         };
 
@@ -92,19 +92,18 @@ impl DiscoverPeerProcessor {
     }
 
     fn send_final_response(&self, id: NumId, dest: EndpointPair) {
-        Self::send_final_response_static(&self.outbound_gateway.socket, &self.outbound_gateway.key_store, dest, self.outbound_gateway.myself, self.message_staging.map(), id);
+        Self::send_final_response_static(&self.outbound_gateway.socket, dest, self.outbound_gateway.myself, self.message_staging.map(), id);
     }
 
-    #[instrument(level = "trace", skip(socket, key_store, myself, message_staging))]
-    fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: EndpointPair, myself: Peer, message_staging: &Arc<Mutex<HashMap<NumId, DiscoverPeerMessage>>>, id: NumId) {
+    #[instrument(level = "trace", skip(socket, myself, message_staging))]
+    fn send_final_response_static(socket: &Arc<UdpSocket>, dest: EndpointPair, myself: Peer, message_staging: &Arc<Mutex<HashMap<NumId, DiscoverPeerMessage>>>, id: NumId) {
         let staged_message = {
             let mut message_staging = message_staging.lock().unwrap();
             message_staging.remove(&id)
         };
         if let Some(mut staged_message) = staged_message {
             staged_message.set_kind(DpMessageKind::IveGotSome);
-            OutboundGateway::send_static(socket, key_store, dest.public_endpoint, myself, &mut staged_message, false, false);
-            OutboundGateway::send_static(socket, key_store, dest.private_endpoint, myself, &mut staged_message, false, false);
+            OutboundGateway::send_private_public_static(socket, dest, myself, &mut staged_message, ToBeEncrypted::False, false);
         }
     }
 

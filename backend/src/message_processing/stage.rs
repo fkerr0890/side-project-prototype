@@ -3,7 +3,7 @@ use tokio::{sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
 use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, NumId, InboundMessage, IsEncrypted, Message, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{TransientMap, TtlType}};
 
-use super::{EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
+use super::{EmptyOption, OutboundGateway, ToBeEncrypted, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
     from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, InboundMessage)>,
@@ -81,11 +81,10 @@ impl MessageStaging {
         self.unconfirmed_peers.set_timer(peer.id);
         self.unconfirmed_peers.map().lock().unwrap().insert(peer.id, peer.endpoint_pair);
         let unconfirmed_peers = self.unconfirmed_peers.map().clone();
-        let (socket, key_store, myself) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself);
+        let (socket, myself) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself);
         tokio::spawn(async move {
             while unconfirmed_peers.lock().unwrap().contains_key(&peer.id) {
-                OutboundGateway::send_static(&socket, &key_store, peer.endpoint_pair.public_endpoint, myself, &mut Heartbeat::new(), false, true);
-                OutboundGateway::send_static(&socket, &key_store, peer.endpoint_pair.private_endpoint, myself, &mut Heartbeat::new(), false, true);
+                OutboundGateway::send_private_public_static(&socket, peer.endpoint_pair, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
             }
         });
