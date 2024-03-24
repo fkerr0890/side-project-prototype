@@ -13,7 +13,7 @@ pub use self::discover::DiscoverPeerProcessor;
 pub const SEARCH_TIMEOUT_SECONDS: i64 = 30;
 pub const DPP_TTL_MILLIS: u64 = 250;
 pub const SRP_TTL_SECONDS: u64 = 30;
-pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 3600;
+pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 600;
 pub const HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
 
 pub mod stage;
@@ -73,7 +73,7 @@ impl OutboundGateway {
         Self {
             socket: socket.clone(),
             myself,
-            breadcrumbs: TransientMap::new(ttl),
+            breadcrumbs: TransientMap::new(ttl, false),
             key_store: key_store.clone(),
             peer_ops
         }

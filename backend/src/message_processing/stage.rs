@@ -38,9 +38,9 @@ impl MessageStaging {
             to_dsrp,
             to_dsmp,
             to_dh,
-            message_staging: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
-            message_caching: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)),
-            unconfirmed_peers: TransientMap::new(TtlType::Secs(HEARTBEAT_INTERVAL_SECONDS*2)),
+            message_staging: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS), false),
+            message_caching: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS), false),
+            unconfirmed_peers: TransientMap::new(TtlType::Secs(HEARTBEAT_INTERVAL_SECONDS*2), false),
             outbound_gateway
         }
     }
@@ -66,12 +66,12 @@ impl MessageStaging {
         self.deserialize_message(&message_bytes, false, senders, timestamp);
     }
 
-    fn traverse_nat(&self, peer: Option<Peer>) {
+    fn traverse_nat(&mut self, peer: Option<Peer>) {
         let Some(peer) = peer else { return };
         self.send_nat_heartbeats(peer);
     }
 
-    fn send_nat_heartbeats(&self, peer: Peer) {
+    fn send_nat_heartbeats(&mut self, peer: Peer) {
         if peer.id == self.outbound_gateway.myself.id
             || self.unconfirmed_peers.map().lock().unwrap().contains_key(&peer.id)
             || self.outbound_gateway.peer_ops.as_ref().unwrap().lock().unwrap().has_peer(peer.id) {
@@ -146,7 +146,7 @@ impl MessageStaging {
             if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return }
             message.set_sender(senders.drain().next().unwrap().socket);
             message.set_timestamp(timestamp);
-            trace!(sender = %message.sender(), curr_node = ?self.outbound_gateway.myself, "Received heartbeat");
+            // trace!(sender = %message.sender(), curr_node = ?self.outbound_gateway.myself, "Received heartbeat");
         }
         else if let Ok(mut message) = bincode::deserialize::<StreamMessage>(message_bytes) {
             // if StreamMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }

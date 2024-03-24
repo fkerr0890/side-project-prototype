@@ -20,14 +20,14 @@ async fn basic() {
         // .with_span_events(FmtSpan::NEW)
         .with_max_level(Level::DEBUG).init();
 
-    let regenerate: bool = true;
+    let regenerate: bool = false;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();
     
         let mut introducers: Vec<(Peer, mpsc::Sender<()>)> = Vec::new();
         let num_hosts = 1;
-        let num_nodes: u16 = 30;
+        let num_nodes: u16 = 10;
         let mut rng = rand::thread_rng();
         let mut indices = (0..num_nodes).choose_multiple(&mut rng, num_hosts + 1);
         let start = indices.pop().unwrap();

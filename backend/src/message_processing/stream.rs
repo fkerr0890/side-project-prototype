@@ -22,7 +22,7 @@ impl StreamMessageProcessor
             from_staging,
             local_hosts,
             from_http_handler,
-            active_sessions: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
+            active_sessions: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true),
             dmessage_staging: DMessageStaging::new()
         }
     }
@@ -77,7 +77,17 @@ impl StreamMessageProcessor
             let mut active_sessions = self.active_sessions.map().lock().unwrap();
             let active_session_info = active_sessions.entry(host_name.clone()).or_default();
             let dests = active_session_info.dests();
-            let set_timer = if dests.len() > 0 { self.outbound_gateway.send_request(&mut message, Some(dests)); true } else { false };
+            let set_timer = if dests.len() > 0 {
+                {
+                    let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
+                    for dest in dests.iter() {
+                        key_store.reset_expiration(*dest);
+                    }
+                }
+                self.outbound_gateway.send_request(&mut message, Some(dests)); true
+            } else {
+                false
+            };
             trace!(id = %message.id(), "Pushed");
             let Ok(to_http_handler) = self.from_http_handler.try_recv() else { panic!("Oh fuck nah") };
             active_session_info.push_resource(message, set_timer, to_http_handler);
@@ -108,10 +118,10 @@ impl StreamMessageProcessor
     }
 
     async fn http_response_action(&self, payload: &[u8], host_name: String, id: NumId) -> Option<StreamMessage> {
-        let Ok(request) = bincode::deserialize(payload) else { return None };
+        let request = result_early_return!(bincode::deserialize(payload), None);
         let socket = self.local_hosts.get(&host_name).unwrap();
         let response = http::make_request(request, &socket.to_string()).await;
-        let Ok(response_bytes) = bincode::serialize(&response) else { return None };
+        let response_bytes = result_early_return!(bincode::serialize(&response), None);
         Some(StreamMessage::new(
             host_name,
             id,
@@ -137,7 +147,7 @@ struct ActiveSessionInfo {
 }
 
 impl ActiveSessionInfo {
-    fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS)), resource_queue: VecDeque::new() } }
+    fn new() -> Self { Self { dests: HashSet::new(), cached_messages: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS), false), resource_queue: VecDeque::new() } }
     fn dests(&self) -> HashSet<SocketAddrV4> { self.dests.clone() }
     fn handle_cached_message<'a>(id: NumId, cached_message: Option<&'a mut (StreamMessage, mpsc::UnboundedSender<StreamResponseType>)>) -> Option<&'a mut StreamMessage> {
         let Some(cached_message) = cached_message else {
@@ -214,7 +224,7 @@ pub struct DMessageStaging {
 
 impl DMessageStaging {
     pub fn new() -> Self {
-        Self { message_staging: TransientMap::new(TtlType::Secs(1800)) }
+        Self { message_staging: TransientMap::new(TtlType::Secs(1800), false) }
     }
 
     pub async fn stage_message(&self, payload: Vec<u8>, host_name: String) -> Vec<u8> {

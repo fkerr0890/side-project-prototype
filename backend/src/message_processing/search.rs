@@ -21,7 +21,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             outbound_gateway,
             from_staging,
             to_smp,
-            active_sessions: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
+            active_sessions: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true),
             stop_condition
         }
     }

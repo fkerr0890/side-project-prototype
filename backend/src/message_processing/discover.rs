@@ -1,4 +1,4 @@
-use std::{net::SocketAddrV4, sync::{Arc, Mutex}};
+use std::{collections::HashMap, net::SocketAddrV4, sync::{Arc, Mutex}};
 
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{instrument, warn};
@@ -18,7 +18,7 @@ impl DiscoverPeerProcessor {
         Self {
             outbound_gateway,
             from_staging,
-            message_staging: TransientMap::new(TtlType::Millis(DPP_TTL_MILLIS * 2)),
+            message_staging: TransientMap::new(TtlType::Millis(DPP_TTL_MILLIS * 2), false),
         }
     }
 
@@ -61,7 +61,7 @@ impl DiscoverPeerProcessor {
             if let Some(staged_message) = self.message_staging.map().lock().unwrap().get(&message.id()) {
                 break 'b1 staged_message.peer_list().len();
             }
-            let message_staging_clone = self.message_staging.clone();
+            let message_staging_clone = self.message_staging.map().clone();
             let (socket, key_store, dest, myself, id) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), message.origin().unwrap().endpoint_pair, self.outbound_gateway.myself, message.id());
             self.message_staging.set_timer_with_send_action(message.id(), move || { Self::send_final_response_static(&socket, &key_store, dest, myself, &message_staging_clone, id); });
             0
@@ -92,13 +92,13 @@ impl DiscoverPeerProcessor {
     }
 
     fn send_final_response(&self, id: NumId, dest: EndpointPair) {
-        Self::send_final_response_static(&self.outbound_gateway.socket, &self.outbound_gateway.key_store, dest, self.outbound_gateway.myself, &self.message_staging, id);
+        Self::send_final_response_static(&self.outbound_gateway.socket, &self.outbound_gateway.key_store, dest, self.outbound_gateway.myself, self.message_staging.map(), id);
     }
 
     #[instrument(level = "trace", skip(socket, key_store, myself, message_staging))]
-    fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: EndpointPair, myself: Peer, message_staging: &TransientMap<NumId, DiscoverPeerMessage>, id: NumId) {
+    fn send_final_response_static(socket: &Arc<UdpSocket>, key_store: &Arc<Mutex<KeyStore>>, dest: EndpointPair, myself: Peer, message_staging: &Arc<Mutex<HashMap<NumId, DiscoverPeerMessage>>>, id: NumId) {
         let staged_message = {
-            let mut message_staging = message_staging.map().lock().unwrap();
+            let mut message_staging = message_staging.lock().unwrap();
             message_staging.remove(&id)
         };
         if let Some(mut staged_message) = staged_message {

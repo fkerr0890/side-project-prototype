@@ -2,7 +2,7 @@ use std::{net::SocketAddrV4, sync::mpsc, fmt::Display};
 
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 
-use crate::{message_processing::ACTIVE_SESSION_TTL_SECONDS, utils::{TransientMap, TtlType}};
+use crate::{message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{TransientMap, TtlType}};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
@@ -16,8 +16,8 @@ pub struct KeyStore {
 impl KeyStore {
     pub fn new() -> Self {
         Self {
-            private_keys: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
-            symmetric_keys: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS)),
+            private_keys: TransientMap::new(TtlType::Secs(SRP_TTL_SECONDS), false),
+            symmetric_keys: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true),
             rng: SystemRandom::new()
         }
     }
@@ -83,6 +83,10 @@ impl KeyStore {
         }
         self.symmetric_keys.map().lock().unwrap().insert(index, key_set);
         Ok(())
+    }
+
+    pub fn reset_expiration(&mut self, peer_addr: SocketAddrV4) {
+        self.symmetric_keys.set_timer(peer_addr.to_string());
     }
 }
 
