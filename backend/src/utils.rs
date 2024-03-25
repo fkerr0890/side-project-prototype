@@ -2,14 +2,13 @@ use std::{collections::{HashMap, HashSet}, fmt::{Debug, Display}, hash::Hash, sy
 
 use tokio::{task::AbortHandle, time};
 
-#[derive(Debug)]
-pub struct TransientMap<K: Send + Hash + Eq + Display, V: Send + Debug> {
+pub struct TransientMap<K: Send + Hash + Eq + Display, V: Send> {
     ttl: TtlType,
     map: Arc<Mutex<HashMap<K, V>>>,
     abort_handles: Option<HashMap<K, AbortHandle>>
 }
 
-impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + Debug + 'static> TransientMap<K, V> {
+impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> TransientMap<K, V> {
     pub fn new(ttl: TtlType, extend_timer: bool) -> Self {
         Self {
             ttl,
@@ -56,14 +55,13 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + Debug + 'static>
     pub fn map(&self) -> &Arc<Mutex<HashMap<K, V>>> { &self.map }
 }
 
-#[derive(Debug)]
-pub struct TransientSet<K: Send + Hash + Eq + Display> {
+pub struct TransientSet<K: Send + Hash + Eq> {
     ttl: TtlType,
     set: Arc<Mutex<HashSet<K>>>,
     abort_handles: Option<HashMap<K, AbortHandle>>
 }
 
-impl<K: Send + Hash + Eq + Clone + Display + 'static> TransientSet<K> {
+impl<K: Send + Hash + Eq + Clone + 'static> TransientSet<K> {
     pub fn new(ttl: TtlType, extend_timer: bool) -> Self {
         Self {
             ttl,

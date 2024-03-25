@@ -106,10 +106,11 @@ impl OutboundGateway {
         self.breadcrumbs.map().lock().unwrap().get(id).cloned()
     }
 
-    pub fn send_request(&self, request: &mut(impl Message + Serialize), dests: Option<HashSet<SocketAddrV4>>) {
+    pub fn send_request(&self, request: &mut(impl Message + Serialize), dests: Option<&HashSet<SocketAddrV4>>) {
         let sender = self.get_dest(&request.id());
         if let Some(dests) = dests {
             for dest in dests {
+                let dest = *dest;
                 match sender { Some(s) if s == dest => continue, _ => {}}
                 self.send_individual(dest, request, true, true);
             }
