@@ -4,6 +4,7 @@ use p2p::{self, message::{NumId, Peer}, message_processing::{DPP_TTL_MILLIS, HEA
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::Level;
+use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -17,7 +18,9 @@ async fn basic() {
     }));
 
     tracing_subscriber::fmt()
-        // .with_span_events(FmtSpan::NEW)
+        .with_file(true)
+        .with_line_number(true)
+        .with_span_events(FmtSpan::NEW)
         .with_max_level(Level::DEBUG).init();
 
     let regenerate: bool = false;
@@ -27,7 +30,7 @@ async fn basic() {
     
         let mut introducers: Vec<(Peer, mpsc::Sender<()>)> = Vec::new();
         let num_hosts = 1;
-        let num_nodes: u16 = 10;
+        let num_nodes: u16 = 60;
         let mut rng = rand::thread_rng();
         let mut indices = (0..num_nodes).choose_multiple(&mut rng, num_hosts + 1);
         let start = indices.pop().unwrap();

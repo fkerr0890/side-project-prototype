@@ -46,7 +46,7 @@ impl InboundGateway {
         self.handle_message(&buf[..n], addr);
     }
 
-    #[instrument(level = "trace", skip(self, message_bytes))]
+    // #[instrument(level = "trace", skip(self, message_bytes))]
     fn handle_message(&self, message_bytes: &[u8], addr: SocketAddr) {
         if let SocketAddr::V4(socket) = addr {
             let message = result_early_return!(bincode::deserialize::<InboundMessage>(message_bytes));
@@ -169,7 +169,10 @@ impl OutboundGateway {
 
     fn generate_inbound_message_bytes(key_store: Option<Arc<Mutex<KeyStore>>>, dest: SocketAddrV4, mut chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize), to_be_encrypted: bool) -> Result<Vec<u8>, String> {
         let is_encrypted = if to_be_encrypted {
-            let nonce = key_store.unwrap().lock().unwrap().transform(dest, &mut chunk, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
+            let key_store = key_store.unwrap();
+            let mut key_store = key_store.lock().unwrap();
+            key_store.reset_expiration(dest);
+            let nonce = key_store.transform(dest, &mut chunk, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
             IsEncrypted::True(nonce)
         }
         else {

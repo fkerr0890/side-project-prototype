@@ -49,7 +49,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
             let origin = if sender == origin.endpoint_pair.private_endpoint { sender } else { origin.endpoint_pair.public_endpoint };
             let my_public_key = key_store.requester_public_key(origin);
-            key_store.agree(origin, peer_public_key).unwrap();
+            result_early_return!(key_store.agree(origin, peer_public_key));
             let kind = if is_resource_kind { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) } else { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) };
             let mut key_agreement_message = StreamMessage::new(host_name, id, kind, my_public_key.as_ref().to_vec());
             key_agreement_message.replace_dest(origin);

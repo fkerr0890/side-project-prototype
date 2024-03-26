@@ -108,7 +108,7 @@ impl MessageStaging {
         }
     }
 
-    #[instrument(level = "trace", skip(self, message_bytes))]
+    // #[instrument(level = "trace", skip(self, message_bytes))]
     fn deserialize_message(&mut self, message_bytes: &[u8], was_encrypted: bool, mut senders: HashSet<Sender>, timestamp: String) {
         if let Ok(mut message) = bincode::deserialize::<SearchMessage>(message_bytes) {
             debug!(id = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received search message");
@@ -164,7 +164,7 @@ impl MessageStaging {
         }
     }
 
-    #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
+    // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
     fn stage_message(&mut self, mut inbound_message: InboundMessage) -> Option<Vec<InboundMessage>> {
         let (is_encrypted, sender) = (inbound_message.take_is_encrypted(), inbound_message.separate_parts().sender().socket);
         if let IsEncrypted::True(nonce) = is_encrypted {

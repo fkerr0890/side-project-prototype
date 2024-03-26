@@ -43,15 +43,15 @@ impl StreamMessageProcessor
     #[instrument(level = "trace", skip_all, fields(message.senders = ?message.senders(), message.id = %message.id()))]
     async fn handle_request(&mut self, mut message: StreamMessage) {
         let host_name = message.host_name().to_owned();
-        if message.only_sender() == EndpointPair::default_socket() {
+        let sender = message.only_sender();
+        if sender == EndpointPair::default_socket() {
             let Ok(to_http_handler) = self.from_http_handler.try_recv() else { panic!("Oh fuck nah") };
             self.session_manager.session_logic(IsHost::False((to_http_handler, message)), host_name).await;
         }
         else {
-            let dest = message.only_sender();
-            self.session_manager.session_logic(IsHost::True(dest), host_name).await;
+            self.session_manager.session_logic(IsHost::True(sender), host_name).await;
             let (id, payload, host_name, kind) = message.into_hash_payload_host_name_kind();
-            self.send_response(payload, dest, host_name, id, kind).await;
+            self.send_response(payload, sender, host_name, id, kind).await;
         }
     }
 
@@ -112,8 +112,6 @@ impl SessionManager {
 
         let set_timer = self.renew_dests(active_session_info, &mut is_host);
         if let IsHost::False((to_http_handler, message)) = is_host {
-            let mut active_sessions = self.active_sessions.map().lock().unwrap();
-            let active_session_info = active_sessions.get_mut(&host_name).unwrap(); 
             let id = message.id();
             trace!(%id, "Pushed");
             if active_session_info.push_resource(message, set_timer, to_http_handler) {
@@ -123,10 +121,10 @@ impl SessionManager {
     }
 
     fn renew_dests(&self, active_session_info: &mut ActiveSessionInfo, is_host: &mut IsHost) -> bool {
-        let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
         match is_host {
             IsHost::True(dest) => {
                 active_session_info.dests.insert(*dest);
+                let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
                 key_store.reset_expiration(*dest);
                 false
             },
@@ -135,8 +133,7 @@ impl SessionManager {
                 let set_cached_message_timer = dests.len() > 0;
                 for dest in dests {
                     self.outbound_gateway.send_individual(dest, message, true, true);
-                    active_session_info.dests.insert(dest);                    
-                    key_store.reset_expiration(dest);
+                    active_session_info.dests.insert(dest);
                 }
                 set_cached_message_timer
             }
@@ -160,8 +157,8 @@ impl SessionManager {
     }
 
     fn keep_peer_conns_alive(dests: &HashSet<SocketAddrV4>, socket: &Arc<UdpSocket>, myself: Peer) {
+        //TODO: Don't send to dests that are already peers
         for peer in dests {
-            debug!(%peer, ?myself, "Sending stream session heartbeat");
             OutboundGateway::send_static(socket, *peer, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
         }
     }
