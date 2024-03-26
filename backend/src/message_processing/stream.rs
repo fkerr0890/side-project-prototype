@@ -1,5 +1,5 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV4}, sync::Arc, time::Duration};
-use tokio::{fs, net::UdpSocket, sync::mpsc::{self, UnboundedSender}, time::sleep};
+use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
 use crate::{http::{self, SerdeHttpResponse}, message::{Heartbeat, Message, NumId, Peer, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::ToBeEncrypted, node::EndpointPair, option_early_return, result_early_return, utils::{TransientMap, TransientSet, TtlType}};
 use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
@@ -102,7 +102,7 @@ impl SessionManager {
         Self { active_sessions: TransientMap::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true), outbound_gateway }
     }
 
-    async fn session_logic(&mut self, is_host: IsHost, host_name: String) {
+    async fn session_logic(&mut self, mut is_host: IsHost, host_name: String) {
         self.active_sessions.set_timer(host_name.clone());
         let mut active_sessions = self.active_sessions.map().lock().unwrap();
         if active_sessions.len() == 0 {
@@ -110,8 +110,8 @@ impl SessionManager {
         }
         let active_session_info = active_sessions.entry(host_name.clone()).or_default();
 
-        let requester_data = self.renew_dests(active_session_info, is_host);
-        if let Some((set_timer, to_http_handler, message)) = requester_data {
+        let set_timer = self.renew_dests(active_session_info, &mut is_host);
+        if let IsHost::False((to_http_handler, message)) = is_host {
             let mut active_sessions = self.active_sessions.map().lock().unwrap();
             let active_session_info = active_sessions.get_mut(&host_name).unwrap(); 
             let id = message.id();
@@ -122,23 +122,23 @@ impl SessionManager {
         }
     }
 
-    fn renew_dests(&self, active_session_info: &mut ActiveSessionInfo, is_host: IsHost) -> Option<(bool, UnboundedSender<StreamResponseType>, StreamMessage)> {
+    fn renew_dests(&self, active_session_info: &mut ActiveSessionInfo, is_host: &mut IsHost) -> bool {
         let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
         match is_host {
             IsHost::True(dest) => {
-                active_session_info.dests.insert(dest);
-                key_store.reset_expiration(dest);
-                None
+                active_session_info.dests.insert(*dest);
+                key_store.reset_expiration(*dest);
+                false
             },
-            IsHost::False((to_http_handler, mut message)) => {
+            IsHost::False((_, ref mut message)) => {
                 let dests = active_session_info.dests_cloned();
                 let set_cached_message_timer = dests.len() > 0;
                 for dest in dests {
-                    self.outbound_gateway.send_individual(dest, &mut message, true, true);
+                    self.outbound_gateway.send_individual(dest, message, true, true);
                     active_session_info.dests.insert(dest);                    
                     key_store.reset_expiration(dest);
                 }
-                Some((set_cached_message_timer, to_http_handler, message))
+                set_cached_message_timer
             }
         }
     }
