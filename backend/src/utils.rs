@@ -26,15 +26,10 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
     }
 
     fn start_timer(&mut self, key: K, send_action: Option<impl FnMut() + Send + 'static>) -> bool {
-        let contains_key = if self.map.lock().unwrap().contains_key(&key) {
-            if let Some(ref mut abort_handles) = self.abort_handles {
-                abort_handles.remove(&key).unwrap().abort();
-                true
-            }
-            else {
-                return false;
-            }
-        } else { false };
+        let (contains_key, early_return) = self.logic(&key);
+        if early_return {
+            return contains_key;
+        }
         // println!("TransientMap {}: Adding {}", name, key);
         let (map, ttl, key_clone) = (self.map.clone(), self.ttl, key.clone());
         let abort_handle = tokio::spawn(async move {
@@ -53,6 +48,18 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
     }
 
     pub fn map(&self) -> &Arc<Mutex<HashMap<K, V>>> { &self.map }
+
+    fn logic(&mut self, key: &K) -> (bool, bool) {
+        let map = self.map.lock().unwrap();
+        if !map.contains_key(key) {
+            return (false, false);
+        }
+        if let Some(ref mut abort_handles) = self.abort_handles {
+            abort_handles.remove(key).unwrap().abort();
+            return (true, false);
+        }
+        return (true, true);
+    }
 }
 
 pub struct TransientSet<K: Send + Hash + Eq> {
@@ -71,29 +78,36 @@ impl<K: Send + Hash + Eq + Clone + 'static> TransientSet<K> {
     }
 
     pub fn insert(&mut self, key: K) -> bool {
-        let contains_key = if self.set.lock().unwrap().contains(&key) {
-            if let Some(ref mut abort_handles) = self.abort_handles {
-                abort_handles.remove(&key).unwrap().abort();
-                true
-            }
-            else {
-                return false;
-            }
-        } else { false };
-        let (set, ttl, key_clone) = (self.set.clone(), self.ttl, key.clone());
+        let (contains_key, early_return) = self.insert_logic(key.clone());
+        if early_return {
+            return contains_key;
+        }
+        let (set_clone, ttl, key_clone) = (self.set.clone(), self.ttl, key.clone());
         let abort_handle = tokio::spawn(async move {
             ttl.sleep().await;
             // println!("TransientSet: Removing {}", key_owned);
-            set.lock().unwrap().remove(&key_clone);
+            set_clone.lock().unwrap().remove(&key_clone);
         }).abort_handle();
         if let Some(ref mut abort_handles) = self.abort_handles {
-            abort_handles.insert(key.clone(), abort_handle);
+            abort_handles.insert(key, abort_handle);
         }
-        self.set.lock().unwrap().insert(key);
         !contains_key
     }
 
     pub fn set(&self) -> &Arc<Mutex<HashSet<K>>> { &self.set }
+
+    fn insert_logic(&mut self, key: K) -> (bool, bool) {
+        let mut set = self.set.lock().unwrap();
+        if !set.contains(&key) {
+            set.insert(key);
+            return (false, false);
+        }
+        if let Some(ref mut abort_handles) = self.abort_handles {
+            abort_handles.remove(&key).unwrap().abort();
+            return (true, false);
+        }
+        return (true, true);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -92,7 +92,7 @@ impl Node {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
-                heartbeat_gateway.send_request(&mut Heartbeat::new(), None);
+                heartbeat_gateway.send_request(&mut Heartbeat::new());
             }
         });
 

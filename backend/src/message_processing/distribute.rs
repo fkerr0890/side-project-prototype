@@ -32,7 +32,7 @@ impl DistributionHandler {
         hop_count -= 1;
         if hop_count > 0 {
             debug!("Propagating distribution");
-            self.outbound_gateway.send_request(&mut DistributionMessage::new(id, hop_count, host_name), None);
+            self.outbound_gateway.send_request(&mut DistributionMessage::new(id, hop_count, host_name));
         }
         Some(())
     }

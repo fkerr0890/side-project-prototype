@@ -47,7 +47,7 @@ impl DiscoverPeerProcessor {
             self.return_response(hairpin_response, Some(request.sender()));
         }
         else if self.outbound_gateway.try_add_breadcrumb(Some(hairpin_response), request.id(), sender) {
-            self.outbound_gateway.send_request(&mut request, None);
+            self.outbound_gateway.send_request(&mut request);
         }
     }
 

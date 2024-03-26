@@ -37,7 +37,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let search_response = option_early_return!(self.construct_search_response(id, origin, host_name, is_resource_kind));
             return self.return_search_responses(search_response, is_resource_kind);
         }
-        self.outbound_gateway.send_request(&mut search_request, None);
+        self.outbound_gateway.send_request(&mut search_request);
     }
 
     #[instrument(level = "trace", skip_all, fields(search_response.sender = %search_response.sender(), search_response.id = %search_response.id()))]

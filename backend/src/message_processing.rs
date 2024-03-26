@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
+use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use ring::aead;
@@ -106,20 +106,12 @@ impl OutboundGateway {
         self.breadcrumbs.map().lock().unwrap().get(id).cloned()
     }
 
-    pub fn send_request(&self, request: &mut(impl Message + Serialize), dests: Option<&HashSet<SocketAddrV4>>) {
+    pub fn send_request(&self, request: &mut(impl Message + Serialize)) {
         let sender = self.get_dest(&request.id());
-        if let Some(dests) = dests {
-            for dest in dests {
-                let dest = *dest;
-                match sender { Some(s) if s == dest => continue, _ => {}}
-                self.send_individual(dest, request, true, true);
-            }
-        } else {
-            for peer in self.peer_ops.as_ref().unwrap().lock().unwrap().peers() {
-                match sender { Some(s) if s == peer.public_endpoint || s == peer.private_endpoint => continue, _ => {}}
-                self.send(peer, request, false, true);
-            }
-        };
+        for peer in self.peer_ops.as_ref().unwrap().lock().unwrap().peers() {
+            match sender { Some(s) if s == peer.public_endpoint || s == peer.private_endpoint => continue, _ => {}}
+            self.send(peer, request, false, true);
+        }
     }
 
     #[instrument(level = "trace", skip(self))]
