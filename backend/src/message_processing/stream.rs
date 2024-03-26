@@ -143,6 +143,7 @@ impl SessionManager {
         }
     }
     
+    #[instrument(level = "trace", skip(self))]
     fn renew_sessions(&self) {
         let (active_sessions, socket, myself) = (self.active_sessions.map().clone(), self.outbound_gateway.socket.clone(), self.outbound_gateway.myself);
         tokio::spawn(async move {
@@ -160,6 +161,7 @@ impl SessionManager {
 
     fn keep_peer_conns_alive(dests: &HashSet<SocketAddrV4>, socket: &Arc<UdpSocket>, myself: Peer) {
         for peer in dests {
+            debug!(%peer, ?myself, "Sending stream session heartbeat");
             OutboundGateway::send_static(socket, *peer, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
         }
     }
@@ -295,16 +297,16 @@ impl Default for ActiveSessionInfo {
     }
 }
 
-pub struct DMessageStaging {
+struct DMessageStaging {
     message_staging: TransientMap<String, Vec<Vec<u8>>>
 }
 
 impl DMessageStaging {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { message_staging: TransientMap::new(TtlType::Secs(1800), false) }
     }
 
-    pub async fn stage_message(&self, payload: Vec<u8>, host_name: String) -> Vec<u8> {
+    async fn stage_message(&self, payload: Vec<u8>, host_name: String) -> Vec<u8> {
         if payload.len() > 0 {
             self.message_staging.map().lock().unwrap().entry(host_name).or_default().push(payload);
             Vec::with_capacity(0)
