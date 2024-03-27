@@ -5,7 +5,7 @@ use tokio::{task::AbortHandle, time};
 pub struct TransientMap<K: Send + Hash + Eq + Display, V: Send> {
     ttl: TtlType,
     map: Arc<Mutex<HashMap<K, V>>>,
-    abort_handles: Option<HashMap<K, AbortHandle>>
+    abort_handles: Option<Arc<Mutex<HashMap<K, AbortHandle>>>>
 }
 
 impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> TransientMap<K, V> {
@@ -13,7 +13,15 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
         Self {
             ttl,
             map: Arc::new(Mutex::new(HashMap::new())),
-            abort_handles: if extend_timer { Some(HashMap::new()) } else { None }
+            abort_handles: if extend_timer { Some(Arc::new(Mutex::new(HashMap::new()))) } else { None }
+        }
+    }
+
+    pub fn from_existing(existing: &Self, ttl: TtlType) -> Self {
+        Self {
+            ttl,
+            map: existing.map.clone(),
+            abort_handles: existing.abort_handles.as_ref().and_then(|arc| Some(arc.clone()))
         }
     }
 
@@ -26,8 +34,9 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
     }
 
     fn start_timer(&mut self, key: K, send_action: Option<impl FnMut() + Send + 'static>) -> bool {
+        let mut abort_handles = self.abort_handles.as_mut().and_then(|mutex| Some(mutex.lock().unwrap()));
         let contains_key = if self.map.lock().unwrap().contains_key(&key) {
-            if let Some(ref mut abort_handles) = self.abort_handles {
+            if let Some(ref mut abort_handles) = abort_handles {
                 abort_handles.remove(&key).unwrap().abort();
                 true
             }
@@ -41,12 +50,16 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
             ttl.sleep().await;
             if let Some(mut send_action) = send_action {
                 send_action();
+                tokio::spawn(async move {
+                    time::sleep(Duration::from_secs(2)).await;
+                    map.lock().unwrap().remove(&key_clone);
+                });
             }
             else {
                 map.lock().unwrap().remove(&key_clone);
             }
         }).abort_handle();
-        if let Some(ref mut abort_handles) = self.abort_handles {
+        if let Some(mut abort_handles) = abort_handles {
             abort_handles.insert(key, abort_handle);
         }
         !contains_key
@@ -58,7 +71,7 @@ impl<K: Send + Hash + Eq + Clone + Display + 'static, V: Send + 'static> Transie
 pub struct TransientSet<K: Send + Hash + Eq> {
     ttl: TtlType,
     set: Arc<Mutex<HashSet<K>>>,
-    abort_handles: Option<HashMap<K, AbortHandle>>
+    abort_handles: Option<Arc<Mutex<HashMap<K, AbortHandle>>>>
 }
 
 impl<K: Send + Hash + Eq + Clone + 'static> TransientSet<K> {
@@ -66,15 +79,16 @@ impl<K: Send + Hash + Eq + Clone + 'static> TransientSet<K> {
         Self {
             ttl,
             set: Arc::new(Mutex::new(HashSet::new())),
-            abort_handles: if extend_timer { Some(HashMap::new()) } else { None }
+            abort_handles: if extend_timer { Some(Arc::new(Mutex::new(HashMap::new()))) } else { None }
         }
     }
 
     pub fn insert(&mut self, key: K) -> bool {
+        let mut abort_handles = self.abort_handles.as_mut().and_then(|mutex| Some(mutex.lock().unwrap()));
         let contains_key = {
             let mut set = self.set.lock().unwrap();
             if set.contains(&key) {
-                if let Some(ref mut abort_handles) = self.abort_handles {
+                if let Some(ref mut abort_handles) = abort_handles {
                     abort_handles.remove(&key).unwrap().abort();
                     true
                 }
@@ -93,7 +107,7 @@ impl<K: Send + Hash + Eq + Clone + 'static> TransientSet<K> {
             // println!("TransientSet: Removing {}", key_owned);
             set.lock().unwrap().remove(&key_clone);
         }).abort_handle();
-        if let Some(ref mut abort_handles) = self.abort_handles {
+        if let Some(ref mut abort_handles) = abort_handles {
             abort_handles.insert(key, abort_handle);
         }
         !contains_key
@@ -118,9 +132,15 @@ impl TtlType {
 
 #[macro_export]
 macro_rules! option_early_return {
-    ($expr:expr, $ret_expr:expr) => {
+    ($expr:expr, $ret_value:literal) => {
         {
-            let Some(val) = $expr else { $ret_expr; return };
+            let Some(val) = $expr else { return $ret_value };
+            val
+        }
+    };
+    ($expr:expr, $ret_action:expr) => {
+        {
+            let Some(val) = $expr else { $ret_action; return };
             val
         }
     };

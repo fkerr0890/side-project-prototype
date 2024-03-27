@@ -1,38 +1,41 @@
 use std::fmt::Display;
 
 use tokio::{fs, sync::mpsc};
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
 use crate::{http::ServerContext, message::{DistributionMessage, NumId, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, result_early_return};
 
-use super::{stream::StreamResponseType, EmptyOption, OutboundGateway};
+use super::{stream::StreamResponseType, BreadcrumbService, EmptyOption, OutboundGateway};
 
 pub struct DistributionHandler {
     from_staging: mpsc::UnboundedReceiver<DistributionMessage>,
     to_srp: mpsc::UnboundedSender<SearchMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<StreamResponseType>>,
-    outbound_gateway: OutboundGateway
+    outbound_gateway: OutboundGateway,
+    breadcrumb_service: BreadcrumbService
 }
 impl DistributionHandler {
-    pub fn new(from_staging: mpsc::UnboundedReceiver<DistributionMessage>, to_srp: mpsc::UnboundedSender<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<StreamResponseType>>, outbound_gateway: OutboundGateway) -> Self {
-        Self { from_staging, to_srp, to_smp, tx_to_smp, outbound_gateway }
+    pub fn new(from_staging: mpsc::UnboundedReceiver<DistributionMessage>, to_srp: mpsc::UnboundedSender<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<StreamResponseType>>, outbound_gateway: OutboundGateway, breadcrumb_service: BreadcrumbService) -> Self {
+        Self { from_staging, to_srp, to_smp, tx_to_smp, outbound_gateway, breadcrumb_service }
     }
     
     #[instrument(level = "trace", skip(self))]
     pub async fn receive(&mut self) -> EmptyOption {
         let message = self.from_staging.recv().await?;
-        if message.hop_count() <= 0 || !self.outbound_gateway.try_add_breadcrumb(None, message.id(), message.sender()) {
+        if message.hop_count() <= 0 {
+            error!(hop_count = message.hop_count(), "Invalid hop count");
             return Some(());
         }
         let context = ServerContext::new(self.to_srp.clone(), self.to_smp.clone(), self.tx_to_smp.clone());
-        let (host_name, mut hop_count, id) = message.into_host_name_hop_count_id();
+        let (host_name, mut hop_count, id, sender) = message.into_host_name_hop_count_id_sender();
+        self.breadcrumb_service.remove_breadcrumb(&id);
         result_early_return!(context.distribute_app(host_name.clone(), id).await, Some(()));
         hop_count -= 1;
         if hop_count > 0 {
             debug!("Propagating distribution");
-            self.outbound_gateway.send_request(&mut DistributionMessage::new(id, hop_count, host_name));
+            self.outbound_gateway.send_request(&mut DistributionMessage::new(id, hop_count, host_name), Some(sender));
         }
         Some(())
     }
@@ -61,7 +64,7 @@ impl ServerContext {
             if id != response_id {
                 return Err(Error::IdMismatch);
             }
-            debug!("Distributed {} of {}", i, chunks_len)
+            info!("Distributed {} of {}", i, chunks_len)
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.tx_to_smp.send(tx).unwrap();

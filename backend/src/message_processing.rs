@@ -1,9 +1,9 @@
-use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
+use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use ring::aead;
 use serde::Serialize;
-use tokio::{net::UdpSocket, sync::mpsc, time};
+use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info, instrument};
 
 use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, NumId, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{TransientMap, TtlType}};
@@ -13,8 +13,9 @@ pub use self::discover::DiscoverPeerProcessor;
 pub const SEARCH_TIMEOUT_SECONDS: i64 = 30;
 pub const DPP_TTL_MILLIS: u64 = 250;
 pub const SRP_TTL_SECONDS: u64 = 30;
-pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 600;
+pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 10;
 pub const HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
+pub const DISTRIBUTION_TTL_SECONDS: u64 = 43200;
 
 pub mod stage;
 pub mod stream;
@@ -63,53 +64,23 @@ pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str,
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
     myself: Peer,
-    breadcrumbs: TransientMap<NumId, SocketAddrV4>,
     key_store: Arc<Mutex<KeyStore>>,
     peer_ops: Option<Arc<Mutex<PeerOps>>>
 }
 
 impl OutboundGateway {
-    pub fn new(socket: Arc<UdpSocket>, myself: Peer, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>, ttl: TtlType) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, myself: Peer, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>) -> Self {
         Self {
             socket: socket.clone(),
             myself,
-            breadcrumbs: TransientMap::new(ttl, false),
             key_store: key_store.clone(),
             peer_ops
         }
-    } 
-
-    fn try_add_breadcrumb(&mut self, early_return_message: Option<DiscoverPeerMessage>, id: NumId, dest: SocketAddrV4) -> bool {
-        let endpoint_pair = self.myself.endpoint_pair;
-        let (early_return_dest, myself) = (endpoint_pair.private_endpoint, self.myself);
-        let (socket, breadcrumbs) = (self.socket.clone(), self.breadcrumbs.map().clone());
-        let contains_key = if let Some(mut message) = early_return_message {
-            self.breadcrumbs.set_timer_with_send_action(id, move || {
-                Self::send_static(&socket, early_return_dest, myself, &mut message, ToBeEncrypted::False, false);
-                let breadcrumbs = breadcrumbs.clone();
-                tokio::spawn(async move {
-                    time::sleep(Duration::from_secs(2)).await;
-                    breadcrumbs.lock().unwrap().remove(&id);
-                });
-            })
-        }
-        else {
-            self.breadcrumbs.set_timer(id)
-        };
-        if contains_key {
-            self.breadcrumbs.map().lock().unwrap().insert(id, dest);
-        }
-        contains_key
     }
 
-    fn get_dest(&self, id: &NumId) -> Option<SocketAddrV4> {
-        self.breadcrumbs.map().lock().unwrap().get(id).cloned()
-    }
-
-    pub fn send_request(&self, request: &mut(impl Message + Serialize)) {
-        let sender = self.get_dest(&request.id());
+    pub fn send_request(&self, request: &mut(impl Message + Serialize), prev_sender: Option<SocketAddrV4>) {
         for peer in self.peer_ops.as_ref().unwrap().lock().unwrap().peers() {
-            match sender { Some(s) if s == peer.public_endpoint || s == peer.private_endpoint => continue, _ => {}}
+            match prev_sender { Some(s) if s == peer.public_endpoint || s == peer.private_endpoint => continue, _ => {}}
             self.send(peer, request, false, true);
         }
     }
@@ -187,3 +158,44 @@ pub enum ToBeEncrypted {
     True(Arc<Mutex<KeyStore>>),
     False
 }
+
+pub struct BreadcrumbService {
+    breadcrumbs: TransientMap<NumId, SocketAddrV4>,
+}
+
+impl BreadcrumbService {
+    pub fn new(ttl: TtlType) -> Self { Self { breadcrumbs: TransientMap::new(ttl, false) } }
+
+    pub fn clone(&self, ttl: TtlType) -> Self { Self { breadcrumbs: TransientMap::from_existing(&self.breadcrumbs, ttl) } }
+
+    pub fn try_add_breadcrumb(&mut self, early_return_context: Option<EarlyReturnContext>, id: NumId, dest: SocketAddrV4) -> bool {
+        let contains_key = if let Some(mut context) = early_return_context {
+            self.breadcrumbs.set_timer_with_send_action(id, move || {
+                let (ref mut message, dest, myself, ref socket) = context;
+                OutboundGateway::send_static(socket, dest, myself, message, ToBeEncrypted::False, false);
+            })
+        }
+        else {
+            self.breadcrumbs.set_timer(id)
+        };
+        if contains_key {
+            self.breadcrumbs.map().lock().unwrap().insert(id, dest);
+        }
+        contains_key
+    }
+
+    pub fn get_dest(&self, id: &NumId) -> Option<SocketAddrV4> {
+        self.breadcrumbs.map().lock().unwrap().get(id).copied()
+    }
+
+    pub fn remove_breadcrumb(&self, id: &NumId) {
+        self.breadcrumbs.map().lock().unwrap().remove(id);
+    }
+}
+
+pub type EarlyReturnContext = (
+    DiscoverPeerMessage,
+    SocketAddrV4,
+    Peer,
+    Arc<UdpSocket>
+);

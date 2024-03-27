@@ -333,7 +333,7 @@ impl DistributionMessage {
     pub fn sender(&self) -> SocketAddrV4 { self.sender }
     pub fn hop_count(&self) -> u16 { self.hop_count }
     pub fn host_name(&self) -> &String { &self.host_name }
-    pub fn into_host_name_hop_count_id(self) -> (String, u16, NumId) { (self.host_name, self.hop_count, self.id) }
+    pub fn into_host_name_hop_count_id_sender(self) -> (String, u16, NumId, SocketAddrV4) { (self.host_name, self.hop_count, self.id, self.sender) }
 
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }

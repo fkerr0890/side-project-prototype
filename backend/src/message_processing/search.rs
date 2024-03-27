@@ -5,10 +5,11 @@ use tracing::{debug, instrument, error};
 
 use crate::{message::{NumId, Message, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, option_early_return, result_early_return, utils::{TransientSet, TtlType}};
 
-use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
+use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
 pub struct SearchRequestProcessor<F: Fn(&SearchMessage) -> bool> {
     outbound_gateway: OutboundGateway,
+    breadcrumb_service: BreadcrumbService,
     from_staging: mpsc::UnboundedReceiver<SearchMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
     active_sessions: TransientSet<String>,
@@ -16,9 +17,10 @@ pub struct SearchRequestProcessor<F: Fn(&SearchMessage) -> bool> {
 }
 
 impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
-    pub fn new(outbound_gateway: OutboundGateway, from_staging: mpsc::UnboundedReceiver<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, stop_condition: F) -> Self {
+    pub fn new(outbound_gateway: OutboundGateway, breadcrumb_service: BreadcrumbService, from_staging: mpsc::UnboundedReceiver<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, stop_condition: F) -> Self {
         Self {
             outbound_gateway,
+            breadcrumb_service,
             from_staging,
             to_smp,
             active_sessions: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true),
@@ -28,7 +30,8 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
 
     #[instrument(level = "trace", skip_all, fields(search_request.sender = %search_request.sender(), search_request.id = %search_request.id()))]
     pub fn handle_search_request(&mut self, mut search_request: SearchMessage, is_resource_kind: bool) {
-        if !self.outbound_gateway.try_add_breadcrumb(None, search_request.id(), search_request.sender()) {
+        let sender = search_request.sender();
+        if !self.breadcrumb_service.try_add_breadcrumb(None, search_request.id(), sender) {
             return;
         }
         if (self.stop_condition)(&search_request) {
@@ -37,12 +40,12 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let search_response = option_early_return!(self.construct_search_response(id, origin, host_name, is_resource_kind));
             return self.return_search_responses(search_response, is_resource_kind);
         }
-        self.outbound_gateway.send_request(&mut search_request);
+        self.outbound_gateway.send_request(&mut search_request, Some(sender));
     }
 
     #[instrument(level = "trace", skip_all, fields(search_response.sender = %search_response.sender(), search_response.id = %search_response.id()))]
     fn return_search_responses(&mut self, mut search_response: SearchMessage, is_resource_kind: bool) {
-        let dest = option_early_return!(self.outbound_gateway.get_dest(&search_response.id()));
+        let dest = option_early_return!(self.breadcrumb_service.get_dest(&search_response.id()));
         if dest == EndpointPair::default_socket() {
             let sender = search_response.sender();
             let (id, host_name, peer_public_key, origin) = search_response.into_id_host_name_public_key_origin();
