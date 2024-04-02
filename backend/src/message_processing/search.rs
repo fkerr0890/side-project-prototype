@@ -3,7 +3,7 @@ use std::net::SocketAddrV4;
 use tokio::sync::mpsc;
 use tracing::{debug, instrument, error};
 
-use crate::{message::{NumId, Message, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, option_early_return, result_early_return, utils::{TransientSet, TtlType}};
+use crate::{message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{TransientSet, TtlType}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
@@ -28,9 +28,9 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
         }
     }
 
-    #[instrument(level = "trace", skip_all, fields(search_request.sender = %search_request.sender(), search_request.id = %search_request.id()))]
+    #[instrument(level = "trace", skip_all, fields(search_request.sender = ?search_request.sender(), search_request.id = %search_request.id()))]
     pub fn handle_search_request(&mut self, mut search_request: SearchMessage, is_resource_kind: bool) {
-        let sender = search_request.sender();
+        let sender = search_request.sender_option();
         if !self.breadcrumb_service.try_add_breadcrumb(None, search_request.id(), sender) {
             return;
         }
@@ -40,26 +40,26 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let search_response = option_early_return!(self.construct_search_response(id, origin, host_name, is_resource_kind));
             return self.return_search_responses(search_response, is_resource_kind);
         }
-        self.outbound_gateway.send_request(&mut search_request, Some(sender));
+        self.outbound_gateway.send_request(&mut search_request, sender);
     }
 
-    #[instrument(level = "trace", skip_all, fields(search_response.sender = %search_response.sender(), search_response.id = %search_response.id()))]
+    #[instrument(level = "trace", skip_all, fields(search_response.sender = ?search_response.sender(), search_response.id = %search_response.id()))]
     fn return_search_responses(&mut self, mut search_response: SearchMessage, is_resource_kind: bool) {
         let dest = option_early_return!(self.breadcrumb_service.get_dest(&search_response.id()));
-        if dest == EndpointPair::default_socket() {
+        if let Some(dest) = dest {
+            self.outbound_gateway.send_individual(dest.socket, &mut search_response, false, false);
+        }
+        else {
             let sender = search_response.sender();
             let (id, host_name, peer_public_key, origin) = search_response.into_id_host_name_public_key_origin();
             let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
-            let origin = if sender == origin.endpoint_pair.private_endpoint { sender } else { origin.endpoint_pair.public_endpoint };
-            let my_public_key = key_store.requester_public_key(origin);
-            result_early_return!(key_store.agree(origin, peer_public_key));
+            let origin = if sender.socket == origin.endpoint_pair.private_endpoint { sender } else { Sender::new(origin.endpoint_pair.public_endpoint, origin.id) };
+            let my_public_key = key_store.requester_public_key(origin.socket);
+            result_early_return!(key_store.agree(origin.socket, peer_public_key));
             let kind = if is_resource_kind { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) } else { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) };
             let mut key_agreement_message = StreamMessage::new(host_name, id, kind, my_public_key.as_ref().to_vec());
-            key_agreement_message.replace_dest(origin);
+            key_agreement_message.set_sender(origin);
             result_early_return!(self.to_smp.send(key_agreement_message));
-        }
-        else {
-            self.outbound_gateway.send_individual(dest, &mut search_response, false, false);
         }
     }
     

@@ -4,7 +4,7 @@ use tokio::{fs, sync::mpsc};
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
-use crate::{http::ServerContext, message::{DistributionMessage, NumId, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, node::EndpointPair, result_early_return};
+use crate::{http::ServerContext, message::{DistributionMessage, NumId, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, result_early_return};
 
 use super::{stream::StreamResponseType, BreadcrumbService, EmptyOption, OutboundGateway};
 
@@ -51,8 +51,7 @@ impl ServerContext {
         let mut sent_search = false;
         for (i, chunk) in chunks.enumerate() {
             let id = if sent_search { NumId(Uuid::new_v4().as_u128()) } else { search_message.id() };
-            let mut stream_message = StreamMessage::new(search_message.host_name().clone(), id, StreamMessageKind::Distribution(StreamMessageInnerKind::Request), chunk.to_vec());
-            stream_message.set_sender(EndpointPair::default_socket());
+            let stream_message = StreamMessage::new(search_message.host_name().clone(), id, StreamMessageKind::Distribution(StreamMessageInnerKind::Request), chunk.to_vec());
             let (tx, mut rx) = mpsc::unbounded_channel();
             self.tx_to_smp.send(tx).unwrap();
             self.to_smp.send(stream_message).unwrap();
@@ -68,8 +67,7 @@ impl ServerContext {
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
         self.tx_to_smp.send(tx).unwrap();
-        let mut final_message = StreamMessage::new(search_message.host_name().clone(), NumId(Uuid::new_v4().as_u128()), StreamMessageKind::Distribution(StreamMessageInnerKind::Request), Vec::with_capacity(0));
-        final_message.set_sender(EndpointPair::default_socket());
+        let final_message = StreamMessage::new(search_message.host_name().clone(), NumId(Uuid::new_v4().as_u128()), StreamMessageKind::Distribution(StreamMessageInnerKind::Request), Vec::with_capacity(0));
         self.to_smp.send(final_message).unwrap();
         let result = rx.recv().await.unwrap().unwrap_distribution().0;
         if result == 1 {

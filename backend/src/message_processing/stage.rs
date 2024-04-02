@@ -74,7 +74,7 @@ impl MessageStaging {
     fn send_nat_heartbeats(&mut self, peer: Peer) {
         if peer.id == self.outbound_gateway.myself.id
             || self.unconfirmed_peers.map().lock().unwrap().contains_key(&peer.id)
-            || self.outbound_gateway.peer_ops.as_ref().unwrap().lock().unwrap().has_peer(peer.id) {
+            || self.outbound_gateway.peer_ops.lock().unwrap().has_peer(peer.id) {
             return;
         }
         // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
@@ -90,11 +90,11 @@ impl MessageStaging {
         });
     }
 
-    #[instrument(level = "trace", skip_all, fields(message.sender = %message.senders()[0], message.host_name = message.host_name()))]
+    #[instrument(level = "trace", skip_all, fields(message.sender = ?message.senders()[0], message.host_name = message.host_name()))]
     fn handle_key_agreement(&mut self, mut message: StreamMessage) {
-        let sender = message.only_sender();
+        let sender = message.only_sender().unwrap();
         let (id, peer_public_key) = message.into_hash_payload();
-        result_early_return!(self.outbound_gateway.key_store.lock().unwrap().agree(sender, peer_public_key));
+        result_early_return!(self.outbound_gateway.key_store.lock().unwrap().agree(sender.socket, peer_public_key));
         let cached_messages = self.message_caching.map().lock().unwrap().remove(&id);
         if let Some(cached_messages) = cached_messages {
             debug!("Staging cached messages");
@@ -113,7 +113,7 @@ impl MessageStaging {
         if let Ok(mut message) = bincode::deserialize::<SearchMessage>(message_bytes) {
             debug!(id = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received search message");
             if SearchMessage::ENCRYPTION_REQUIRED && !was_encrypted { return }
-            message.set_sender(senders.drain().next().unwrap().socket);
+            message.set_sender(senders.drain().next().unwrap());
             self.traverse_nat(message.origin());
             message.set_timestamp(timestamp);
             result_early_return!(match message {
@@ -130,27 +130,27 @@ impl MessageStaging {
                 }
                 return;
             }
-            message.set_sender(senders.drain().next().unwrap().socket);
+            message.set_sender(senders.drain().next().unwrap());
             self.traverse_nat(message.origin());
             message.set_timestamp(timestamp);
             result_early_return!(self.to_dpp.send(message));
         }
         else if let Ok(mut message) = bincode::deserialize::<DistributionMessage>(message_bytes) {
             if DiscoverPeerMessage::ENCRYPTION_REQUIRED && !was_encrypted { return }
-            message.set_sender(senders.drain().next().unwrap().socket);
+            message.set_sender(senders.drain().next().unwrap());
             message.set_timestamp(timestamp);
             result_early_return!(self.to_dh.send(message));
         }
         else if let Ok(mut message) = bincode::deserialize::<Heartbeat>(message_bytes) {
             if Heartbeat::ENCRYPTION_REQUIRED && !was_encrypted { return }
-            message.set_sender(senders.drain().next().unwrap().socket);
+            message.set_sender(senders.drain().next().unwrap());
             message.set_timestamp(timestamp);
             // trace!(sender = %message.sender(), curr_node = ?self.outbound_gateway.myself, "Received heartbeat");
         }
         else if let Ok(mut message) = bincode::deserialize::<StreamMessage>(message_bytes) {
             // if StreamMessage::ENCRYPTION_REQUIRED && !was_encrypted { return Ok(()) }
             for sender in senders {
-                message.set_sender(sender.socket);
+                message.set_sender(sender);
             }
             message.set_timestamp(timestamp);
             match message {

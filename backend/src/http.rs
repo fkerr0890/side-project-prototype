@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
-use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::stream::StreamResponseType, node::EndpointPair};
+use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::stream::StreamResponseType};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -189,12 +189,11 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
                 .unwrap())
         }
     };
-    let mut sm = StreamMessage::new(
+    let sm = StreamMessage::new(
         host_name.to_owned(),
         search_request.id(),
         StreamMessageKind::Resource(StreamMessageInnerKind::Request),
         payload);
-    sm.set_sender(EndpointPair::default_socket());
     let (tx, mut rx) = mpsc::unbounded_channel();
     context.tx_to_smp.send(tx).ok();
     context.to_smp.send(sm).ok();

@@ -17,7 +17,7 @@ pub trait Message {
     fn id(&self) -> NumId;
     fn replace_dest(&mut self, dest: SocketAddrV4);
     fn check_expiry(&self) -> bool;
-    fn set_sender(&mut self, sender: SocketAddrV4);
+    fn set_sender(&mut self, sender: Sender);
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -92,15 +92,15 @@ impl Sender {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Heartbeat {
     dest: SocketAddrV4,
-    sender: SocketAddrV4,
+    sender: Option<Sender>,
     timestamp: String,
     id: NumId
 }
 
 impl Heartbeat {
-    pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: EndpointPair::default_socket(), timestamp: String::new(), id: NumId(Uuid::new_v4().as_u128()) } }
+    pub fn new() -> Self { Self { dest: EndpointPair::default_socket(), sender: None, timestamp: String::new(), id: NumId(Uuid::new_v4().as_u128()) } }
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn sender(&self) -> Option<Sender> { self.sender }
 }
 
 impl Message for Heartbeat {
@@ -111,14 +111,14 @@ impl Message for Heartbeat {
         self.dest = dest;
     }
     fn check_expiry(&self) -> bool { false }
-    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
+    fn set_sender(&mut self, sender: Sender) { self.sender = Some(sender); }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamMessage {
     pub kind: StreamMessageKind,
     dest: SocketAddrV4,
-    senders: Vec<SocketAddrV4>,
+    senders: Vec<Sender>,
     timestamp: String,
     host_name: String,
     id: NumId,
@@ -138,8 +138,8 @@ impl StreamMessage {
     }
 
     pub fn payload(&self) -> &Vec<u8> { &self.payload }
-    pub fn senders(&self) -> &Vec<SocketAddrV4> { &self.senders }
-    pub fn only_sender(&mut self) -> SocketAddrV4 { self.senders.pop().unwrap() }
+    pub fn senders(&self) -> &Vec<Sender> { &self.senders }
+    pub fn only_sender(&mut self) -> Option<Sender> { assert!(self.senders.len() <= 1); self.senders.pop() }
     pub fn host_name(&self) -> &str { &self.host_name }
     pub fn into_hash_payload(self) -> (NumId, Vec<u8>) { (self.id, self.payload) }
     pub fn into_hash_payload_host_name_kind(self) -> (NumId, Vec<u8>, String, StreamMessageKind) { (self.id, self.payload, self.host_name, self.kind) }
@@ -153,7 +153,7 @@ impl Message for StreamMessage {
         self.dest = dest;
     }
     fn check_expiry(&self) -> bool { false }
-    fn set_sender(&mut self, sender: SocketAddrV4) { self.senders.push(sender); }
+    fn set_sender(&mut self, sender: Sender) { self.senders.push(sender); }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -172,7 +172,7 @@ impl Peer {
 pub struct SearchMessage {
     pub kind: SearchMessageKind,
     dest: SocketAddrV4,
-    sender: SocketAddrV4,
+    sender: Option<Sender>,
     timestamp: String,
     id: NumId,
     host_name: String,
@@ -180,7 +180,7 @@ pub struct SearchMessage {
     expiry: String,
 }
 impl SearchMessage {
-    fn new(dest: SocketAddrV4, sender: SocketAddrV4, origin: Option<Peer>, host_name: String, hash: NumId, kind: SearchMessageKind) -> Self {
+    fn new(dest: SocketAddrV4, sender: Option<Sender>, origin: Option<Peer>, host_name: String, hash: NumId, kind: SearchMessageKind) -> Self {
         let datetime = Utc::now();
         Self {
             dest,
@@ -198,19 +198,20 @@ impl SearchMessage {
         // let hash = Id(crypto::digest_parts(vec![request.method().as_bytes(), request.uri().as_bytes(), request.body()]));
         let hash = if let Some(id) = id { id } else { NumId(Uuid::new_v4().as_u128()) };
         let kind = if is_resource_kind { SearchMessageKind::Resource(SearchMessageInnerKind::Request) } else { SearchMessageKind::Distribution(SearchMessageInnerKind::Request) };
-        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), None,
+        Self::new(EndpointPair::default_socket(), None, None,
             host_name, hash, kind)
     }
 
     pub fn key_response(origin: Peer, id: NumId, host_name: String, public_key: Vec<u8>, is_resource_kind: bool) -> Self {
         let kind = if is_resource_kind { SearchMessageKind::Resource(SearchMessageInnerKind::Response(public_key)) } else { SearchMessageKind::Distribution(SearchMessageInnerKind::Response(public_key)) };
-        Self::new(EndpointPair::default_socket(), EndpointPair::default_socket(), Some(origin), host_name,
+        Self::new(EndpointPair::default_socket(), None, Some(origin), host_name,
             id, kind)
     }
 
     pub fn set_origin(&mut self, origin: Peer) { self.origin = Some(origin); }
 
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn sender(&self) -> Sender { self.sender.unwrap() }
+    pub fn sender_option(&self) -> Option<Sender> { self.sender }
     pub fn origin(&self) -> Option<Peer> { self.origin }
     pub fn into_id_host_name_public_key_origin(self) -> (NumId, String, Vec<u8>, Peer) {
         let public_key = Self::public_key(self.kind);
@@ -242,14 +243,14 @@ impl Message for SearchMessage {
         expiry <= Utc::now()
     }
 
-    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
+    fn set_sender(&mut self, sender: Sender) { self.sender = Some(sender); }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiscoverPeerMessage {
     pub kind: DpMessageKind,
     dest: SocketAddrV4,
-    sender: SocketAddrV4,
+    sender: Option<Sender>,
     timestamp: String,
     id: NumId,
     origin: Option<Peer>,
@@ -262,7 +263,7 @@ impl DiscoverPeerMessage {
         Self {
             kind,
             dest: EndpointPair::default_socket(),
-            sender: EndpointPair::default_socket(),
+            sender: None,
             timestamp: String::new(),
             id,
             origin,
@@ -271,7 +272,7 @@ impl DiscoverPeerMessage {
         }
     }
 
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn sender(&self) -> Sender { self.sender.unwrap() }
     pub fn origin(&self) -> Option<Peer> { self.origin }
     pub fn peer_list(&self) -> &Vec<Peer> { &self.peer_list }
     pub fn hop_count(&self) -> (u16, u16) { self.hop_count }
@@ -306,13 +307,13 @@ impl Message for DiscoverPeerMessage {
     }
 
     fn check_expiry(&self) -> bool { false }
-    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
+    fn set_sender(&mut self, sender: Sender) { self.sender = Some(sender); }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DistributionMessage {
     dest: SocketAddrV4,
-    sender: SocketAddrV4,
+    sender: Option<Sender>,
     timestamp: String,
     host_name: String,
     id: NumId,
@@ -322,7 +323,7 @@ impl DistributionMessage {
     pub fn new(id: NumId, target_hop_count: u16, host_name: String) -> Self {
         Self {
             dest: EndpointPair::default_socket(),
-            sender: EndpointPair::default_socket(),
+            sender: None,
             timestamp: String::new(),
             id,
             hop_count: target_hop_count,
@@ -330,10 +331,10 @@ impl DistributionMessage {
         }
     }
 
-    pub fn sender(&self) -> SocketAddrV4 { self.sender }
+    pub fn sender(&self) -> Option<Sender> { self.sender }
     pub fn hop_count(&self) -> u16 { self.hop_count }
     pub fn host_name(&self) -> &String { &self.host_name }
-    pub fn into_host_name_hop_count_id_sender(self) -> (String, u16, NumId, SocketAddrV4) { (self.host_name, self.hop_count, self.id, self.sender) }
+    pub fn into_host_name_hop_count_id_sender(self) -> (String, u16, NumId, Sender) { (self.host_name, self.hop_count, self.id, self.sender.unwrap()) }
 
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 }
@@ -347,7 +348,7 @@ impl Message for DistributionMessage {
     }
 
     fn check_expiry(&self) -> bool { false }
-    fn set_sender(&mut self, sender: SocketAddrV4) { self.sender = sender; }
+    fn set_sender(&mut self, sender: Sender) { self.sender = Some(sender); }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

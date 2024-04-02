@@ -29,11 +29,11 @@ impl Node {
     pub async fn listen(&self, is_start: bool, is_end: bool, report_trigger: Option<mpsc::Receiver<()>>, introducer: Option<Peer>, id: NumId, initial_peers: Vec<(String, NumId)>, endpoint_pair: EndpointPair, socket: Arc<UdpSocket>) {
         let (srm_to_srp, srm_from_gateway) = mpsc::unbounded_channel();
         let (dpm_to_dpp, dpm_from_gateway) = mpsc::unbounded_channel();
-        let (sm_to_smp, sm_from_gateway) = mpsc::unbounded_channel();
+        let (sm_to_smp, sm_from) = mpsc::unbounded_channel();
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
         let (tx_to_smp, tx_from_http_handler) = mpsc::unbounded_channel();
         let (srm_to_srp2, srm_from_staging) = mpsc::unbounded_channel();
-        let (sm_to_smp2, sm_from_staging) = mpsc::unbounded_channel();
+        let (sm_to_smp2, sm_from2) = mpsc::unbounded_channel();
         let (tx_to_smp2, tx_from_dp) = mpsc::unbounded_channel();
         let (dm_to_dh, dm_from_staging) = mpsc::unbounded_channel();
     
@@ -49,14 +49,14 @@ impl Node {
         let bs = BreadcrumbService::new(TtlType::Secs(DISTRIBUTION_TTL_SECONDS));
         let search_ttl = TtlType::Secs(SRP_TTL_SECONDS);
         let discover_ttl = TtlType::Millis(DPP_TTL_MILLIS);
-        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), dm_to_dh.clone(), OutboundGateway::new(socket.clone(), myself, &key_store, Some(peer_ops.clone())));
+        let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), dm_to_dh.clone(), OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()));
         let local_hosts_clone = local_hosts.clone();
-        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, Some(peer_ops.clone())), bs.clone(search_ttl), srm_from_gateway, sm_to_smp.clone(), move |m| local_hosts_clone.contains_key(m.host_name()));
-        let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, Some(peer_ops.clone())), bs.clone(discover_ttl), dpm_from_gateway);
-        let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, None), sm_from_gateway, local_hosts.clone(), tx_from_http_handler);
-        let mut dsrp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, Some(peer_ops.clone())), bs.clone(search_ttl), srm_from_staging, sm_to_smp2.clone(), |m| m.origin().unwrap().endpoint_pair.private_endpoint != m.dest() && m.origin().unwrap().endpoint_pair.public_endpoint != m.dest());
-        let mut dsmp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, None), sm_from_staging, local_hosts, tx_from_dp);
-        let mut distribution_handler = DistributionHandler::new(dm_from_staging, srm_to_srp2, sm_to_smp2, tx_to_smp2, OutboundGateway::new(socket.clone(), myself, &key_store, Some(peer_ops.clone())), bs);
+        let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs.clone(search_ttl), srm_from_gateway, sm_to_smp.clone(), move |m| local_hosts_clone.contains_key(m.host_name()));
+        let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs.clone(discover_ttl), dpm_from_gateway);
+        let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), sm_from, local_hosts.clone(), tx_from_http_handler);
+        let mut dsrp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs.clone(search_ttl), srm_from_staging, sm_to_smp2.clone(), |m| m.origin().unwrap().endpoint_pair.private_endpoint != m.dest() && m.origin().unwrap().endpoint_pair.public_endpoint != m.dest());
+        let mut dsmp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), sm_from2, local_hosts, tx_from_dp);
+        let mut distribution_handler = DistributionHandler::new(dm_from_staging, srm_to_srp2, sm_to_smp2, tx_to_smp2, OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs);
     
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
@@ -91,7 +91,7 @@ impl Node {
             }
         });
         
-        let heartbeat_gateway = OutboundGateway::new(socket.clone(), myself, &key_store, Some(peer_ops));
+        let heartbeat_gateway = OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops);
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;

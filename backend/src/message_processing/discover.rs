@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddrV4, sync::{Arc, Mutex}};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{instrument, warn};
 
-use crate::{message::{DiscoverPeerMessage, DpMessageKind, NumId, Message, Peer}, node::EndpointPair, option_early_return, utils::{TransientMap, TtlType}};
+use crate::{message::{DiscoverPeerMessage, DpMessageKind, Message, NumId, Peer, Sender}, node::EndpointPair, option_early_return, utils::{TransientMap, TtlType}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ToBeEncrypted, DPP_TTL_MILLIS};
 
@@ -38,7 +38,8 @@ impl DiscoverPeerProcessor {
     #[instrument(level = "trace", skip(self))]
     fn propagate_request(&mut self, mut request: DiscoverPeerMessage) {
         let origin = request.origin().unwrap();
-        let sender = if request.sender() == origin.endpoint_pair.public_endpoint || request.sender() == origin.endpoint_pair.private_endpoint { EndpointPair::default_socket() } else { request.sender() };
+        let sender = request.sender();
+        let sender = if sender.id == origin.id { None } else { Some(sender) };
         let mut hairpin_response = DiscoverPeerMessage::new(DpMessageKind::Response,
             Some(origin.clone()),
             request.id(),
@@ -46,12 +47,12 @@ impl DiscoverPeerProcessor {
         hairpin_response.try_decrement_hop_count();
         if !request.try_decrement_hop_count() {
             // gateway::log_debug("At hairpin");
-            self.return_response(hairpin_response, Some(request.sender()));
+            self.return_response(hairpin_response, sender);
             return;
         }
         let early_return_context = (hairpin_response, self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself, self.outbound_gateway.socket.clone());
         if self.breadcrumb_service.try_add_breadcrumb(Some(early_return_context), request.id(), sender) {
-            self.outbound_gateway.send_request(&mut request, Some(sender));
+            self.outbound_gateway.send_request(&mut request, sender);
         }
     }
 
@@ -80,18 +81,18 @@ impl DiscoverPeerProcessor {
     }
 
     #[instrument(level = "trace", skip(self))]
-    fn return_response(&mut self, mut response: DiscoverPeerMessage, dest: Option<SocketAddrV4>) {
+    fn return_response(&mut self, mut response: DiscoverPeerMessage, dest: Option<Sender>) {
         response.add_peer(self.outbound_gateway.myself);
-        let dest = if dest.is_some() { dest } else { self.breadcrumb_service.get_dest(&response.id()) };
+        let dest = if dest.is_some() { Some(dest) } else { self.breadcrumb_service.get_dest(&response.id()) };
         let dest = option_early_return!(dest);
-        if dest == EndpointPair::default_socket() {
+        if let Some(dest) = dest {
+            self.outbound_gateway.send_individual(dest.socket, &mut response, false, false);
+        }
+        else {
             let (id, origin) = (response.id(), response.origin().unwrap().endpoint_pair);
             if self.stage_message(response) {
                 self.send_final_response(id, origin);
             }
-        }
-        else {
-            self.outbound_gateway.send_individual(dest, &mut response, false, false);
         }
     }
 
@@ -113,7 +114,7 @@ impl DiscoverPeerProcessor {
 
     #[instrument(level = "trace", skip(self))]
     fn request_new_peers(&mut self, mut message: DiscoverPeerMessage) {
-        self.breadcrumb_service.try_add_breadcrumb(None, message.id(), self.outbound_gateway.myself.endpoint_pair.private_endpoint);
+        self.breadcrumb_service.try_add_breadcrumb(None, message.id(), Some(Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself.id)));
         let introducer = message.get_last_peer();
         message.set_kind(DpMessageKind::Request);
         self.outbound_gateway.send(introducer.endpoint_pair,

@@ -65,11 +65,11 @@ pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
     myself: Peer,
     key_store: Arc<Mutex<KeyStore>>,
-    peer_ops: Option<Arc<Mutex<PeerOps>>>
+    peer_ops: Arc<Mutex<PeerOps>>
 }
 
 impl OutboundGateway {
-    pub fn new(socket: Arc<UdpSocket>, myself: Peer, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Option<Arc<Mutex<PeerOps>>>) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, myself: Peer, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Arc<Mutex<PeerOps>>) -> Self {
         Self {
             socket: socket.clone(),
             myself,
@@ -78,17 +78,17 @@ impl OutboundGateway {
         }
     }
 
-    pub fn send_request(&self, request: &mut(impl Message + Serialize), prev_sender: Option<SocketAddrV4>) {
-        for peer in self.peer_ops.as_ref().unwrap().lock().unwrap().peers() {
-            match prev_sender { Some(s) if s == peer.public_endpoint || s == peer.private_endpoint => continue, _ => {}}
-            self.send(peer, request, false, true);
+    pub fn send_request(&self, request: &mut(impl Message + Serialize), prev_sender: Option<Sender>) {
+        for (peer_id, endpoint_pair) in self.peer_ops.lock().unwrap().peers() {
+            match prev_sender { Some(s) if s.id == *peer_id => continue, _ => {}}
+            self.send(*endpoint_pair, request, false, true);
         }
     }
 
     #[instrument(level = "trace", skip(self))]
     fn add_new_peer(&self, peer: Peer) {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
-        self.peer_ops.as_ref().unwrap().lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
+        self.peer_ops.lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
     }
 
     pub fn send(&self, dest: EndpointPair, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) {
@@ -160,7 +160,7 @@ pub enum ToBeEncrypted {
 }
 
 pub struct BreadcrumbService {
-    breadcrumbs: TransientMap<NumId, SocketAddrV4>,
+    breadcrumbs: TransientMap<NumId, Option<Sender>>,
 }
 
 impl BreadcrumbService {
@@ -168,7 +168,7 @@ impl BreadcrumbService {
 
     pub fn clone(&self, ttl: TtlType) -> Self { Self { breadcrumbs: TransientMap::from_existing(&self.breadcrumbs, ttl) } }
 
-    pub fn try_add_breadcrumb(&mut self, early_return_context: Option<EarlyReturnContext>, id: NumId, dest: SocketAddrV4) -> bool {
+    pub fn try_add_breadcrumb(&mut self, early_return_context: Option<EarlyReturnContext>, id: NumId, dest: Option<Sender>) -> bool {
         let contains_key = if let Some(mut context) = early_return_context {
             self.breadcrumbs.set_timer_with_send_action(id, move || {
                 let (ref mut message, dest, myself, ref socket) = context;
@@ -184,7 +184,7 @@ impl BreadcrumbService {
         contains_key
     }
 
-    pub fn get_dest(&self, id: &NumId) -> Option<SocketAddrV4> {
+    pub fn get_dest(&self, id: &NumId) -> Option<Option<Sender>> {
         self.breadcrumbs.map().lock().unwrap().get(id).copied()
     }
 
