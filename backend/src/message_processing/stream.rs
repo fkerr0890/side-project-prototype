@@ -150,9 +150,8 @@ impl SessionManager {
         let (socket, myself, peer_ops) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.peer_ops.clone());
         tokio::spawn(async move {
             loop {
-                //TODO: Don't send to dests that are already peers
                 for peer in dests.lock().unwrap().iter() {
-                    if peer_ops.lock().unwrap().has_peer(peer.id) {
+                    if !peer_ops.lock().unwrap().has_peer(peer.id) {
                         OutboundGateway::send_static(&socket, peer.socket, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
                     }
                 }
