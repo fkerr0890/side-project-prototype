@@ -22,25 +22,28 @@ impl KeyStore {
         }
     }
 
-    fn generate_key_pair(&mut self, index: String) -> agreement::PublicKey {
-        let is_new_key = self.private_keys.set_timer(index.clone());
+    fn generate_key_pair(&mut self, index: String) -> Option<agreement::PublicKey> {
+        if self.symmetric_keys.contains_key(&index) {
+            return None;
+        }
+        let is_new_key = self.private_keys.set_timer(index.clone(), "Crypto:PrivateKeys");
         let mut private_keys = self.private_keys.collection().map().lock().unwrap();
         if is_new_key {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
             let public_key = my_private_key.compute_public_key().unwrap();
             private_keys.insert(index, my_private_key);
-            public_key
+            Some(public_key)
         }
         else {
-            private_keys.get(&index).unwrap().compute_public_key().unwrap()
+            Some(private_keys.get(&index).unwrap().compute_public_key().unwrap())
         }
     }
 
-    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4) -> agreement::PublicKey {
+    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
         self.generate_key_pair(peer_addr.to_string())
     }
 
-    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> agreement::PublicKey {
+    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
         self.generate_key_pair(peer_addr.to_string())
     }
 
@@ -78,7 +81,7 @@ impl KeyStore {
         let (nonce_tx, nonce_rx) = mpsc::channel();
         let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value, nonce_tx));
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
-        if !self.symmetric_keys.set_timer(index.clone()) {
+        if !self.symmetric_keys.set_timer(index.clone(), "Crypto:SymmetricKeys") {
             return Ok(())
         }
         self.symmetric_keys.collection().map().lock().unwrap().insert(index, key_set);
@@ -86,7 +89,7 @@ impl KeyStore {
     }
 
     pub fn reset_expiration(&mut self, peer_addr: SocketAddrV4) {
-        self.symmetric_keys.set_timer(peer_addr.to_string());
+        self.symmetric_keys.set_timer(peer_addr.to_string(), "Crypto:SymmetricKeysRenew");
     }
 }
 

@@ -54,7 +54,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let (id, host_name, peer_public_key, origin) = search_response.into_id_host_name_public_key_origin();
             let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
             let origin = if sender.socket == origin.endpoint_pair.private_endpoint { sender } else { Sender::new(origin.endpoint_pair.public_endpoint, origin.id) };
-            let my_public_key = key_store.requester_public_key(origin.socket);
+            let my_public_key = option_early_return!(key_store.requester_public_key(origin.socket));
             result_early_return!(key_store.agree(origin.socket, peer_public_key));
             let kind = if is_resource_kind { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) } else { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) };
             let mut key_agreement_message = StreamMessage::new(host_name, id, kind, my_public_key.as_ref().to_vec());
@@ -72,14 +72,14 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
     }
 
     fn build_response(&self, id: NumId, peer_addr: SocketAddrV4, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
-        let public_key = self.outbound_gateway.key_store.lock().unwrap().host_public_key(peer_addr);
+        let public_key = self.outbound_gateway.key_store.lock().unwrap().host_public_key(peer_addr)?;
         Some(SearchMessage::key_response(self.outbound_gateway.myself.clone(), id, host_name, public_key.as_ref().to_vec(), is_resource_kind))
     }
 
     pub async fn receive(&mut self) -> EmptyOption {
         let mut message = self.from_staging.recv().await?;
         if let None = message.origin() {
-            if !self.active_sessions.insert(message.host_name().clone()) {
+            if !self.active_sessions.insert(message.host_name().clone(), "Search:ActiveSession") {
                 debug!(host_name = message.host_name(), search_message = ?message, "SearchMessageProcessor: Blocked search request, reason: active session exists"); return Some(());
             }
             message.set_origin(self.outbound_gateway.myself.clone());

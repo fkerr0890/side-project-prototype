@@ -115,17 +115,17 @@ impl SessionManager {
     }
 
     fn renew_dests_host(&mut self, host_name: String, dest: Sender) {
-        let new_entry = self.active_sessions_host.set_timer(host_name.clone());
+        let new_entry = self.active_sessions_host.set_timer(host_name.clone(), "Stream:ActiveSessionsHostRenew");
         let mut active_sessions_host = self.active_sessions_host.collection().map().lock().unwrap();
         let active_dests = active_sessions_host.entry(host_name).or_default();
         self.keep_peer_conns_alive(active_dests.dests.collection().set().clone(), new_entry);
-        active_dests.dests.insert(dest);
+        active_dests.dests.insert(dest, "Stream:ActiveDestsHostRenew");
         let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
         key_store.reset_expiration(dest.socket);
     }
 
     fn renew_dests_client(&mut self, host_name: String, mut message: StreamMessage, to_http_handler: UnboundedSender<StreamResponseType>) {
-        let new_entry = self.active_sessions_client.set_timer(host_name.clone());
+        let new_entry = self.active_sessions_client.set_timer(host_name.clone(), "Stream:ActiveSessionsClientRenew");
         let mut active_sessions_client = self.active_sessions_client.collection().map().lock().unwrap();
         let active_session_info = active_sessions_client.entry(host_name.clone()).or_default();
         self.keep_peer_conns_alive(active_session_info.active_dests.dests.collection().set().clone(), new_entry);
@@ -133,7 +133,7 @@ impl SessionManager {
         let set_cached_message_timer = dests.len() > 0;
         for dest in dests {
             self.outbound_gateway.send_individual(dest.socket, &mut message, true, true);
-            active_session_info.active_dests.dests.insert(dest);
+            active_session_info.active_dests.dests.insert(dest, "Stream:ActiveDestsClientRenew");
         }
         let id = message.id();
         trace!(%id, "Pushed");
@@ -214,7 +214,7 @@ impl ActiveSessionInfo {
         let Some(cached_message) = cached_message else {
             debug!(%id, "Prevented request from client, reason: request expired for resource"); return None;
         };
-        if let StreamMessageKind::Resource(StreamMessageInnerKind::Request) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request) = cached_message.0.kind {
+        if let StreamMessageKind::Resource(StreamMessageInnerKind::Request | StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request | StreamMessageInnerKind::KeyAgreement) = cached_message.0.kind {
             return Some(&mut cached_message.0);
         }
         debug!(%id, "Prevented request from client, reason: already received resource"); None
@@ -225,14 +225,15 @@ impl ActiveSessionInfo {
         if self.active_dests.dests.contains_key(&dest) {
             return;
         }
-        self.active_dests.dests.insert(dest);
-        let cached_key_agreement_id = NumId(key_agreement.id().0 + 1);
-        self.cached_messages.set_timer(cached_key_agreement_id);
-        self.cached_messages.set_timer(key_agreement.id());
+        self.active_dests.dests.insert(dest, "Stream:ActiveSessionInfo:ActiveDests");
         let id = key_agreement.id();
+        let cached_key_agreement_id = NumId(id.0 + 1);
+        self.cached_messages.set_timer(cached_key_agreement_id, "Stream:ActiveSessionInfo:CachedMessagesKeyAgreement");
+        self.resource_queue.set_timer_with_override(id, "Stream:ActiveSessionInfo:ResourceQueue");
+        self.cached_messages.set_timer_with_override(id, "Stream:ActiveSessionInfo:CachedMessages");
         let mut cached_messages = self.cached_messages.collection().map().lock().unwrap();
         {
-            let cached_message = option_early_return!(Self::handle_cached_message(key_agreement.id(), cached_messages.get_mut(&key_agreement.id())));
+            let cached_message = option_early_return!(Self::handle_cached_message(id, cached_messages.get_mut(&id)));
             action(&mut key_agreement, cached_message, dest.socket);
         }
         cached_messages.insert(cached_key_agreement_id, (key_agreement, None));
@@ -259,7 +260,7 @@ impl ActiveSessionInfo {
 
     fn push_resource(&mut self, message: StreamMessage, set_timer: Option<FollowUpComponents>, to_http_handler: mpsc::UnboundedSender<StreamResponseType>) {
         if let Some(follow_up_components) = set_timer {
-            self.cached_messages.set_timer(message.id());
+            self.cached_messages.set_timer(message.id(), "Stream:ActiveSessionInfo:CachedMessages");
             self.start_follow_ups(message.id(), follow_up_components);
         }
         let mut cached_messages = self.cached_messages.collection().map().lock().unwrap();
@@ -267,7 +268,7 @@ impl ActiveSessionInfo {
             warn!(id = %message.id(), "ActiveSessionInfo: Attempted to insert duplicate request");
             return;
         }
-        self.resource_queue.insert(message.id());
+        self.resource_queue.collection_mut().push(message.id());
         cached_messages.insert(message.id(), (message, Some(to_http_handler)));
     }
 

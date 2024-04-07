@@ -68,7 +68,7 @@ impl DiscoverPeerProcessor {
             }
             let mut message_staging_clone = self.message_staging.collection().clone();
             let (socket, dest, myself, id) = (self.outbound_gateway.socket.clone(), message.origin().unwrap().endpoint_pair, self.outbound_gateway.myself, message.id());
-            self.message_staging.set_timer_with_send_action(message.id(), move || { Self::send_final_response_static(&socket, dest, myself, &mut message_staging_clone, id); });
+            self.message_staging.set_timer_with_send_action(message.id(), move || { Self::send_final_response_static(&socket, dest, myself, &mut message_staging_clone, id); }, "Discover:MessageStaging");
             0
         };
 

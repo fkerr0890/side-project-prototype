@@ -78,7 +78,7 @@ impl MessageStaging {
             return;
         }
         // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
-        self.unconfirmed_peers.set_timer(peer.id);
+        self.unconfirmed_peers.set_timer(peer.id, "Stage:UnconfirmedPeers");
         self.unconfirmed_peers.collection().map().lock().unwrap().insert(peer.id, peer.endpoint_pair);
         let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
         let (socket, myself) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself);
@@ -173,7 +173,7 @@ impl MessageStaging {
             match crypto_result {
                 Ok(plaintext) => { *payload = plaintext },
                 Err(Error::NoKey) => {
-                    self.message_caching.set_timer(inbound_message.separate_parts().id());
+                    self.message_caching.set_timer(inbound_message.separate_parts().id(), "Stage:MessageCaching");
                     let mut message_caching = self.message_caching.collection().map().lock().unwrap();
                     let cached_messages = message_caching.entry(inbound_message.separate_parts().id()).or_default();
                     inbound_message.set_is_encrypted_true(nonce);
@@ -192,7 +192,7 @@ impl MessageStaging {
         else {
             let id = inbound_message.separate_parts().id();
             let staged_messages_len = {
-                self.message_staging.set_timer(id);
+                self.message_staging.set_timer(id, "Stage:MessageStaging");
                 let mut message_staging = self.message_staging.collection().map().lock().unwrap();
                 let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
                 staged_messages.insert(index, inbound_message);

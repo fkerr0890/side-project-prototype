@@ -159,35 +159,21 @@ impl ServerContext {
 }
 
 async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
-    let request_version = request.version().clone();
+    let request_version = request.version();
     let mut request = match SerdeHttpRequest::from_hyper_request(request).await {
         Ok(request) => request,
-        Err(e) => {
-            return Ok(Response::builder()
-                .status(400)
-                .version(request_version)
-                .header("Content-Type", "text/plain")
-                .header("Content-Length", e.len().to_string())
-                .body(Body::from(e))
-                .unwrap())
-        }
+        Err(e) => return Ok(construct_hyper_error_response(e, request_version, 400))
     };
     debug!(uri = request.uri());
     let (host_name, path) = get_host_name_and_path(request.uri());
+    if host_name.trim_end().is_empty() {
+        return Ok(construct_hyper_error_response(String::from("Invalid host name"), request_version, 400));
+    }
     request.set_uri(path);
     let search_request = SearchMessage::initial_search_request(host_name.to_owned(), true, None);
     let payload = match bincode::serialize(&request) {
         Ok(request) => request,
-        Err(e) => {
-            let e = (*e).to_string();
-            return Ok(Response::builder()
-                .status(400)
-                .version(request_version)
-                .header("Content-Type", "text/plain")
-                .header("Content-Length", e.len().to_string())
-                .body(Body::from(e))
-                .unwrap())
-        }
+        Err(e) => return Ok(construct_hyper_error_response((*e).to_string(), request_version, 400))
     };
     let sm = StreamMessage::new(
         host_name.to_owned(),
@@ -201,14 +187,8 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
     let response = match rx.recv().await {
         Some(response) => response,
         None => {
-            error!("SMP to http channel closed");
-            return Ok(Response::builder()
-                .status(500)
-                .version(request_version)
-                .header("Content-Type", "text/plain")
-                .header("Content-Length", "21")
-                .body(Body::from("p2p daemon terminated"))
-                .unwrap())
+            debug!("SMP to http channel closed");
+            return Ok(construct_hyper_error_response(String::from("Request timed out/p2p daemon terminated"), request_version, 500))
         }
     };
     Ok(response.unwrap_http().to_hyper_response())
@@ -245,6 +225,16 @@ pub fn construct_error_response(error: String, request_version: String) -> Serde
         .header("Content-Type", "text/html")
         .header("Content-Length", &body.len().to_string())
         .body(body.into_bytes())
+}
+
+pub fn construct_hyper_error_response(error: String, request_version: Version, status_code: u16) -> Response<Body> {
+    Response::builder()
+        .status(status_code)
+        .version(request_version)
+        .header("Content-Type", "text/plain")
+        .header("Content-Length", &error.len().to_string())
+        .body(Body::from(error))
+        .unwrap()
 }
 
 fn get_host_name_and_path(uri: &str) -> (String, String) {
