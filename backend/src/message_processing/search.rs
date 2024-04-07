@@ -3,7 +3,7 @@ use std::net::SocketAddrV4;
 use tokio::sync::mpsc;
 use tracing::{debug, instrument, error};
 
-use crate::{message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{TransientSet, TtlType}};
+use crate::{message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcSet, TransientCollection, TtlType}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
@@ -12,7 +12,7 @@ pub struct SearchRequestProcessor<F: Fn(&SearchMessage) -> bool> {
     breadcrumb_service: BreadcrumbService,
     from_staging: mpsc::UnboundedReceiver<SearchMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
-    active_sessions: TransientSet<String>,
+    active_sessions: TransientCollection<ArcSet<String>>,
     stop_condition: F
 }
 
@@ -23,7 +23,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             breadcrumb_service,
             from_staging,
             to_smp,
-            active_sessions: TransientSet::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true),
+            active_sessions: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcSet::new()),
             stop_condition
         }
     }

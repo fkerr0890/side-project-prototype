@@ -23,7 +23,7 @@ async fn basic() {
         .with_span_events(FmtSpan::NEW)
         .with_max_level(Level::DEBUG).init();
 
-    let regenerate: bool = true;
+    let regenerate: bool = false;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();

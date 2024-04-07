@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info, instrument};
 
-use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, NumId, InboundMessage, IsEncrypted, Message, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{TransientMap, TtlType}};
+use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, InboundMessage, IsEncrypted, Message, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection, TtlType}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -160,13 +160,13 @@ pub enum ToBeEncrypted {
 }
 
 pub struct BreadcrumbService {
-    breadcrumbs: TransientMap<NumId, Option<Sender>>,
+    breadcrumbs: TransientCollection<ArcMap<NumId, Option<Sender>>>,
 }
 
 impl BreadcrumbService {
-    pub fn new(ttl: TtlType) -> Self { Self { breadcrumbs: TransientMap::new(ttl, false) } }
+    pub fn new(ttl: TtlType) -> Self { Self { breadcrumbs: TransientCollection::new(ttl, false, ArcMap::new()) } }
 
-    pub fn clone(&self, ttl: TtlType) -> Self { Self { breadcrumbs: TransientMap::from_existing(&self.breadcrumbs, ttl) } }
+    pub fn clone(&self, ttl: TtlType) -> Self { Self { breadcrumbs: TransientCollection::from_existing(&self.breadcrumbs, ttl) } }
 
     pub fn try_add_breadcrumb(&mut self, early_return_context: Option<EarlyReturnContext>, id: NumId, dest: Option<Sender>) -> bool {
         let contains_key = if let Some(mut context) = early_return_context {
@@ -179,17 +179,17 @@ impl BreadcrumbService {
             self.breadcrumbs.set_timer(id)
         };
         if contains_key {
-            self.breadcrumbs.map().lock().unwrap().insert(id, dest);
+            self.breadcrumbs.collection().map().lock().unwrap().insert(id, dest);
         }
         contains_key
     }
 
     pub fn get_dest(&self, id: &NumId) -> Option<Option<Sender>> {
-        self.breadcrumbs.map().lock().unwrap().get(id).copied()
+        self.breadcrumbs.collection().map().lock().unwrap().get(id).copied()
     }
 
     pub fn remove_breadcrumb(&self, id: &NumId) {
-        self.breadcrumbs.map().lock().unwrap().remove(id);
+        self.breadcrumbs.collection().map().lock().unwrap().remove(id);
     }
 }
 
