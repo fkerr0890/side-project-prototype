@@ -210,7 +210,7 @@ impl SearchMessage {
 
     pub fn set_origin(&mut self, origin: Peer) { self.origin = Some(origin); }
 
-    pub fn sender(&self) -> Sender { self.sender.unwrap() }
+    pub fn sender(&self) -> Option<Sender> { self.sender }
     pub fn sender_option(&self) -> Option<Sender> { self.sender }
     pub fn origin(&self) -> Option<Peer> { self.origin }
     pub fn into_id_host_name_public_key_origin(self) -> (NumId, String, Vec<u8>, Peer) {

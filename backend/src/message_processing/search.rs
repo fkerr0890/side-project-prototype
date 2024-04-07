@@ -50,7 +50,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             self.outbound_gateway.send_individual(dest.socket, &mut search_response, false, false);
         }
         else {
-            let sender = search_response.sender();
+            let sender = if let Some(sender) = search_response.sender() { sender } else { Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself.id) };
             let (id, host_name, peer_public_key, origin) = search_response.into_id_host_name_public_key_origin();
             let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
             let origin = if sender.socket == origin.endpoint_pair.private_endpoint { sender } else { Sender::new(origin.endpoint_pair.public_endpoint, origin.id) };
