@@ -28,7 +28,7 @@ impl StreamMessageProcessor
     pub async fn receive(&mut self) -> EmptyOption {
         let message = self.sm_from.recv().await?;
         match message {
-            StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::KeyAgreement), ..} => self.handle_key_agreement(message),
+            StreamMessage { kind: StreamMessageKind::KeyAgreement, ..} => self.handle_key_agreement(message),
             StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::Request) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request), .. } => self.handle_request(message).await,
             StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::Response) | StreamMessageKind::Distribution(StreamMessageInnerKind::Response), ..} => self.session_manager.return_resource(message)
         }
@@ -59,7 +59,8 @@ impl StreamMessageProcessor
     async fn send_response(&mut self, payload: Vec<u8>, dest: SocketAddrV4, host_name: String, id: NumId, kind: StreamMessageKind) {
         let response = match kind {
             StreamMessageKind::Resource(_) => self.http_response_action(&payload, host_name, id).await,
-            StreamMessageKind::Distribution(_) => self.distribution_response_action(payload, host_name, id).await
+            StreamMessageKind::Distribution(_) => self.distribution_response_action(payload, host_name, id).await,
+            _ => unimplemented!()
         };
         if let Some(mut response) = response {
             self.session_manager.outbound_gateway.send_individual(dest, &mut response, true, true);
@@ -217,7 +218,7 @@ impl ActiveSessionInfo {
         let Some(cached_message) = cached_message else {
             debug!(%id, "Prevented request from client, reason: request expired for resource"); return None;
         };
-        if let StreamMessageKind::Resource(StreamMessageInnerKind::Request | StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request | StreamMessageInnerKind::KeyAgreement) = cached_message.0.kind {
+        if let StreamMessageKind::KeyAgreement | StreamMessageKind::Resource(StreamMessageInnerKind::Request) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request) = cached_message.0.kind {
             return Some(&mut cached_message.0);
         }
         debug!(%id, "Prevented request from client, reason: already received resource"); None

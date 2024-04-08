@@ -203,9 +203,6 @@ macro_rules! result_early_return {
 #[macro_export]
 macro_rules! time {
     ($block:block) => {
-        time!($block, "")
-    };
-    ($block:block, $label:literal) => {
         {
             let now = std::time::Instant::now();
             let output = $block;
@@ -215,7 +212,6 @@ macro_rules! time {
                 data.0 = duration;
                 data.1 = format!(" at {} {}", file!(), line!()); 
             }
-            // tracing::info!("{} Elapsed time: {:.2?}", $label, now.elapsed());
             output
         }
     }
@@ -224,6 +220,6 @@ macro_rules! time {
 #[macro_export]
 macro_rules! lock {
     ($expr:expr) => {
-        crate::time!({ $expr.lock().unwrap() }, "Lock acquired")
+        crate::time!({ $expr.lock().unwrap() })
     };
 }

@@ -24,7 +24,7 @@ impl DistributionHandler {
     #[instrument(level = "trace", skip(self))]
     pub async fn receive(&mut self) -> EmptyOption {
         let message = self.from_staging.recv().await?;
-        if message.hop_count() <= 0 {
+        if message.hop_count() == 0 {
             error!(hop_count = message.hop_count(), "Invalid hop count");
             return Some(());
         }

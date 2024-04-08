@@ -373,13 +373,13 @@ pub enum DpMessageKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum StreamMessageKind {
+    KeyAgreement,
     Resource(StreamMessageInnerKind),
     Distribution(StreamMessageInnerKind)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum StreamMessageInnerKind {
-    KeyAgreement,
     Request,
     Response
 }

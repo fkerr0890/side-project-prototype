@@ -56,8 +56,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let origin = if sender.socket == origin.endpoint_pair.private_endpoint { sender } else { Sender::new(origin.endpoint_pair.public_endpoint, origin.id) };
             let my_public_key = option_early_return!(key_store.requester_public_key(origin.socket));
             result_early_return!(key_store.agree(origin.socket, peer_public_key));
-            let kind = if is_resource_kind { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) } else { StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) };
-            let mut key_agreement_message = StreamMessage::new(host_name, id, kind, my_public_key.as_ref().to_vec());
+            let mut key_agreement_message = StreamMessage::new(host_name, id, StreamMessageKind::KeyAgreement, my_public_key.as_ref().to_vec());
             key_agreement_message.set_sender(origin);
             result_early_return!(self.to_smp.send(key_agreement_message));
         }

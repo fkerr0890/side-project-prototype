@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
 use super::{EmptyOption, OutboundGateway, ToBeEncrypted, SRP_TTL_SECONDS};
 
@@ -154,7 +154,7 @@ impl MessageStaging {
             }
             message.set_timestamp(timestamp);
             match message {
-                StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::KeyAgreement) | StreamMessageKind::Distribution(StreamMessageInnerKind::KeyAgreement), .. } => { debug!(id = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received key agreement message"); self.handle_key_agreement(message) },
+                StreamMessage { kind: StreamMessageKind::KeyAgreement, .. } => { debug!(id = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received key agreement message"); self.handle_key_agreement(message) },
                 StreamMessage { kind: StreamMessageKind::Resource(_), .. } => { debug!(id = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received stream message"); result_early_return!(self.to_smp.send(message)); }
                 StreamMessage { kind: StreamMessageKind::Distribution(_), .. } => { debug!(id = %message.id(), curr_node = ?self.outbound_gateway.myself, "Received stream dmessage"); result_early_return!(self.to_dsmp.send(message)); }
             }
