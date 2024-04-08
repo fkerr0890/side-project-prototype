@@ -13,6 +13,12 @@ pub struct KeyStore {
     symmetric_keys: TransientCollection<ArcMap<String, KeySet>>,
     rng: SystemRandom
 }
+impl Default for KeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KeyStore {
     pub fn new() -> Self {
         Self {
@@ -53,7 +59,7 @@ impl KeyStore {
         match mode {
             Direction::Encode => {
                 key_set.sealing_key.seal_in_place_append_tag(aad, payload)?;
-                key_set.nonce_rx.recv().and_then(|nonce| Ok(nonce.as_ref().to_vec())).or_else(|e| Err(Error::Generic(e.to_string())))
+                key_set.nonce_rx.recv().map(|nonce| nonce.as_ref().to_vec()).map_err(|e| Error::Generic(e.to_string()))
             },
             Direction::Decode(nonce_bytes) => {
                 let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)?;
@@ -124,7 +130,7 @@ pub enum Error {
 }
 impl Error {
     pub fn error_response(&self, file: &str, line: u32) -> String {
-        format!("{} {} {}", self.to_string(), file, line)
+        format!("{} {} {}", self, file, line)
     }
 }
 impl From<ring::error::Unspecified> for Error {

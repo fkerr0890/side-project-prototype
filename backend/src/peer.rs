@@ -19,11 +19,17 @@ pub struct PeerOps {
     peer_map: HashMap<NumId, EndpointPair>
 }
 
+impl Default for PeerOps {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerOps {
     pub fn new() -> Self { Self { peer_queue: DoublePriorityQueue::new(), peer_map: HashMap::new() } }
 
     pub fn peers(&self) -> &HashMap<NumId, EndpointPair> { &self.peer_map }
-    pub fn peers_and_scores(&self) -> Vec<(EndpointPair, i32, NumId)> { self.peer_queue.iter().map(|(id, score)| (*self.peer_map.get(&id).unwrap(), *score, *id)).collect() }
+    pub fn peers_and_scores(&self) -> Vec<(EndpointPair, i32, NumId)> { self.peer_queue.iter().map(|(id, score)| (*self.peer_map.get(id).unwrap(), *score, *id)).collect() }
     pub fn peers_len(&self) -> usize { self.peer_queue.len() }
 
     pub fn add_initial_peer(&mut self, peer: Peer) {

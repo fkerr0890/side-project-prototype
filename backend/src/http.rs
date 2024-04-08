@@ -28,7 +28,7 @@ impl SerdeHttpRequest {
         })
     }
 
-    fn to_hyper_request(self, uri_prefix: String) -> Result<Request<Body>, String> {
+    fn into_hyper_request(self, uri_prefix: String) -> Result<Request<Body>, String> {
         let mut request = Request::new(Body::from(self.body));
         *request.method_mut() = Method::from_str(&self.method).map_err(|e| e.to_string())?;
         *request.uri_mut() = Uri::from_str(&(uri_prefix + &self.uri)).map_err(|e| e.to_string())?;
@@ -62,16 +62,16 @@ impl SerdeHttpResponse {
         })
     }
 
-    fn to_hyper_response(self) -> Response<Body> {
+    fn into_hyper_response(self) -> Response<Body> {
         let mut response = Response::new(Body::from(self.body));
         *response.status_mut() = match StatusCode::from_u16(self.status_code) {
             Ok(status_code) => status_code,
-            Err(e) => return construct_error_response(e.to_string(), self.version.clone()).to_hyper_response()
+            Err(e) => return construct_error_response(e.to_string(), self.version.clone()).into_hyper_response()
         };
         *response.version_mut() = string_to_version(self.version.clone());
         *response.headers_mut() = match reconstruct_header_map(self.headers) {
             Ok(headers) => headers,
-            Err(e) => return construct_error_response(e.to_string(), self.version).to_hyper_response()
+            Err(e) => return construct_error_response(e.to_string(), self.version).into_hyper_response()
         };
         response
     }
@@ -191,7 +191,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
             return Ok(construct_hyper_error_response(String::from("Request timed out/p2p daemon terminated"), request_version, 500))
         }
     };
-    Ok(response.unwrap_http().to_hyper_response())
+    Ok(response.unwrap_http().into_hyper_response())
 }
 
 pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
@@ -209,7 +209,7 @@ pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
 pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpResponse {
     let client = Client::new();
     let request_version = request.version.clone();
-    let hyper_request = match request.to_hyper_request(String::from("http://") + socket) { Ok(request) => request, Err(e) => return construct_error_response(e.to_string(), request_version) };
+    let hyper_request = match request.into_hyper_request(String::from("http://") + socket) { Ok(request) => request, Err(e) => return construct_error_response(e.to_string(), request_version) };
     debug!("{:?}", hyper_request);
     let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => return construct_error_response(e.to_string(), request_version) };
     match SerdeHttpResponse::from_hyper_response(response).await {
@@ -240,8 +240,8 @@ pub fn construct_hyper_error_response(error: String, request_version: Version, s
 fn get_host_name_and_path(uri: &str) -> (String, String) {
     let mut path = String::new();
     let mut host_name = String::new();
-    for (i, part) in uri.split("/").enumerate() {
-        if let Some(c) = part.chars().nth(0) {
+    for (i, part) in uri.split('/').enumerate() {
+        if let Some(c) = part.chars().next() {
             if c == '~' && i == 1 {
                 host_name = part.to_owned().drain(1..).collect();
                 continue;
@@ -251,5 +251,5 @@ fn get_host_name_and_path(uri: &str) -> (String, String) {
         path += "/";
     }
     path.pop();
-    return (host_name, path)
+    (host_name, path)
 }

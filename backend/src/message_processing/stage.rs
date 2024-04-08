@@ -200,7 +200,7 @@ impl MessageStaging {
             };
             if staged_messages_len == num_chunks {
                 // gateway::log_debug("Collected all messages");
-                let Some(messages) = self.message_staging.pop(&id) else { return None };
+                let messages = self.message_staging.pop(&id)?;
                 let messages: Vec<InboundMessage> = messages.into_values().collect();
                 return Some(messages);
             }

@@ -13,6 +13,12 @@ pub trait ArcCollection {
 }
 
 pub struct ArcMap<K, V>(Arc<Mutex<HashMap<K, V>>>);
+impl<K, V> Default for ArcMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K, V> ArcMap<K, V> {
     pub fn new() -> Self { Self(Arc::new(Mutex::new(HashMap::new()))) }
     pub fn map(&self) -> &Arc<Mutex<HashMap<K, V>>> { &self.0 }
@@ -33,6 +39,12 @@ impl<K, V> Clone for ArcMap<K, V> {
 
 #[derive(Clone)]
 pub struct ArcSet<K: Clone>(Arc<Mutex<HashSet<K>>>);
+impl<K: Clone> Default for ArcSet<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Clone> ArcSet<K> {
     pub fn new() -> Self { Self(Arc::new(Mutex::new(HashSet::new()))) }
     pub fn set(&self) -> &Arc<Mutex<HashSet<K>>> { &self.0 }
@@ -48,6 +60,12 @@ impl<K: Send + Hash + Eq + Clone + Debug> ArcCollection for ArcSet<K> {
 
 #[derive(Clone)]
 pub struct ArcDeque<K: Clone>(Arc<Mutex<VecDeque<K>>>);
+impl<K: Clone> Default for ArcDeque<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K: Clone> ArcDeque<K> {
     pub fn new() -> Self { Self(Arc::new(Mutex::new(VecDeque::new()))) }
 }
@@ -63,10 +81,11 @@ impl<K: Send + Hash + Eq + Clone + Debug> ArcCollection for ArcDeque<K> {
     fn pop(&mut self, _key: &K) -> Option<K> { lock!(self.0).pop_front() }
 }
 
+type AbortHandles<T> = Option<Arc<Mutex<T>>>;
 pub struct TransientCollection<C: ArcCollection> {
     ttl: TtlType,
     collection: C,
-    abort_handles: Option<Arc<Mutex<HashMap<C::K, AbortHandle>>>>
+    abort_handles: AbortHandles<HashMap<C::K, AbortHandle>>
 }
 impl<C: ArcCollection + Clone + Send> ArcCollection for TransientCollection<C> {
     type K = C::K;
@@ -90,7 +109,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
         Self {
             ttl,
             collection: existing.collection.clone(),
-            abort_handles: existing.abort_handles.as_ref().and_then(|arc| Some(arc.clone()))
+            abort_handles: existing.abort_handles.clone()
         }
     }
 
@@ -100,9 +119,9 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
     pub fn set_timer_with_override(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key, None, None::<fn()>, key_label, true) }
 
     fn remove_existing_handle(&mut self, key: &C::K, value: Option<C::K>) -> (bool, bool) {
-        if self.collection.contains_key(&key) {
+        if self.collection.contains_key(key) {
             if let Some(ref mut abort_handles) = self.abort_handles {
-                lock!(abort_handles).remove(&key).unwrap().abort();
+                lock!(abort_handles).remove(key).unwrap().abort();
                 (true, false)
             }
             else {
@@ -207,7 +226,7 @@ macro_rules! time {
             let now = std::time::Instant::now();
             let output = $block;
             let duration = now.elapsed();
-            let mut data = crate::MAX_TIME.lock().unwrap();
+            let mut data = $crate::MAX_TIME.lock().unwrap();
             if data.0 < duration {
                 data.0 = duration;
                 data.1 = format!(" at {} {}", file!(), line!()); 
@@ -220,6 +239,6 @@ macro_rules! time {
 #[macro_export]
 macro_rules! lock {
     ($expr:expr) => {
-        crate::time!({ $expr.lock().unwrap() })
+        $crate::time!({ $expr.lock().unwrap() })
     };
 }

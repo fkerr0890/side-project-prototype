@@ -41,7 +41,7 @@ impl InboundMessage {
             .into_iter()
             .map(|m| { let parts = m.into_parts(); (parts.0, parts.2.sender) })
             .unzip();
-        (bytes.concat(), HashSet::from_iter(senders.into_iter()), datetime_to_timestamp(timestamp.into()))
+        (bytes.concat(), HashSet::from_iter(senders), datetime_to_timestamp(timestamp.into()))
     }
 }
 
@@ -95,6 +95,12 @@ pub struct Heartbeat {
     sender: Option<Sender>,
     timestamp: String,
     id: NumId
+}
+
+impl Default for Heartbeat {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Heartbeat {
@@ -287,7 +293,7 @@ impl DiscoverPeerMessage {
     }
     
     pub fn set_origin_if_unset(mut self, origin: Peer) -> Self {
-        if let None = self.origin {
+        if self.origin.is_none() {
             self.origin = Some(origin);
         }
         self

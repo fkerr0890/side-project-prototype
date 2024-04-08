@@ -11,6 +11,12 @@ pub struct Node {
     nat_kind: NatKind
 }
 
+impl Default for Node {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Node {
     pub fn new() -> Self {
         Self {

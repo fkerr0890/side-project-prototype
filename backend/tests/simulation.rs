@@ -30,7 +30,7 @@ async fn basic() {
         fs::create_dir("../peer_info").await.unwrap();
     
         let mut introducers: Vec<(Peer, mpsc::Sender<()>)> = Vec::new();
-        let num_hosts = 15;
+        let num_hosts = 1;
         let num_nodes: u16 = 30;
         let mut rng = rand::thread_rng();
         let start = (0..num_nodes).choose(&mut rng).unwrap();

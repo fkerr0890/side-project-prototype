@@ -81,7 +81,7 @@ impl StreamMessageProcessor
     
     async fn distribution_response_action(&mut self, payload: Vec<u8>, host_name: String, id: NumId) -> Option<StreamMessage> {
         let result = self.dmessage_staging.stage_message(payload, host_name.clone()).await;
-        if result.len() > 0 && result[0] == 1 {
+        if !result.is_empty() && result[0] == 1 {
             self.local_hosts.insert(host_name.clone(), SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3000));
         }
         Some(StreamMessage::new(host_name, id, StreamMessageKind::Distribution(StreamMessageInnerKind::Response), result))
@@ -131,7 +131,7 @@ impl SessionManager {
         let active_session_info = active_sessions_client.entry(host_name.clone()).or_default();
         self.keep_peer_conns_alive(active_session_info.active_dests.dests.collection().set().clone(), new_entry);
         let dests = active_session_info.active_dests.dests_cloned();
-        let set_cached_message_timer = dests.len() > 0;
+        let set_cached_message_timer = !dests.is_empty();
         for dest in dests {
             self.outbound_gateway.send_individual(dest.socket, &mut message, true, true);
             active_session_info.active_dests.dests.insert(dest, "Stream:ActiveDestsClientRenew");
@@ -198,10 +198,11 @@ impl Default for ActiveDests {
 }
 
 type FollowUpComponents = (Arc<UdpSocket>, Arc<Mutex<KeyStore>>, Peer);
+type CachedMessages = TransientCollection<ArcMap<NumId, (StreamMessage, Option<mpsc::UnboundedSender<StreamResponseType>>)>>;
 
 struct ActiveSessionInfo {
     active_dests: ActiveDests,
-    cached_messages: TransientCollection<ArcMap<NumId, (StreamMessage, Option<mpsc::UnboundedSender<StreamResponseType>>)>>,
+    cached_messages: CachedMessages,
     resource_queue: TransientCollection<ArcDeque<NumId>>
 }
 
@@ -214,7 +215,7 @@ impl ActiveSessionInfo {
         }
     }
 
-    fn handle_cached_message<'a>(id: NumId, cached_message: Option<&'a mut (StreamMessage, Option<mpsc::UnboundedSender<StreamResponseType>>)>) -> Option<&'a mut StreamMessage> {
+    fn handle_cached_message(id: NumId, cached_message: Option<&mut (StreamMessage, Option<mpsc::UnboundedSender<StreamResponseType>>)>) -> Option<&mut StreamMessage> {
         let Some(cached_message) = cached_message else {
             debug!(%id, "Prevented request from client, reason: request expired for resource"); return None;
         };
@@ -320,7 +321,7 @@ impl DMessageStaging {
     }
 
     async fn stage_message(&mut self, payload: Vec<u8>, host_name: String) -> Vec<u8> {
-        if payload.len() > 0 {
+        if !payload.is_empty() {
             lock!(self.message_staging.collection().map()).entry(host_name).or_default().push(payload);
             Vec::with_capacity(0)
         }

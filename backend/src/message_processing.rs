@@ -58,8 +58,10 @@ impl InboundGateway {
 }
 
 pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str, line: u32) -> String {
-    format!("{} {} {}", send_error.to_string(), file, line)
+    format!("{} {} {}", send_error, file, line)
 }
+
+type MessagesErrors = (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>);
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
@@ -126,12 +128,12 @@ impl OutboundGateway {
         let chunk_size = if to_be_chunked { 975 - (bincode::serialized_size(&base_is_encrypted).unwrap() + bincode::serialized_size(&separate_parts).unwrap()) as usize } else { bytes.len() };
         let chunks = bytes.chunks(chunk_size);
         let num_chunks = chunks.len();
-        let (mut messages, errors): (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>) = chunks
+        let (mut messages, errors): MessagesErrors = chunks
             .enumerate()
             .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store.clone(), dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks), matches!(base_is_encrypted, IsEncrypted::True(_))))
             .map(|r| { match r { Ok(bytes) => (bytes, String::new()), Err(e) => (Vec::new(), e) } })
-            .partition(|r| r.0.len() > 0);
-        if errors.len() > 0 {
+            .partition(|r| !r.0.is_empty());
+        if !errors.is_empty() {
             error!("{}", errors.into_iter().map(|e| e.1).collect::<Vec<String>>().join(", ")); return None;
         }
         messages.shuffle(&mut SmallRng::from_entropy());

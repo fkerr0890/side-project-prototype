@@ -41,7 +41,7 @@ impl DiscoverPeerProcessor {
         let sender = request.sender();
         let sender = if sender.id == origin.id { None } else { Some(sender) };
         let mut hairpin_response = DiscoverPeerMessage::new(DpMessageKind::Response,
-            Some(origin.clone()),
+            Some(origin),
             request.id(),
         request.hop_count());
         hairpin_response.try_decrement_hop_count();
