@@ -148,8 +148,11 @@ impl SessionManager {
         let (socket, myself, peer_ops) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.peer_ops.clone());
         tokio::spawn(async move {
             loop {
-                for peer in dests.lock().unwrap().iter() {
-                    if !peer_ops.lock().unwrap().has_peer(peer.id) {
+                {
+                    let dests = dests.lock().unwrap();
+                    let mut dests_filtered = dests.iter().filter(|peer|peer.id != myself.id && !peer_ops.lock().unwrap().has_peer(peer.id));
+                    if (&mut dests_filtered).peekable().peek().is_none() { return };
+                    for peer in dests_filtered {
                         OutboundGateway::send_static(&socket, peer.socket, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
                     }
                 }

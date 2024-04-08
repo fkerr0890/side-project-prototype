@@ -22,6 +22,7 @@ async fn basic() {
         .with_line_number(true)
         .with_span_events(FmtSpan::NEW)
         .with_max_level(Level::DEBUG).init();
+    // console_subscriber::init();
 
     let regenerate: bool = true;
     if regenerate {
