@@ -102,10 +102,7 @@ impl DiscoverPeerProcessor {
 
     #[instrument(level = "trace", skip(socket, myself, message_staging))]
     fn send_final_response_static(socket: &Arc<UdpSocket>, dest: EndpointPair, myself: Peer, message_staging: &mut ArcMap<NumId, DiscoverPeerMessage>, id: NumId) {
-        let staged_message = {
-            message_staging.pop(&id)
-        };
-        if let Some(mut staged_message) = staged_message {
+        if let Some(mut staged_message) = message_staging.pop(&id) {
             staged_message.set_kind(DpMessageKind::IveGotSome);
             OutboundGateway::send_private_public_static(socket, dest, myself, &mut staged_message, ToBeEncrypted::False, false);
         }

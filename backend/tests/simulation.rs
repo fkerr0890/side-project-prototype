@@ -70,6 +70,10 @@ async fn basic() {
         }
         println!("Setup complete");
     }
-    tokio::spawn(async move { sleep(Duration::from_secs(15)).await; println!("MAX_LOCK_TIME: {:.2?}", MAX_TIME.lock().unwrap())});
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(15)).await;
+        let (max, sum, count, ref at) = *MAX_TIME.lock().unwrap();
+        println!("Max: {:.2?}, Avg: {:.2?},{}", max, sum / count, at);
+    });
     future::pending::<()>().await;
 }

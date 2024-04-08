@@ -229,8 +229,10 @@ macro_rules! time {
             let mut data = $crate::MAX_TIME.lock().unwrap();
             if data.0 < duration {
                 data.0 = duration;
-                data.1 = format!(" at {} {}", file!(), line!()); 
+                data.3 = format!(" at {} {}", file!(), line!()); 
             }
+            data.1 += duration;
+            data.2 += 1;
             output
         }
     }
