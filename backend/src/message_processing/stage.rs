@@ -1,12 +1,13 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
+use ring::aead;
 use tokio::{sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
-use super::{EmptyOption, OutboundGateway, ToBeEncrypted, SRP_TTL_SECONDS};
+use super::{EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
-    from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, InboundMessage)>,
+    from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, Vec<u8>)>,
     to_srp: mpsc::UnboundedSender<SearchMessage>,
     to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
     to_smp: mpsc::UnboundedSender<StreamMessage>,
@@ -14,14 +15,14 @@ pub struct MessageStaging {
     to_dsmp: mpsc::UnboundedSender<StreamMessage>,
     to_dh: mpsc::UnboundedSender<DistributionMessage>,
     message_staging: TransientCollection<ArcMap<NumId, HashMap<usize, InboundMessage>>>,
-    message_caching: TransientCollection<ArcMap<NumId, Vec<InboundMessage>>>,
+    message_caching: TransientCollection<ArcMap<NumId, Vec<(SocketAddrV4, Vec<u8>)>>>,
     unconfirmed_peers: TransientCollection<ArcMap<NumId, EndpointPair>>,
     outbound_gateway: OutboundGateway
 }
 
 impl MessageStaging {
     pub fn new(
-        from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, InboundMessage)>,
+        from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, Vec<u8>)>,
         to_srp: mpsc::UnboundedSender<SearchMessage>,
         to_dpp: mpsc::UnboundedSender<DiscoverPeerMessage>,
         to_smp: mpsc::UnboundedSender<StreamMessage>,
@@ -46,15 +47,8 @@ impl MessageStaging {
     }
 
     pub async fn receive(&mut self) -> EmptyOption {
-        let (peer_addr, inbound_message) = self.from_gateway.recv().await?;
-        if inbound_message.separate_parts().sender().socket != peer_addr {
-            return Some(warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %peer_addr, "Sender doesn't match actual sender"));
-        }
-        if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
-            // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
-            self.outbound_gateway.add_new_peer(Peer::new(endpoint_pair, inbound_message.separate_parts().sender().id));
-        }
-        let res = self.stage_message(inbound_message);
+        let (sender_addr, message_bytes) = self.from_gateway.recv().await?;
+        let res = self.stage_message(message_bytes, sender_addr);
         if let Some(message_parts) = res {
             self.reassemble_message(message_parts);
         }
@@ -81,10 +75,10 @@ impl MessageStaging {
         self.unconfirmed_peers.set_timer(peer.id, "Stage:UnconfirmedPeers");
         lock!(self.unconfirmed_peers.collection().map()).insert(peer.id, peer.endpoint_pair);
         let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
-        let (socket, myself) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself);
+        let (socket, myself, key_store) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.key_store.clone());
         tokio::spawn(async move {
             while unconfirmed_peers.contains_key(&peer.id) {
-                OutboundGateway::send_private_public_static(&socket, peer.endpoint_pair, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
+                OutboundGateway::send_private_public_static(&socket, peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
             }
         });
@@ -94,13 +88,13 @@ impl MessageStaging {
     fn handle_key_agreement(&mut self, mut message: StreamMessage) {
         let sender = message.only_sender().unwrap();
         let (id, peer_public_key) = message.into_hash_payload();
-        result_early_return!(lock!(self.outbound_gateway.key_store).agree(sender.socket, peer_public_key));
+        result_early_return!(lock!(self.outbound_gateway.key_store).agree(sender.id, peer_public_key));
         let cached_messages = self.message_caching.pop(&id);
         if let Some(cached_messages) = cached_messages {
             debug!("Staging cached messages");
             let mut res = None;
-            for message in cached_messages {
-                res = self.stage_message(message);
+            for (sender_addr, message) in cached_messages {
+                res = self.stage_message(message, sender_addr);
             }
             if let Some(message_parts) = res {
                 self.reassemble_message(message_parts);
@@ -165,24 +159,32 @@ impl MessageStaging {
     }
 
     // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
-    fn stage_message(&mut self, mut inbound_message: InboundMessage) -> Option<Vec<InboundMessage>> {
-        let (is_encrypted, sender) = (inbound_message.take_is_encrypted(), inbound_message.separate_parts().sender().socket);
-        if let IsEncrypted::True(nonce) = is_encrypted {
-            let payload = inbound_message.payload_mut();
-            let crypto_result = lock!(self.outbound_gateway.key_store).transform(sender, payload, Direction::Decode(nonce.clone()));
-            match crypto_result {
-                Ok(plaintext) => { *payload = plaintext },
-                Err(Error::NoKey) => {
-                    self.message_caching.set_timer(inbound_message.separate_parts().id(), "Stage:MessageCaching");
-                    let mut message_caching = lock!(self.message_caching.collection().map());
-                    let cached_messages = message_caching.entry(inbound_message.separate_parts().id()).or_default();
-                    inbound_message.set_is_encrypted_true(nonce);
-                    cached_messages.push(inbound_message);
-                    debug!("no key");
-                    return None;
-                },
-                Err(error) => { error!(?error); return None; }
-            };
+    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) -> Option<Vec<InboundMessage>> {
+        // let (is_encrypted, sender) = (message_bytes.take_is_encrypted(), message_bytes.separate_parts().sender().socket);
+        let mut suffix = message_bytes.split_off(message_bytes.len() - aead::NONCE_LEN - 16);
+        let nonce = suffix.split_off(suffix.len() - aead::NONCE_LEN);
+        let peer_id = NumId(u128::from_be_bytes(suffix.try_into().unwrap()));
+        let crypto_result = lock!(self.outbound_gateway.key_store).transform(peer_id, &mut message_bytes, Direction::Decode(nonce));
+        match crypto_result {
+            Ok(plaintext) => { message_bytes = plaintext },
+            Err(Error::NoKey) => {
+                self.message_caching.set_timer(peer_id, "Stage:MessageCaching");
+                let mut message_caching = lock!(self.message_caching.collection().map());
+                let cached_messages = message_caching.entry(peer_id).or_default();
+                cached_messages.push((sender_addr, message_bytes));
+                debug!("no key");
+                return None;
+            },
+            Err(error) => { error!(?error); return None; }
+        };
+        let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
+        if inbound_message.separate_parts().sender().socket != sender_addr {
+            warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
+            return None;
+        }
+        if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
+            // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
+            self.outbound_gateway.add_new_peer(Peer::new(endpoint_pair, inbound_message.separate_parts().sender().id));
         }
         let (index, num_chunks) = inbound_message.separate_parts().position();
         if num_chunks == 1 {

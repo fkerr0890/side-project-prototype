@@ -5,7 +5,7 @@ use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::error;
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, http::{self, ServerContext}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     nat_kind: NatKind
@@ -129,7 +129,7 @@ impl Node {
                 NumId(Uuid::new_v4().as_u128()),
                 (peer::MAX_PEERS, peer::MAX_PEERS));
             message.add_peer(introducer);
-            let inbound_message = InboundMessage::new(bincode::serialize(&message).unwrap(), IsEncrypted::False, SeparateParts::new(Sender::new(endpoint_pair.private_endpoint, id), message.id()));
+            let inbound_message = InboundMessage::new(bincode::serialize(&message).unwrap(), SeparateParts::new(Sender::new(endpoint_pair.private_endpoint, id), message.id()));
             socket.send_to(&bincode::serialize(&inbound_message).unwrap(), endpoint_pair.private_endpoint).await.unwrap();
         }
         else {

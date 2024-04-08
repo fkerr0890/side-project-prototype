@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, net::{Ipv4Addr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 use tokio::{fs, net::UdpSocket, sync::mpsc::{self, UnboundedSender}, time::sleep};
 use tracing::{debug, instrument, trace, warn};
-use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::ToBeEncrypted, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, ArcSet, TransientCollection, TtlType}};
+use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, ArcSet, TransientCollection, TtlType}};
 use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor
@@ -47,7 +47,7 @@ impl StreamMessageProcessor
         if let Some(sender) = sender {
             self.session_manager.session_logic(IsHost::True(sender), host_name).await;
             let (id, payload, host_name, kind) = message.into_hash_payload_host_name_kind();
-            self.send_response(payload, sender.socket, host_name, id, kind).await;
+            self.send_response(payload, sender, host_name, id, kind).await;
         }
         else {
             let Ok(to_http_handler) = self.from_http_handler.try_recv() else { panic!("Oh fuck nah") };
@@ -56,14 +56,14 @@ impl StreamMessageProcessor
     }
 
     #[instrument(level = "trace", skip(self, payload))]
-    async fn send_response(&mut self, payload: Vec<u8>, dest: SocketAddrV4, host_name: String, id: NumId, kind: StreamMessageKind) {
+    async fn send_response(&mut self, payload: Vec<u8>, dest: Sender, host_name: String, id: NumId, kind: StreamMessageKind) {
         let response = match kind {
             StreamMessageKind::Resource(_) => self.http_response_action(&payload, host_name, id).await,
             StreamMessageKind::Distribution(_) => self.distribution_response_action(payload, host_name, id).await,
             _ => unimplemented!()
         };
         if let Some(mut response) = response {
-            self.session_manager.outbound_gateway.send_individual(dest, &mut response, true, true);
+            self.session_manager.outbound_gateway.send_individual(dest, &mut response, true);
         }
     }
 
@@ -122,7 +122,7 @@ impl SessionManager {
         self.keep_peer_conns_alive(active_dests.dests.collection().set().clone(), new_entry);
         active_dests.dests.insert(dest, "Stream:ActiveDestsHostRenew");
         let mut key_store = lock!(self.outbound_gateway.key_store);
-        key_store.reset_expiration(dest.socket);
+        key_store.reset_expiration(dest.id);
     }
 
     fn renew_dests_client(&mut self, host_name: String, mut message: StreamMessage, to_http_handler: UnboundedSender<StreamResponseType>) {
@@ -133,7 +133,7 @@ impl SessionManager {
         let dests = active_session_info.active_dests.dests_cloned();
         let set_cached_message_timer = !dests.is_empty();
         for dest in dests {
-            self.outbound_gateway.send_individual(dest.socket, &mut message, true, true);
+            self.outbound_gateway.send_individual(dest, &mut message, true);
             active_session_info.active_dests.dests.insert(dest, "Stream:ActiveDestsClientRenew");
         }
         let id = message.id();
@@ -146,7 +146,7 @@ impl SessionManager {
         if !begin {
             return;
         }
-        let (socket, myself, peer_ops) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.peer_ops.clone());
+        let (socket, myself, peer_ops, key_store) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.peer_ops.clone(), self.outbound_gateway.key_store.clone());
         tokio::spawn(async move {
             loop {
                 {
@@ -154,7 +154,7 @@ impl SessionManager {
                     let mut dests_filtered = dests.iter().filter(|peer|peer.id != myself.id && !lock!(peer_ops).has_peer(peer.id));
                     if (&mut dests_filtered).peekable().peek().is_none() { return };
                     for peer in dests_filtered {
-                        OutboundGateway::send_static(&socket, peer.socket, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
+                        OutboundGateway::send_static(&socket, *peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
                     }
                 }
                 sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
@@ -166,8 +166,8 @@ impl SessionManager {
         let mut active_sessions = lock!(self.active_sessions_client.collection().map());
         let active_session = active_sessions.get_mut(key_agreement.host_name()).unwrap();
         active_session.initial_request(key_agreement, |message, cached_message, dest| {
-            self.outbound_gateway.send_individual(dest, message, false, false);
-            self.outbound_gateway.send_individual(dest, cached_message, true, true);
+            self.outbound_gateway.send_individual(dest, message, false);
+            self.outbound_gateway.send_individual(dest, cached_message, true);
         }, (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself));
     }
 
@@ -225,7 +225,7 @@ impl ActiveSessionInfo {
         debug!(%id, "Prevented request from client, reason: already received resource"); None
     }
 
-    fn initial_request(&mut self, mut key_agreement: StreamMessage, action: impl Fn(&mut StreamMessage, &mut StreamMessage, SocketAddrV4), follow_up_components: FollowUpComponents) {
+    fn initial_request(&mut self, mut key_agreement: StreamMessage, action: impl Fn(&mut StreamMessage, &mut StreamMessage, Sender), follow_up_components: FollowUpComponents) {
         let dest = key_agreement.only_sender().unwrap();
         if self.active_dests.dests.contains_key(&dest) {
             return;
@@ -239,7 +239,7 @@ impl ActiveSessionInfo {
         let mut cached_messages = lock!(self.cached_messages.collection().map());
         {
             let cached_message = option_early_return!(Self::handle_cached_message(id, cached_messages.get_mut(&id)));
-            action(&mut key_agreement, cached_message, dest.socket);
+            action(&mut key_agreement, cached_message, dest);
         }
         cached_messages.insert(cached_key_agreement_id, (key_agreement, None));
         self.start_follow_ups(cached_key_agreement_id, follow_up_components.clone());
@@ -257,7 +257,7 @@ impl ActiveSessionInfo {
                 for dest in lock!(dests.set()).iter() {
                     debug!(%id, ?dest, "Sending follow up");
                     let (ref socket, ref key_store, myself) = follow_up_components;
-                    OutboundGateway::send_static(socket, dest.socket, myself, cached_message, ToBeEncrypted::True(key_store.clone()), true);
+                    OutboundGateway::send_static(socket, *dest, myself, cached_message, key_store.clone(), true);
                 }
             }
         });

@@ -1,11 +1,11 @@
-use std::{net::SocketAddrV4, sync::Arc};
+use std::{net::SocketAddrV4, sync::{Arc, Mutex}};
 
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{instrument, warn};
 
-use crate::{lock, message::{DiscoverPeerMessage, DpMessageKind, Message, NumId, Peer, Sender}, node::EndpointPair, option_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::KeyStore, lock, message::{DiscoverPeerMessage, DpMessageKind, Message, NumId, Peer, Sender}, option_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
-use super::{BreadcrumbService, EmptyOption, OutboundGateway, ToBeEncrypted, DPP_TTL_MILLIS};
+use super::{BreadcrumbService, EmptyOption, OutboundGateway, DPP_TTL_MILLIS};
 
 pub struct DiscoverPeerProcessor {
     outbound_gateway: OutboundGateway,
@@ -50,7 +50,13 @@ impl DiscoverPeerProcessor {
             self.return_response(hairpin_response, sender);
             return;
         }
-        let early_return_context = (hairpin_response, self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself, self.outbound_gateway.socket.clone());
+        let early_return_context = (
+            hairpin_response,
+            Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint,
+                self.outbound_gateway.myself.id),
+                self.outbound_gateway.myself,
+                self.outbound_gateway.socket.clone(),
+                self.outbound_gateway.key_store.clone());
         if self.breadcrumb_service.try_add_breadcrumb(Some(early_return_context), request.id(), sender) {
             self.outbound_gateway.send_request(&mut request, sender);
         }
@@ -67,8 +73,8 @@ impl DiscoverPeerProcessor {
                 break 'b1 staged_message.peer_list().len();
             }
             let mut message_staging_clone = self.message_staging.collection().clone();
-            let (socket, dest, myself, id) = (self.outbound_gateway.socket.clone(), message.origin().unwrap().endpoint_pair, self.outbound_gateway.myself, message.id());
-            self.message_staging.set_timer_with_send_action(message.id(), move || { Self::send_final_response_static(&socket, dest, myself, &mut message_staging_clone, id); }, "Discover:MessageStaging");
+            let (socket, dest, myself, id, key_store) = (self.outbound_gateway.socket.clone(), message.origin().unwrap(), self.outbound_gateway.myself, message.id(), self.outbound_gateway.key_store.clone());
+            self.message_staging.set_timer_with_send_action(message.id(), move || { Self::send_final_response_static(&socket, dest, myself, &mut message_staging_clone, id, key_store.clone()); }, "Discover:MessageStaging");
             0
         };
 
@@ -86,25 +92,25 @@ impl DiscoverPeerProcessor {
         let dest = if dest.is_some() { Some(dest) } else { self.breadcrumb_service.get_dest(&response.id()) };
         let dest = option_early_return!(dest);
         if let Some(dest) = dest {
-            self.outbound_gateway.send_individual(dest.socket, &mut response, false, false);
+            self.outbound_gateway.send_individual(dest, &mut response, false);
         }
         else {
-            let (id, origin) = (response.id(), response.origin().unwrap().endpoint_pair);
+            let (id, origin) = (response.id(), response.origin().unwrap());
             if self.stage_message(response) {
                 self.send_final_response(id, origin);
             }
         }
     }
 
-    fn send_final_response(&mut self, id: NumId, dest: EndpointPair) {
-        Self::send_final_response_static(&self.outbound_gateway.socket, dest, self.outbound_gateway.myself, self.message_staging.collection_mut(), id);
+    fn send_final_response(&mut self, id: NumId, dest: Peer) {
+        Self::send_final_response_static(&self.outbound_gateway.socket, dest, self.outbound_gateway.myself, self.message_staging.collection_mut(), id, self.outbound_gateway.key_store.clone());
     }
 
-    #[instrument(level = "trace", skip(socket, myself, message_staging))]
-    fn send_final_response_static(socket: &Arc<UdpSocket>, dest: EndpointPair, myself: Peer, message_staging: &mut ArcMap<NumId, DiscoverPeerMessage>, id: NumId) {
+    #[instrument(level = "trace", skip(socket, myself, message_staging, key_store))]
+    fn send_final_response_static(socket: &Arc<UdpSocket>, dest: Peer, myself: Peer, message_staging: &mut ArcMap<NumId, DiscoverPeerMessage>, id: NumId, key_store: Arc<Mutex<KeyStore>>) {
         if let Some(mut staged_message) = message_staging.pop(&id) {
             staged_message.set_kind(DpMessageKind::IveGotSome);
-            OutboundGateway::send_private_public_static(socket, dest, myself, &mut staged_message, ToBeEncrypted::False, false);
+            OutboundGateway::send_private_public_static(socket, dest, myself, &mut staged_message, key_store, false);
         }
     }
 
@@ -113,9 +119,6 @@ impl DiscoverPeerProcessor {
         self.breadcrumb_service.try_add_breadcrumb(None, message.id(), Some(Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself.id)));
         let introducer = message.get_last_peer();
         message.set_kind(DpMessageKind::Request);
-        self.outbound_gateway.send(introducer.endpoint_pair,
-            &mut message.set_origin_if_unset(self.outbound_gateway.myself),
-            false,
-            false);
+        self.outbound_gateway.send(introducer, &mut message.set_origin_if_unset(self.outbound_gateway.myself), false);
     }
 }

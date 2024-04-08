@@ -1,16 +1,16 @@
-use std::{net::SocketAddrV4, sync::mpsc, fmt::Display};
+use std::{sync::mpsc, fmt::Display};
 
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 
-use crate::{lock, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{lock, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
     0xbe, 0xf9, 0xf5, 0x02,
     ];
 pub struct KeyStore {
-    private_keys: TransientCollection<ArcMap<String, agreement::EphemeralPrivateKey>>,
-    symmetric_keys: TransientCollection<ArcMap<String, KeySet>>,
+    private_keys: TransientCollection<ArcMap<NumId, agreement::EphemeralPrivateKey>>,
+    symmetric_keys: TransientCollection<ArcMap<NumId, KeySet>>,
     rng: SystemRandom
 }
 impl Default for KeyStore {
@@ -28,11 +28,11 @@ impl KeyStore {
         }
     }
 
-    fn generate_key_pair(&mut self, index: String) -> Option<agreement::PublicKey> {
+    fn generate_key_pair(&mut self, index: NumId) -> Option<agreement::PublicKey> {
         if self.symmetric_keys.contains_key(&index) {
             return None;
         }
-        let is_new_key = self.private_keys.set_timer(index.clone(), "Crypto:PrivateKeys");
+        let is_new_key = self.private_keys.set_timer(index, "Crypto:PrivateKeys");
         let mut private_keys = lock!(self.private_keys.collection().map());
         if is_new_key {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
@@ -45,17 +45,13 @@ impl KeyStore {
         }
     }
 
-    pub fn host_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
-        self.generate_key_pair(peer_addr.to_string())
+    pub fn public_key(&mut self, peer_id: NumId) -> Option<agreement::PublicKey> {
+        self.generate_key_pair(peer_id)
     }
 
-    pub fn requester_public_key(&mut self, peer_addr: SocketAddrV4) -> Option<agreement::PublicKey> {
-        self.generate_key_pair(peer_addr.to_string())
-    }
-
-    pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
+    pub fn transform<'a>(&'a mut self, peer_id: NumId, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
         let mut symmetric_keys = lock!(self.symmetric_keys.collection().map());
-        let (aad, key_set) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_addr.to_string()).ok_or(Error::NoKey)?);
+        let (aad, key_set) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_id).ok_or(Error::NoKey)?);
         match mode {
             Direction::Encode => {
                 key_set.sealing_key.seal_in_place_append_tag(aad, payload)?;
@@ -69,10 +65,9 @@ impl KeyStore {
         }
     }
 
-    pub fn agree(&mut self, peer_addr: SocketAddrV4, peer_public_key: Vec<u8>) -> Result<(), Error> {
+    pub fn agree(&mut self, peer_id: NumId, peer_public_key: Vec<u8>) -> Result<(), Error> {
         // println!("{:?}, finding: {}", self.private_keys, peer_addr.to_string());
-        let index = peer_addr.to_string();
-        let Some(my_private_key) = self.private_keys.pop(&index) else { return Ok(()) };
+        let Some(my_private_key) = self.private_keys.pop(&peer_id) else { return Ok(()) };
         let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let symmetric_key = agreement::agree_ephemeral(my_private_key, &peer_public_key, |key_material| {
             hkdf::Salt::new(HKDF_SHA256, &INITIAL_SALT).extract(key_material)
@@ -87,15 +82,15 @@ impl KeyStore {
         let (nonce_tx, nonce_rx) = mpsc::channel();
         let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value, nonce_tx));
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
-        if !self.symmetric_keys.set_timer(index.clone(), "Crypto:SymmetricKeys") {
+        if !self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeys") {
             return Ok(())
         }
-        lock!(self.symmetric_keys.collection().map()).insert(index, key_set);
+        lock!(self.symmetric_keys.collection().map()).insert(peer_id, key_set);
         Ok(())
     }
 
-    pub fn reset_expiration(&mut self, peer_addr: SocketAddrV4) {
-        self.symmetric_keys.set_timer(peer_addr.to_string(), "Crypto:SymmetricKeysRenew");
+    pub fn reset_expiration(&mut self, peer_id: NumId) {
+        self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeysRenew");
     }
 }
 

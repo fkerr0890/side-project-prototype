@@ -2,7 +2,6 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
 use std::fmt::{Debug, Display};
-use std::mem;
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
@@ -23,14 +22,11 @@ pub trait Message {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InboundMessage {
     payload: Vec<u8>,
-    is_encrypted: IsEncrypted,
     separate_parts: SeparateParts
 }
 impl InboundMessage {
-    pub fn new(payload: Vec<u8>, is_encrypted: IsEncrypted, separate_parts: SeparateParts) -> Self { Self { payload, is_encrypted, separate_parts } }
-    pub fn into_parts(self) -> (Vec<u8>, IsEncrypted, SeparateParts) { (self.payload, self.is_encrypted, self.separate_parts) }
-    pub fn take_is_encrypted(&mut self) -> IsEncrypted { mem::take(&mut self.is_encrypted) }
-    pub fn set_is_encrypted_true(&mut self, nonce: Vec<u8>) { self.is_encrypted = IsEncrypted::True(nonce) }
+    pub fn new(payload: Vec<u8>, separate_parts: SeparateParts) -> Self { Self { payload, separate_parts } }
+    pub fn into_parts(self) -> (Vec<u8>, SeparateParts) { (self.payload, self.separate_parts) }
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn separate_parts(&self) -> &SeparateParts { &self.separate_parts }
 
@@ -39,7 +35,7 @@ impl InboundMessage {
         messages.sort_by(|a, b| a.separate_parts.position.0.cmp(&b.separate_parts.position.0));
         let (bytes, senders): (Vec<Vec<u8>>, Vec<Sender>) = messages
             .into_iter()
-            .map(|m| { let parts = m.into_parts(); (parts.0, parts.2.sender) })
+            .map(|m| { let parts = m.into_parts(); (parts.0, parts.1.sender) })
             .unzip();
         (bytes.concat(), HashSet::from_iter(senders), datetime_to_timestamp(timestamp.into()))
     }
@@ -162,7 +158,7 @@ impl Message for StreamMessage {
     fn set_sender(&mut self, sender: Sender) { self.senders.push(sender); }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Peer {
     pub endpoint_pair: EndpointPair,
     pub id: NumId

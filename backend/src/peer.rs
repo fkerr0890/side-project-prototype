@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use serde::{Serialize, Deserialize};
 
@@ -15,8 +15,8 @@ pub enum PeerStatus {
 }
 
 pub struct PeerOps {
-    peer_queue: DoublePriorityQueue<NumId, i32>,
-    peer_map: HashMap<NumId, EndpointPair>
+    peer_queue: DoublePriorityQueue<Peer, i32>,
+    peer_ids: HashSet<NumId>
 }
 
 impl Default for PeerOps {
@@ -26,10 +26,10 @@ impl Default for PeerOps {
 }
 
 impl PeerOps {
-    pub fn new() -> Self { Self { peer_queue: DoublePriorityQueue::new(), peer_map: HashMap::new() } }
+    pub fn new() -> Self { Self { peer_queue: DoublePriorityQueue::new(), peer_ids: HashSet::new() } }
 
-    pub fn peers(&self) -> &HashMap<NumId, EndpointPair> { &self.peer_map }
-    pub fn peers_and_scores(&self) -> Vec<(EndpointPair, i32, NumId)> { self.peer_queue.iter().map(|(id, score)| (*self.peer_map.get(id).unwrap(), *score, *id)).collect() }
+    pub fn peers(&self) -> Vec<Peer> { self.peer_queue.iter().map(|(peer, _)| *peer).collect() }
+    pub fn peers_and_scores(&self) -> Vec<(EndpointPair, i32, NumId)> { self.peer_queue.iter().map(|(peer, score)| (peer.endpoint_pair, *score, peer.id)).collect() }
     pub fn peers_len(&self) -> usize { self.peer_queue.len() }
 
     pub fn add_initial_peer(&mut self, peer: Peer) {
@@ -37,8 +37,8 @@ impl PeerOps {
     }
 
     pub fn add_peer(&mut self, peer: Peer, score: i32) {
-        self.peer_map.insert(peer.id, peer.endpoint_pair);
-        let None = self.peer_queue.change_priority(&peer.id, score) else { return };
+        self.peer_ids.insert(peer.id);
+        let None = self.peer_queue.change_priority(&peer, score) else { return };
         let peer_limit_reached = self.peer_queue.len() >= MAX_PEERS as usize;
         let mut should_push = !peer_limit_reached;
         if let Some(worst_peer) = self.peer_queue.peek_min() {
@@ -48,9 +48,9 @@ impl PeerOps {
             if peer_limit_reached {
                 self.peer_queue.pop_min();
             }
-            self.peer_queue.push(peer.id, score);
+            self.peer_queue.push(peer, score);
         }
     }
 
-    pub fn has_peer(&self, id: NumId) -> bool { self.peer_map.contains_key(&id) }
+    pub fn has_peer(&self, peer_id: NumId) -> bool { self.peer_ids.contains(&peer_id) }
 }
