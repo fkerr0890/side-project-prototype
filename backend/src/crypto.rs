@@ -2,7 +2,7 @@ use std::{net::SocketAddrV4, sync::mpsc, fmt::Display};
 
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 
-use crate::{message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcMap, ArcCollection, TransientCollection, TtlType}};
+use crate::{lock, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
@@ -27,7 +27,7 @@ impl KeyStore {
             return None;
         }
         let is_new_key = self.private_keys.set_timer(index.clone(), "Crypto:PrivateKeys");
-        let mut private_keys = self.private_keys.collection().map().lock().unwrap();
+        let mut private_keys = lock!(self.private_keys.collection().map());
         if is_new_key {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
             let public_key = my_private_key.compute_public_key().unwrap();
@@ -48,7 +48,7 @@ impl KeyStore {
     }
 
     pub fn transform<'a>(&'a mut self, peer_addr: SocketAddrV4, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
-        let mut symmetric_keys = self.symmetric_keys.collection().map().lock().unwrap();
+        let mut symmetric_keys = lock!(self.symmetric_keys.collection().map());
         let (aad, key_set) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_addr.to_string()).ok_or(Error::NoKey)?);
         match mode {
             Direction::Encode => {
@@ -84,7 +84,7 @@ impl KeyStore {
         if !self.symmetric_keys.set_timer(index.clone(), "Crypto:SymmetricKeys") {
             return Ok(())
         }
-        self.symmetric_keys.collection().map().lock().unwrap().insert(index, key_set);
+        lock!(self.symmetric_keys.collection().map()).insert(index, key_set);
         Ok(())
     }
 

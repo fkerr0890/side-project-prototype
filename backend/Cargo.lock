@@ -817,7 +817,6 @@ dependencies = [
  "chrono",
  "console-subscriber",
  "hyper",
- "once_cell",
  "priority-queue",
  "rand",
  "ring",

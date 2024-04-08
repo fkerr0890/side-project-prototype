@@ -1,9 +1,9 @@
 use std::net::SocketAddrV4;
 
 use tokio::sync::mpsc;
-use tracing::{debug, instrument, error};
+use tracing::{debug, instrument};
 
-use crate::{message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcSet, TransientCollection, TtlType}};
+use crate::{lock, message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcSet, TransientCollection, TtlType}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
@@ -52,7 +52,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
         else {
             let sender = if let Some(sender) = search_response.sender() { sender } else { Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself.id) };
             let (id, host_name, peer_public_key, origin) = search_response.into_id_host_name_public_key_origin();
-            let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
+            let mut key_store = lock!(self.outbound_gateway.key_store);
             let origin = if sender.socket == origin.endpoint_pair.private_endpoint { sender } else { Sender::new(origin.endpoint_pair.public_endpoint, origin.id) };
             let my_public_key = option_early_return!(key_store.requester_public_key(origin.socket));
             result_early_return!(key_store.agree(origin.socket, peer_public_key));
@@ -72,7 +72,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
     }
 
     fn build_response(&self, id: NumId, peer_addr: SocketAddrV4, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
-        let public_key = self.outbound_gateway.key_store.lock().unwrap().host_public_key(peer_addr)?;
+        let public_key = lock!(self.outbound_gateway.key_store).host_public_key(peer_addr)?;
         Some(SearchMessage::key_response(self.outbound_gateway.myself.clone(), id, host_name, public_key.as_ref().to_vec(), is_resource_kind))
     }
 

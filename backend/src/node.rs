@@ -5,7 +5,7 @@ use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::error;
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, http::{self, ServerContext}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}, utils::TtlType};
 
 pub struct Node {
     nat_kind: NatKind
@@ -134,7 +134,7 @@ impl Node {
             let public_endpoint = SocketAddrV4::from_str(&peer).unwrap();
             let private_endpoint = SocketAddrV4::from_str(&peer).unwrap();
             let peer = Peer::new(EndpointPair::new(public_endpoint, private_endpoint), id);
-            peer_ops_clone.lock().unwrap().add_initial_peer(peer);
+            lock!(peer_ops_clone).add_initial_peer(peer);
         }
 
         if let Some(mut report_trigger) = report_trigger {
@@ -216,7 +216,7 @@ impl NodeInfo {
             name,
             port,
             id,
-            peers: peer_ops.lock().unwrap().peers_and_scores().into_iter().map(|(endpoint_pair, score, id)| (endpoint_pair.public_endpoint.port(), score, id.0)).collect(),
+            peers: lock!(peer_ops).peers_and_scores().into_iter().map(|(endpoint_pair, score, id)| (endpoint_pair.public_endpoint.port(), score, id.0)).collect(),
             is_start,
             is_end
         }

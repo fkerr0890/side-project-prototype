@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::{Direction, Error}, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{ArcMap, ArcCollection, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, IsEncrypted, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
 use super::{EmptyOption, OutboundGateway, ToBeEncrypted, SRP_TTL_SECONDS};
 
@@ -74,12 +74,12 @@ impl MessageStaging {
     fn send_nat_heartbeats(&mut self, peer: Peer) {
         if peer.id == self.outbound_gateway.myself.id
             || self.unconfirmed_peers.contains_key(&peer.id)
-            || self.outbound_gateway.peer_ops.lock().unwrap().has_peer(peer.id) {
+            || lock!(self.outbound_gateway.peer_ops).has_peer(peer.id) {
             return;
         }
         // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
         self.unconfirmed_peers.set_timer(peer.id, "Stage:UnconfirmedPeers");
-        self.unconfirmed_peers.collection().map().lock().unwrap().insert(peer.id, peer.endpoint_pair);
+        lock!(self.unconfirmed_peers.collection().map()).insert(peer.id, peer.endpoint_pair);
         let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
         let (socket, myself) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself);
         tokio::spawn(async move {
@@ -94,7 +94,7 @@ impl MessageStaging {
     fn handle_key_agreement(&mut self, mut message: StreamMessage) {
         let sender = message.only_sender().unwrap();
         let (id, peer_public_key) = message.into_hash_payload();
-        result_early_return!(self.outbound_gateway.key_store.lock().unwrap().agree(sender.socket, peer_public_key));
+        result_early_return!(lock!(self.outbound_gateway.key_store).agree(sender.socket, peer_public_key));
         let cached_messages = self.message_caching.pop(&id);
         if let Some(cached_messages) = cached_messages {
             debug!("Staging cached messages");
@@ -169,12 +169,12 @@ impl MessageStaging {
         let (is_encrypted, sender) = (inbound_message.take_is_encrypted(), inbound_message.separate_parts().sender().socket);
         if let IsEncrypted::True(nonce) = is_encrypted {
             let payload = inbound_message.payload_mut();
-            let crypto_result = self.outbound_gateway.key_store.lock().unwrap().transform(sender, payload, Direction::Decode(nonce.clone()));
+            let crypto_result = lock!(self.outbound_gateway.key_store).transform(sender, payload, Direction::Decode(nonce.clone()));
             match crypto_result {
                 Ok(plaintext) => { *payload = plaintext },
                 Err(Error::NoKey) => {
                     self.message_caching.set_timer(inbound_message.separate_parts().id(), "Stage:MessageCaching");
-                    let mut message_caching = self.message_caching.collection().map().lock().unwrap();
+                    let mut message_caching = lock!(self.message_caching.collection().map());
                     let cached_messages = message_caching.entry(inbound_message.separate_parts().id()).or_default();
                     inbound_message.set_is_encrypted_true(nonce);
                     cached_messages.push(inbound_message);
@@ -193,7 +193,7 @@ impl MessageStaging {
             let id = inbound_message.separate_parts().id();
             let staged_messages_len = {
                 self.message_staging.set_timer(id, "Stage:MessageStaging");
-                let mut message_staging = self.message_staging.collection().map().lock().unwrap();
+                let mut message_staging = lock!(self.message_staging.collection().map());
                 let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
                 staged_messages.insert(index, inbound_message);
                 staged_messages.len()

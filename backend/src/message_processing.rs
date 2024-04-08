@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info, instrument};
 
-use crate::{crypto::{Direction, KeyStore}, message::{DiscoverPeerMessage, InboundMessage, IsEncrypted, Message, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, IsEncrypted, Message, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection, TtlType}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -79,7 +79,7 @@ impl OutboundGateway {
     }
 
     pub fn send_request(&self, request: &mut(impl Message + Serialize), prev_sender: Option<Sender>) {
-        for (peer_id, endpoint_pair) in self.peer_ops.lock().unwrap().peers() {
+        for (peer_id, endpoint_pair) in lock!(self.peer_ops).peers() {
             match prev_sender { Some(s) if s.id == *peer_id => continue, _ => {}}
             self.send(*endpoint_pair, request, false, true);
         }
@@ -88,7 +88,7 @@ impl OutboundGateway {
     #[instrument(level = "trace", skip(self))]
     fn add_new_peer(&self, peer: Peer) {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
-        self.peer_ops.lock().unwrap().add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
+        lock!(self.peer_ops).add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
     }
 
     pub fn send(&self, dest: EndpointPair, message: &mut(impl Message + Serialize), to_be_encrypted: bool, to_be_chunked: bool) {
@@ -141,7 +141,7 @@ impl OutboundGateway {
     fn generate_inbound_message_bytes(key_store: Option<Arc<Mutex<KeyStore>>>, dest: SocketAddrV4, mut chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize), to_be_encrypted: bool) -> Result<Vec<u8>, String> {
         let is_encrypted = if to_be_encrypted {
             let key_store = key_store.unwrap();
-            let mut key_store = key_store.lock().unwrap();
+            let mut key_store = lock!(key_store);
             key_store.reset_expiration(dest);
             let nonce = key_store.transform(dest, &mut chunk, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
             IsEncrypted::True(nonce)
@@ -179,17 +179,17 @@ impl BreadcrumbService {
             self.breadcrumbs.set_timer(id, "BreadcrumbService")
         };
         if contains_key {
-            self.breadcrumbs.collection().map().lock().unwrap().insert(id, dest);
+            lock!(self.breadcrumbs.collection().map()).insert(id, dest);
         }
         contains_key
     }
 
     pub fn get_dest(&self, id: &NumId) -> Option<Option<Sender>> {
-        self.breadcrumbs.collection().map().lock().unwrap().get(id).copied()
+        lock!(self.breadcrumbs.collection().map()).get(id).copied()
     }
 
     pub fn remove_breadcrumb(&self, id: &NumId) {
-        self.breadcrumbs.collection().map().lock().unwrap().remove(id);
+        lock!(self.breadcrumbs.collection().map()).remove(id);
     }
 }
 

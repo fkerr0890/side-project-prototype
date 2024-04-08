@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, net::{Ipv4Addr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 use tokio::{fs, net::UdpSocket, sync::mpsc::{self, UnboundedSender}, time::sleep};
-use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, message::{Heartbeat, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::ToBeEncrypted, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, ArcSet, TransientCollection, TtlType}};
+use tracing::{debug, instrument, trace, warn};
+use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::ToBeEncrypted, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, ArcSet, TransientCollection, TtlType}};
 use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor
@@ -116,17 +116,17 @@ impl SessionManager {
 
     fn renew_dests_host(&mut self, host_name: String, dest: Sender) {
         let new_entry = self.active_sessions_host.set_timer(host_name.clone(), "Stream:ActiveSessionsHostRenew");
-        let mut active_sessions_host = self.active_sessions_host.collection().map().lock().unwrap();
+        let mut active_sessions_host = lock!(self.active_sessions_host.collection().map());
         let active_dests = active_sessions_host.entry(host_name).or_default();
         self.keep_peer_conns_alive(active_dests.dests.collection().set().clone(), new_entry);
         active_dests.dests.insert(dest, "Stream:ActiveDestsHostRenew");
-        let mut key_store = self.outbound_gateway.key_store.lock().unwrap();
+        let mut key_store = lock!(self.outbound_gateway.key_store);
         key_store.reset_expiration(dest.socket);
     }
 
     fn renew_dests_client(&mut self, host_name: String, mut message: StreamMessage, to_http_handler: UnboundedSender<StreamResponseType>) {
         let new_entry = self.active_sessions_client.set_timer(host_name.clone(), "Stream:ActiveSessionsClientRenew");
-        let mut active_sessions_client = self.active_sessions_client.collection().map().lock().unwrap();
+        let mut active_sessions_client = lock!(self.active_sessions_client.collection().map());
         let active_session_info = active_sessions_client.entry(host_name.clone()).or_default();
         self.keep_peer_conns_alive(active_session_info.active_dests.dests.collection().set().clone(), new_entry);
         let dests = active_session_info.active_dests.dests_cloned();
@@ -149,8 +149,8 @@ impl SessionManager {
         tokio::spawn(async move {
             loop {
                 {
-                    let dests = dests.lock().unwrap();
-                    let mut dests_filtered = dests.iter().filter(|peer|peer.id != myself.id && !peer_ops.lock().unwrap().has_peer(peer.id));
+                    let dests = lock!(dests);
+                    let mut dests_filtered = dests.iter().filter(|peer|peer.id != myself.id && !lock!(peer_ops).has_peer(peer.id));
                     if (&mut dests_filtered).peekable().peek().is_none() { return };
                     for peer in dests_filtered {
                         OutboundGateway::send_static(&socket, peer.socket, myself, &mut Heartbeat::new(), ToBeEncrypted::False, true);
@@ -162,7 +162,7 @@ impl SessionManager {
     }
 
     fn initial_request(&self, key_agreement: StreamMessage) {
-        let mut active_sessions = self.active_sessions_client.collection().map().lock().unwrap();
+        let mut active_sessions = lock!(self.active_sessions_client.collection().map());
         let active_session = active_sessions.get_mut(key_agreement.host_name()).unwrap();
         active_session.initial_request(key_agreement, |message, cached_message, dest| {
             self.outbound_gateway.send_individual(dest, message, false, false);
@@ -172,7 +172,7 @@ impl SessionManager {
 
     #[instrument(level = "trace", skip_all, fields(message.senders = ?message.senders(), message.id = %message.id()))]
     fn return_resource(&self, message: StreamMessage) {
-        let mut active_sessions = self.active_sessions_client.collection().map().lock().unwrap();
+        let mut active_sessions = lock!(self.active_sessions_client.collection().map());
         let active_session = option_early_return!(active_sessions.get_mut(message.host_name()));
         active_session.pop_resource(message);
     }
@@ -187,7 +187,7 @@ impl ActiveDests {
         Self { dests: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcSet::new()) }
     }
 
-    fn dests_cloned(&self) -> HashSet<Sender> { self.dests.collection().set().lock().unwrap().clone() }
+    fn dests_cloned(&self) -> HashSet<Sender> { lock!(self.dests.collection().set()).clone() }
 }
 
 impl Default for ActiveDests {
@@ -234,7 +234,7 @@ impl ActiveSessionInfo {
         self.cached_messages.set_timer(cached_key_agreement_id, "Stream:ActiveSessionInfo:CachedMessagesKeyAgreement");
         self.resource_queue.set_timer_with_override(id, "Stream:ActiveSessionInfo:ResourceQueue");
         self.cached_messages.set_timer_with_override(id, "Stream:ActiveSessionInfo:CachedMessages");
-        let mut cached_messages = self.cached_messages.collection().map().lock().unwrap();
+        let mut cached_messages = lock!(self.cached_messages.collection().map());
         {
             let cached_message = option_early_return!(Self::handle_cached_message(id, cached_messages.get_mut(&id)));
             action(&mut key_agreement, cached_message, dest.socket);
@@ -250,9 +250,9 @@ impl ActiveSessionInfo {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(2)).await;
-                let mut cached_messages = cached_messages.lock().unwrap();
+                let mut cached_messages = lock!(cached_messages);
                 let cached_message = match Self::handle_cached_message(id, cached_messages.get_mut(&id)) { Some(cached_message) => cached_message, None => { return } };
-                for dest in dests.set().lock().unwrap().iter() {
+                for dest in lock!(dests.set()).iter() {
                     debug!(%id, ?dest, "Sending follow up");
                     let (ref socket, ref key_store, myself) = follow_up_components;
                     OutboundGateway::send_static(socket, dest.socket, myself, cached_message, ToBeEncrypted::True(key_store.clone()), true);
@@ -266,7 +266,7 @@ impl ActiveSessionInfo {
             self.cached_messages.set_timer(message.id(), "Stream:ActiveSessionInfo:CachedMessages");
             self.start_follow_ups(message.id(), follow_up_components);
         }
-        let mut cached_messages = self.cached_messages.collection().map().lock().unwrap();
+        let mut cached_messages = lock!(self.cached_messages.collection().map());
         if cached_messages.contains_key(&message.id()) {
             warn!(id = %message.id(), "ActiveSessionInfo: Attempted to insert duplicate request");
             return;
@@ -276,7 +276,7 @@ impl ActiveSessionInfo {
     }
 
     fn pop_resource(&mut self, message: StreamMessage) {
-        let mut cached_messages = self.cached_messages.collection().map().lock().unwrap();
+        let mut cached_messages = lock!(self.cached_messages.collection().map());
         let Some((cached_message, _)) = cached_messages.get_mut(&message.id()) else {
             return debug!(senders = ?message.senders(), id = %message.id(), "Blocked response from host, reason: unsolicited response for resource")
         };
@@ -320,7 +320,7 @@ impl DMessageStaging {
 
     async fn stage_message(&mut self, payload: Vec<u8>, host_name: String) -> Vec<u8> {
         if payload.len() > 0 {
-            self.message_staging.collection().map().lock().unwrap().entry(host_name).or_default().push(payload);
+            lock!(self.message_staging.collection().map()).entry(host_name).or_default().push(payload);
             Vec::with_capacity(0)
         }
         else {

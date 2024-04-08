@@ -1,6 +1,6 @@
 use std::{collections::HashSet, future, net::SocketAddrV4, panic, process, sync::Arc, time::Duration};
 
-use p2p::{self, message::{NumId, Peer}, message_processing::{DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}};
+use p2p::{MAX_TIME, self, message::{NumId, Peer}, message_processing::{DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::Level;
@@ -24,14 +24,14 @@ async fn basic() {
         .with_max_level(Level::DEBUG).init();
     // console_subscriber::init();
 
-    let regenerate: bool = true;
+    let regenerate: bool = false;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();
     
         let mut introducers: Vec<(Peer, mpsc::Sender<()>)> = Vec::new();
-        let num_hosts = 1;
-        let num_nodes: u16 = 1;
+        let num_hosts = 15;
+        let num_nodes: u16 = 30;
         let mut rng = rand::thread_rng();
         let start = (0..num_nodes).choose(&mut rng).unwrap();
         let host_indices = HashSet::<u16>::from_iter((0..num_nodes).choose_multiple(&mut rng, num_hosts).into_iter());
@@ -70,5 +70,6 @@ async fn basic() {
         }
         println!("Setup complete");
     }
+    tokio::spawn(async move { sleep(Duration::from_secs(15)).await; println!("MAX_LOCK_TIME: {:.2?}", MAX_TIME.lock().unwrap())});
     future::pending::<()>().await;
 }

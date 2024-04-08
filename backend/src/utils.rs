@@ -1,3 +1,4 @@
+use crate::lock;
 use std::{collections::{HashMap, HashSet, VecDeque}, fmt::Debug, hash::Hash, sync::{Arc, Mutex}, time::Duration};
 
 use tokio::{task::AbortHandle, time};
@@ -20,9 +21,9 @@ impl<K: Send + Hash + Eq + Clone + Debug, V> ArcCollection for ArcMap<K, V> {
     type K = K;
     type V = V;
 
-    fn contains_key(&self, key: &K) -> bool { self.0.lock().unwrap().contains_key(key) }
+    fn contains_key(&self, key: &K) -> bool { lock!(self.0).contains_key(key) }
     fn push(&mut self, _key: K) { unimplemented!() }
-    fn pop(&mut self, key: &K) -> Option<V> { self.0.lock().unwrap().remove(key) }
+    fn pop(&mut self, key: &K) -> Option<V> { lock!(self.0).remove(key) }
 }
 impl<K, V> Clone for ArcMap<K, V> {
     fn clone(&self) -> Self {
@@ -40,9 +41,9 @@ impl<K: Send + Hash + Eq + Clone + Debug> ArcCollection for ArcSet<K> {
     type K = K;
     type V = K;
 
-    fn contains_key(&self, key: &K) -> bool { self.0.lock().unwrap().contains(key) }
-    fn push(&mut self, key: K) { self.0.lock().unwrap().insert(key); }
-    fn pop(&mut self, key: &K) -> Option<K> { self.0.lock().unwrap().remove(key); None }
+    fn contains_key(&self, key: &K) -> bool { lock!(self.0).contains(key) }
+    fn push(&mut self, key: K) { lock!(self.0).insert(key); }
+    fn pop(&mut self, key: &K) -> Option<K> { lock!(self.0).remove(key); None }
 }
 
 #[derive(Clone)]
@@ -51,15 +52,15 @@ impl<K: Clone> ArcDeque<K> {
     pub fn new() -> Self { Self(Arc::new(Mutex::new(VecDeque::new()))) }
 }
 impl<K: Copy> ArcDeque<K> {
-    pub fn front(&self) -> Option<K> { self.0.lock().unwrap().front().copied() }
+    pub fn front(&self) -> Option<K> { lock!(self.0).front().copied() }
 }
 impl<K: Send + Hash + Eq + Clone + Debug> ArcCollection for ArcDeque<K> {
     type K = K;
     type V = K;
 
-    fn contains_key(&self, key: &K) -> bool { self.0.lock().unwrap().contains(key) }
-    fn push(&mut self, key: K) { self.0.lock().unwrap().push_back(key); }
-    fn pop(&mut self, _key: &K) -> Option<K> { self.0.lock().unwrap().pop_front() }
+    fn contains_key(&self, key: &K) -> bool { lock!(self.0).contains(key) }
+    fn push(&mut self, key: K) { lock!(self.0).push_back(key); }
+    fn pop(&mut self, _key: &K) -> Option<K> { lock!(self.0).pop_front() }
 }
 
 pub struct TransientCollection<C: ArcCollection> {
@@ -101,7 +102,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
     fn remove_existing_handle(&mut self, key: &C::K, value: Option<C::K>) -> (bool, bool) {
         if self.collection.contains_key(&key) {
             if let Some(ref mut abort_handles) = self.abort_handles {
-                abort_handles.lock().unwrap().remove(&key).unwrap().abort();
+                lock!(abort_handles).remove(&key).unwrap().abort();
                 (true, false)
             }
             else {
@@ -138,7 +139,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
             }
         }).abort_handle();
         if let Some(ref mut abort_handles) = self.abort_handles {
-            abort_handles.lock().unwrap().insert(key, abort_handle);
+            lock!(abort_handles).insert(key, abort_handle);
         }
         !contains_key
     }
@@ -188,13 +189,41 @@ macro_rules! result_early_return {
     ($expr:expr, $ret_expr:expr) => {
         match $expr {
             Ok(val) => val,
-            Err(error) => { error!(%error); return $ret_expr; }
+            Err(error) => { tracing::error!(%error); return $ret_expr; }
         }
     };
     ($expr:expr) => {
         match $expr {
             Ok(val) => val,
-            Err(error) => { error!(%error); return; }
+            Err(error) => { tracing::error!(%error); return; }
         }
+    };
+}
+
+#[macro_export]
+macro_rules! time {
+    ($block:block) => {
+        time!($block, "")
+    };
+    ($block:block, $label:literal) => {
+        {
+            let now = std::time::Instant::now();
+            let output = $block;
+            let duration = now.elapsed();
+            let mut data = crate::MAX_TIME.lock().unwrap();
+            if data.0 < duration {
+                data.0 = duration;
+                data.1 = format!(" at {} {}", file!(), line!()); 
+            }
+            // tracing::info!("{} Elapsed time: {:.2?}", $label, now.elapsed());
+            output
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! lock {
+    ($expr:expr) => {
+        crate::time!({ $expr.lock().unwrap() }, "Lock acquired")
     };
 }

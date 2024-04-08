@@ -3,7 +3,7 @@ use std::{net::SocketAddrV4, sync::Arc};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{instrument, warn};
 
-use crate::{message::{DiscoverPeerMessage, DpMessageKind, Message, NumId, Peer, Sender}, node::EndpointPair, option_early_return, utils::{ArcMap, ArcCollection, TransientCollection, TtlType}};
+use crate::{lock, message::{DiscoverPeerMessage, DpMessageKind, Message, NumId, Peer, Sender}, node::EndpointPair, option_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ToBeEncrypted, DPP_TTL_MILLIS};
 
@@ -63,7 +63,7 @@ impl DiscoverPeerProcessor {
     #[instrument(level = "trace", skip_all, fields(hop_count = ?message.hop_count()))]
     fn stage_message(&mut self, message: DiscoverPeerMessage) -> bool {
         let staged_peers_len = 'b1: {
-            if let Some(staged_message) = self.message_staging.collection().map().lock().unwrap().get(&message.id()) {
+            if let Some(staged_message) = lock!(self.message_staging.collection().map()).get(&message.id()) {
                 break 'b1 staged_message.peer_list().len();
             }
             let mut message_staging_clone = self.message_staging.collection().clone();
@@ -75,7 +75,7 @@ impl DiscoverPeerProcessor {
         let target_num_peers = message.hop_count().1;
         let peers_len = message.peer_list().len();
         if peers_len > staged_peers_len {
-            self.message_staging.collection().map().lock().unwrap().insert(message.id(), message);
+            lock!(self.message_staging.collection().map()).insert(message.id(), message);
         }
         peers_len == target_num_peers as usize
     }
