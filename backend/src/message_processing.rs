@@ -123,15 +123,18 @@ impl OutboundGateway {
 
     fn send_key_agreement(socket: Arc<UdpSocket>, dest: Sender, key_store: Arc<Mutex<KeyStore>>) {
         let mut key_store = lock!(key_store);
-        let public_key = option_early_return!(key_store.public_key(dest.id));
-        Self::send_key_agreement_message(&KeyAgreementMessage { public_key, peer_id: dest.id }, socket, dest.socket);
+        let public_key = key_store.public_key(dest.id);
+        if public_key.is_empty() {
+            return;
+        }
+        Self::send_key_agreement_message(socket, dest.socket, &KeyAgreementMessage { public_key, peer_id: dest.id });
     }
 
-    pub fn send_agreement(&self, message: &KeyAgreementMessage, dest: Sender) {
-        Self::send_key_agreement_message(message, self.socket.clone(), dest.socket)
+    pub fn send_agreement(&self, dest: Sender, message: &KeyAgreementMessage) {
+        Self::send_key_agreement_message(self.socket.clone(), dest.socket, message)
     }
 
-    fn send_key_agreement_message(message: &KeyAgreementMessage, socket: Arc<UdpSocket>, dest: SocketAddrV4) {
+    fn send_key_agreement_message(socket: Arc<UdpSocket>, dest: SocketAddrV4, message: &KeyAgreementMessage) {
         let serialized = result_early_return!(bincode::serialize(message));
         tokio::spawn(async move { result_early_return!(socket.send_to(&serialized, dest).await); });
     }
@@ -140,6 +143,7 @@ impl OutboundGateway {
         let chunk_size = if to_be_chunked { 975 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { bytes.len() };
         let chunks = bytes.chunks(chunk_size);
         let num_chunks = chunks.len();
+        //TODO: Encrypt for not chunked
         let (mut messages, errors): MessagesErrors = chunks
             .enumerate()
             .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store.clone(), dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks)))

@@ -52,7 +52,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             let (id, host_name, peer_public_key, origin) = search_response.into_id_host_name_public_key_origin();
             let mut key_store = lock!(self.outbound_gateway.key_store);
             let origin = if sender.socket == origin.endpoint_pair.private_endpoint { sender } else { Sender::new(origin.endpoint_pair.public_endpoint, origin.id) };
-            let my_public_key = option_early_return!(key_store.public_key(origin.id));
+            let my_public_key = key_store.public_key(origin.id);
             result_early_return!(key_store.agree(origin.id, peer_public_key));
             let mut key_agreement_message = StreamMessage::new(host_name, id, StreamMessageKind::KeyAgreement, my_public_key);
             key_agreement_message.set_sender(origin);
@@ -68,7 +68,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
     }
 
     fn build_response(&self, id: NumId, peer_id: NumId, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
-        let public_key = lock!(self.outbound_gateway.key_store).public_key(peer_id)?;
+        let public_key = lock!(self.outbound_gateway.key_store).public_key(peer_id);
         Some(SearchMessage::key_response(self.outbound_gateway.myself, id, host_name, public_key, is_resource_kind))
     }
 

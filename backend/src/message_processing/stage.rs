@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
 use ring::aead;
 use tokio::{sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
 
 use super::{EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
@@ -48,15 +48,12 @@ impl MessageStaging {
 
     pub async fn receive(&mut self) -> EmptyOption {
         let (sender_addr, message_bytes) = self.from_gateway.recv().await?;
-        let res = self.stage_message(message_bytes, sender_addr);
-        if let Some(message_parts) = res {
-            self.reassemble_message(message_parts);
-        }
+        self.stage_message(message_bytes, sender_addr);
         Some(())
     }
 
     // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
-    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) -> Option<Vec<InboundMessage>> {
+    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) {
         // let (is_encrypted, sender) = (message_bytes.take_is_encrypted(), message_bytes.separate_parts().sender().socket);
         let mut suffix = message_bytes.split_off(message_bytes.len() - aead::NONCE_LEN - 16);
         let nonce = suffix.split_off(suffix.len() - aead::NONCE_LEN);
@@ -70,14 +67,14 @@ impl MessageStaging {
                 let cached_messages = message_caching.entry(peer_id).or_default();
                 cached_messages.push((sender_addr, message_bytes));
                 debug!("no key");
-                return None;
+                return;
             },
-            Err(error) => { error!(?error); return None; }
+            Err(error) => { error!(?error); return; }
         };
-        let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
+        let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes));
         if inbound_message.separate_parts().sender().socket != sender_addr {
             warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
-            return None;
+            return;
         }
         if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
             // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
@@ -86,24 +83,21 @@ impl MessageStaging {
         let (index, num_chunks) = inbound_message.separate_parts().position();
         if num_chunks == 1 {
             // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
-            Some(vec![inbound_message])
+            return;
         }
-        else {
-            let id = inbound_message.separate_parts().id();
-            let staged_messages_len = {
-                self.message_staging.set_timer(id, "Stage:MessageStaging");
-                let mut message_staging = lock!(self.message_staging.collection().map());
-                let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
-                staged_messages.insert(index, inbound_message);
-                staged_messages.len()
-            };
-            if staged_messages_len == num_chunks {
-                // gateway::log_debug("Collected all messages");
-                let messages = self.message_staging.pop(&id)?;
-                let messages: Vec<InboundMessage> = messages.into_values().collect();
-                return Some(messages);
-            }
-            None
+        let id = inbound_message.separate_parts().id();
+        let staged_messages_len = {
+            self.message_staging.set_timer(id, "Stage:MessageStaging");
+            let mut message_staging = lock!(self.message_staging.collection().map());
+            let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
+            staged_messages.insert(index, inbound_message);
+            staged_messages.len()
+        };
+        if staged_messages_len == num_chunks {
+            // gateway::log_debug("Collected all messages");
+            let messages = option_early_return!(self.message_staging.pop(&id));
+            let messages: Vec<InboundMessage> = messages.into_values().collect();
+            self.reassemble_message(messages);
         }
     }
 
@@ -200,12 +194,8 @@ impl MessageStaging {
         let cached_messages = self.message_caching.pop(&id);
         if let Some(cached_messages) = cached_messages {
             debug!("Staging cached messages");
-            let mut res = None;
             for (sender_addr, message) in cached_messages {
-                res = self.stage_message(message, sender_addr);
-            }
-            if let Some(message_parts) = res {
-                self.reassemble_message(message_parts);
+                self.stage_message(message, sender_addr);
             }
         }
     }

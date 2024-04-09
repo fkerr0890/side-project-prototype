@@ -1,7 +1,7 @@
-use std::{collections::{HashMap, HashSet}, net::{Ipv4Addr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, net::{Ipv4Addr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 use tokio::{fs, net::UdpSocket, sync::mpsc::{self, UnboundedSender}, time::sleep};
 use tracing::{debug, instrument, trace, warn};
-use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, KeyAgreementMessage, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, ArcSet, TransientCollection, TtlType}};
+use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, KeyAgreementMessage, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, TransientCollection, TtlType}};
 use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor
@@ -119,22 +119,21 @@ impl SessionManager {
         let new_entry = self.active_sessions_host.set_timer(host_name.clone(), "Stream:ActiveSessionsHostRenew");
         let mut active_sessions_host = lock!(self.active_sessions_host.collection().map());
         let active_dests = active_sessions_host.entry(host_name).or_default();
-        self.keep_peer_conns_alive(active_dests.dests.collection().set().clone(), new_entry);
-        active_dests.dests.insert(dest, "Stream:ActiveDestsHostRenew");
-        let mut key_store = lock!(self.outbound_gateway.key_store);
-        key_store.reset_expiration(dest.id);
+        self.keep_peer_conns_alive(active_dests.dests.collection().clone(), new_entry);
+        active_dests.dests.set_timer(dest, "Stream:ActiveDestsHostRenew");
+        lock!(active_dests.dests.collection().map()).insert(dest, None);
     }
 
     fn renew_dests_client(&mut self, host_name: String, mut message: StreamMessage, to_http_handler: UnboundedSender<StreamResponseType>) {
         let new_entry = self.active_sessions_client.set_timer(host_name.clone(), "Stream:ActiveSessionsClientRenew");
         let mut active_sessions_client = lock!(self.active_sessions_client.collection().map());
         let active_session_info = active_sessions_client.entry(host_name.clone()).or_default();
-        self.keep_peer_conns_alive(active_session_info.active_dests.dests.collection().set().clone(), new_entry);
+        self.keep_peer_conns_alive(active_session_info.active_dests.dests.collection().clone(), new_entry);
         let dests = active_session_info.active_dests.dests_cloned();
         let set_cached_message_timer = !dests.is_empty();
         for dest in dests {
             self.outbound_gateway.send_individual(dest, &mut message, true);
-            active_session_info.active_dests.dests.insert(dest, "Stream:ActiveDestsClientRenew");
+            active_session_info.active_dests.dests.set_timer(dest, "Stream:ActiveDestsClientRenew");
         }
         let id = message.id();
         trace!(%id, "Pushed");
@@ -142,7 +141,7 @@ impl SessionManager {
     }
     
     #[instrument(level = "trace", skip_all)]
-    fn keep_peer_conns_alive(&self, dests: Arc<Mutex<HashSet<Sender>>>, begin: bool) {
+    fn keep_peer_conns_alive(&self, dests: ArcMap<Sender, Option<KeyAgreementMessage>>, begin: bool) {
         if !begin {
             return;
         }
@@ -150,10 +149,10 @@ impl SessionManager {
         tokio::spawn(async move {
             loop {
                 {
-                    let dests = lock!(dests);
-                    let mut dests_filtered = dests.iter().filter(|peer|peer.id != myself.id && !lock!(peer_ops).has_peer(peer.id));
+                    let dests = lock!(dests.map());
+                    let mut dests_filtered = dests.iter().filter(|(peer, _)|peer.id != myself.id && !lock!(peer_ops).has_peer(peer.id));
                     if (&mut dests_filtered).peekable().peek().is_none() { return };
-                    for peer in dests_filtered {
+                    for (peer, _) in dests_filtered {
                         OutboundGateway::send_static(&socket, *peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
                     }
                 }
@@ -166,7 +165,9 @@ impl SessionManager {
         let mut active_sessions = lock!(self.active_sessions_client.collection().map());
         let active_session = active_sessions.get_mut(key_agreement.host_name()).unwrap();
         active_session.initial_request(key_agreement, |message, cached_message, dest| {
-            self.outbound_gateway.send_agreement(message, dest);
+            if let Some(key_agreement) = message {
+                self.outbound_gateway.send_agreement(dest, key_agreement);
+            }
             self.outbound_gateway.send_individual(dest, cached_message, true);
         }, (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself));
     }
@@ -180,15 +181,15 @@ impl SessionManager {
 }
 
 struct ActiveDests {
-    dests: TransientCollection<ArcSet<Sender>>
+    dests: TransientCollection<ArcMap<Sender, Option<KeyAgreementMessage>>>
 }
 
 impl ActiveDests {
     fn new() -> Self {
-        Self { dests: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcSet::new()) }
+        Self { dests: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcMap::new()) }
     }
 
-    fn dests_cloned(&self) -> HashSet<Sender> { lock!(self.dests.collection().set()).clone() }
+    fn dests_cloned(&self) -> Vec<Sender> { lock!(self.dests.collection().map()).keys().copied().collect() }
 }
 
 impl Default for ActiveDests {
@@ -225,22 +226,20 @@ impl ActiveSessionInfo {
         debug!(%id, "Prevented request from client, reason: already received resource"); None
     }
 
-    fn initial_request(&mut self, mut key_agreement: StreamMessage, action: impl Fn(&KeyAgreementMessage, &mut StreamMessage, Sender), follow_up_components: FollowUpComponents) {
+    fn initial_request(&mut self, mut key_agreement: StreamMessage, action: impl Fn(&Option<KeyAgreementMessage>, &mut StreamMessage, Sender), follow_up_components: FollowUpComponents) {
         let dest = key_agreement.only_sender().unwrap();
-        if self.active_dests.dests.contains_key(&dest) {
+        if !self.active_dests.dests.set_timer(dest, "Stream:ActiveSessionInfo:ActiveDests") {
             return;
         }
-        self.active_dests.dests.insert(dest, "Stream:ActiveSessionInfo:ActiveDests");
         let id = key_agreement.id();
-        let cached_key_agreement_id = NumId(id.0 + 1);
-        self.cached_messages.set_timer(cached_key_agreement_id, "Stream:ActiveSessionInfo:CachedMessagesKeyAgreement");
         self.resource_queue.set_timer_with_override(id, "Stream:ActiveSessionInfo:ResourceQueue");
         self.cached_messages.set_timer_with_override(id, "Stream:ActiveSessionInfo:CachedMessages");
         let mut cached_messages = lock!(self.cached_messages.collection().map());
         let cached_message = option_early_return!(Self::handle_cached_message(id, cached_messages.get_mut(&id)));
-        action(&KeyAgreementMessage { public_key: key_agreement.payload().clone(), peer_id: dest.id }, cached_message, dest);
-        cached_messages.insert(cached_key_agreement_id, (key_agreement, None));
-        self.start_follow_ups(cached_key_agreement_id, follow_up_components.clone());
+        let public_key = key_agreement.into_hash_payload().1;
+        let key_agreement_message = if public_key.is_empty() { None } else { Some(KeyAgreementMessage { public_key, peer_id: dest.id }) };
+        action(&key_agreement_message, cached_message, dest);
+        lock!(self.active_dests.dests.collection().map()).insert(dest, key_agreement_message);
         self.start_follow_ups(id, follow_up_components);
     }
 
@@ -252,9 +251,12 @@ impl ActiveSessionInfo {
                 sleep(Duration::from_secs(2)).await;
                 let mut cached_messages = lock!(cached_messages);
                 let cached_message = match Self::handle_cached_message(id, cached_messages.get_mut(&id)) { Some(cached_message) => cached_message, None => { return } };
-                for dest in lock!(dests.set()).iter() {
+                let (ref socket, ref key_store, myself) = follow_up_components;
+                for (dest, key_agreement) in lock!(dests.map()).iter() {
                     debug!(%id, ?dest, "Sending follow up");
-                    let (ref socket, ref key_store, myself) = follow_up_components;
+                    if let Some(key_agreement) = key_agreement {
+                        OutboundGateway::send_key_agreement_message(socket.clone(), dest.socket, key_agreement);
+                    }
                     OutboundGateway::send_static(socket, *dest, myself, cached_message, key_store.clone(), true);
                 }
             }
