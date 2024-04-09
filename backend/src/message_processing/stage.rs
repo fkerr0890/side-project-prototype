@@ -55,51 +55,61 @@ impl MessageStaging {
         Some(())
     }
 
+    // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
+    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) -> Option<Vec<InboundMessage>> {
+        // let (is_encrypted, sender) = (message_bytes.take_is_encrypted(), message_bytes.separate_parts().sender().socket);
+        let mut suffix = message_bytes.split_off(message_bytes.len() - aead::NONCE_LEN - 16);
+        let nonce = suffix.split_off(suffix.len() - aead::NONCE_LEN);
+        let peer_id = NumId(u128::from_be_bytes(suffix.try_into().unwrap()));
+        let crypto_result = lock!(self.outbound_gateway.key_store).transform(peer_id, &mut message_bytes, Direction::Decode(nonce));
+        match crypto_result {
+            Ok(plaintext) => { message_bytes = plaintext },
+            Err(Error::NoKey) => {
+                self.message_caching.set_timer(peer_id, "Stage:MessageCaching");
+                let mut message_caching = lock!(self.message_caching.collection().map());
+                let cached_messages = message_caching.entry(peer_id).or_default();
+                cached_messages.push((sender_addr, message_bytes));
+                debug!("no key");
+                return None;
+            },
+            Err(error) => { error!(?error); return None; }
+        };
+        let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
+        if inbound_message.separate_parts().sender().socket != sender_addr {
+            warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
+            return None;
+        }
+        if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
+            // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
+            self.outbound_gateway.add_new_peer(Peer::new(endpoint_pair, inbound_message.separate_parts().sender().id));
+        }
+        let (index, num_chunks) = inbound_message.separate_parts().position();
+        if num_chunks == 1 {
+            // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
+            Some(vec![inbound_message])
+        }
+        else {
+            let id = inbound_message.separate_parts().id();
+            let staged_messages_len = {
+                self.message_staging.set_timer(id, "Stage:MessageStaging");
+                let mut message_staging = lock!(self.message_staging.collection().map());
+                let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
+                staged_messages.insert(index, inbound_message);
+                staged_messages.len()
+            };
+            if staged_messages_len == num_chunks {
+                // gateway::log_debug("Collected all messages");
+                let messages = self.message_staging.pop(&id)?;
+                let messages: Vec<InboundMessage> = messages.into_values().collect();
+                return Some(messages);
+            }
+            None
+        }
+    }
+
     fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
         self.deserialize_message(&message_bytes, false, senders, timestamp);
-    }
-
-    fn traverse_nat(&mut self, peer: Option<Peer>) {
-        let Some(peer) = peer else { return };
-        self.send_nat_heartbeats(peer);
-    }
-
-    fn send_nat_heartbeats(&mut self, peer: Peer) {
-        if peer.id == self.outbound_gateway.myself.id
-            || self.unconfirmed_peers.contains_key(&peer.id)
-            || lock!(self.outbound_gateway.peer_ops).has_peer(peer.id) {
-            return;
-        }
-        // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
-        self.unconfirmed_peers.set_timer(peer.id, "Stage:UnconfirmedPeers");
-        lock!(self.unconfirmed_peers.collection().map()).insert(peer.id, peer.endpoint_pair);
-        let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
-        let (socket, myself, key_store) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.key_store.clone());
-        tokio::spawn(async move {
-            while unconfirmed_peers.contains_key(&peer.id) {
-                OutboundGateway::send_private_public_static(&socket, peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
-                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
-            }
-        });
-    }
-
-    #[instrument(level = "trace", skip_all, fields(message.sender = ?message.senders()[0], message.host_name = message.host_name()))]
-    fn handle_key_agreement(&mut self, mut message: StreamMessage) {
-        let sender = message.only_sender().unwrap();
-        let (id, peer_public_key) = message.into_hash_payload();
-        result_early_return!(lock!(self.outbound_gateway.key_store).agree(sender.id, peer_public_key));
-        let cached_messages = self.message_caching.pop(&id);
-        if let Some(cached_messages) = cached_messages {
-            debug!("Staging cached messages");
-            let mut res = None;
-            for (sender_addr, message) in cached_messages {
-                res = self.stage_message(message, sender_addr);
-            }
-            if let Some(message_parts) = res {
-                self.reassemble_message(message_parts);
-            }
-        }
     }
 
     // #[instrument(level = "trace", skip(self, message_bytes))]
@@ -158,55 +168,45 @@ impl MessageStaging {
         }
     }
 
-    // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
-    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) -> Option<Vec<InboundMessage>> {
-        // let (is_encrypted, sender) = (message_bytes.take_is_encrypted(), message_bytes.separate_parts().sender().socket);
-        let mut suffix = message_bytes.split_off(message_bytes.len() - aead::NONCE_LEN - 16);
-        let nonce = suffix.split_off(suffix.len() - aead::NONCE_LEN);
-        let peer_id = NumId(u128::from_be_bytes(suffix.try_into().unwrap()));
-        let crypto_result = lock!(self.outbound_gateway.key_store).transform(peer_id, &mut message_bytes, Direction::Decode(nonce));
-        match crypto_result {
-            Ok(plaintext) => { message_bytes = plaintext },
-            Err(Error::NoKey) => {
-                self.message_caching.set_timer(peer_id, "Stage:MessageCaching");
-                let mut message_caching = lock!(self.message_caching.collection().map());
-                let cached_messages = message_caching.entry(peer_id).or_default();
-                cached_messages.push((sender_addr, message_bytes));
-                debug!("no key");
-                return None;
-            },
-            Err(error) => { error!(?error); return None; }
-        };
-        let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
-        if inbound_message.separate_parts().sender().socket != sender_addr {
-            warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
-            return None;
+    fn traverse_nat(&mut self, peer: Option<Peer>) {
+        let Some(peer) = peer else { return };
+        self.send_nat_heartbeats(peer);
+    }
+
+    fn send_nat_heartbeats(&mut self, peer: Peer) {
+        if peer.id == self.outbound_gateway.myself.id
+            || self.unconfirmed_peers.contains_key(&peer.id)
+            || lock!(self.outbound_gateway.peer_ops).has_peer(peer.id) {
+            return;
         }
-        if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
-            // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
-            self.outbound_gateway.add_new_peer(Peer::new(endpoint_pair, inbound_message.separate_parts().sender().id));
-        }
-        let (index, num_chunks) = inbound_message.separate_parts().position();
-        if num_chunks == 1 {
-            // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
-            Some(vec![inbound_message])
-        }
-        else {
-            let id = inbound_message.separate_parts().id();
-            let staged_messages_len = {
-                self.message_staging.set_timer(id, "Stage:MessageStaging");
-                let mut message_staging = lock!(self.message_staging.collection().map());
-                let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
-                staged_messages.insert(index, inbound_message);
-                staged_messages.len()
-            };
-            if staged_messages_len == num_chunks {
-                // gateway::log_debug("Collected all messages");
-                let messages = self.message_staging.pop(&id)?;
-                let messages: Vec<InboundMessage> = messages.into_values().collect();
-                return Some(messages);
+        // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
+        self.unconfirmed_peers.set_timer(peer.id, "Stage:UnconfirmedPeers");
+        lock!(self.unconfirmed_peers.collection().map()).insert(peer.id, peer.endpoint_pair);
+        let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
+        let (socket, myself, key_store) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.key_store.clone());
+        tokio::spawn(async move {
+            while unconfirmed_peers.contains_key(&peer.id) {
+                OutboundGateway::send_private_public_static(&socket, peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
+                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
             }
-            None
+        });
+    }
+
+    #[instrument(level = "trace", skip_all, fields(message.sender = ?message.senders()[0], message.host_name = message.host_name()))]
+    fn handle_key_agreement(&mut self, mut message: StreamMessage) {
+        let sender = message.only_sender().unwrap();
+        let (id, peer_public_key) = message.into_hash_payload();
+        result_early_return!(lock!(self.outbound_gateway.key_store).agree(sender.id, peer_public_key));
+        let cached_messages = self.message_caching.pop(&id);
+        if let Some(cached_messages) = cached_messages {
+            debug!("Staging cached messages");
+            let mut res = None;
+            for (sender_addr, message) in cached_messages {
+                res = self.stage_message(message, sender_addr);
+            }
+            if let Some(message_parts) = res {
+                self.reassemble_message(message_parts);
+            }
         }
     }
 }

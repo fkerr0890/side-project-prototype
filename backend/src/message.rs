@@ -116,6 +116,12 @@ impl Message for Heartbeat {
     fn set_sender(&mut self, sender: Sender) { self.sender = Some(sender); }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct KeyAgreementMessage {
+    pub public_key: Vec<u8>,
+    pub peer_id: NumId
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamMessage {
     pub kind: StreamMessageKind,

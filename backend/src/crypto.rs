@@ -28,25 +28,21 @@ impl KeyStore {
         }
     }
 
-    fn generate_key_pair(&mut self, index: NumId) -> Option<agreement::PublicKey> {
-        if self.symmetric_keys.contains_key(&index) {
+    pub fn public_key(&mut self, peer_id: NumId) -> Option<Vec<u8>> {
+        if self.symmetric_keys.contains_key(&peer_id) {
             return None;
         }
-        let is_new_key = self.private_keys.set_timer(index, "Crypto:PrivateKeys");
+        let is_new_key = self.private_keys.set_timer(peer_id, "Crypto:PrivateKeys");
         let mut private_keys = lock!(self.private_keys.collection().map());
         if is_new_key {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
             let public_key = my_private_key.compute_public_key().unwrap();
-            private_keys.insert(index, my_private_key);
-            Some(public_key)
+            private_keys.insert(peer_id, my_private_key);
+            Some(public_key.as_ref().to_vec())
         }
         else {
-            Some(private_keys.get(&index).unwrap().compute_public_key().unwrap())
+            Some(private_keys.get(&peer_id).unwrap().compute_public_key().unwrap().as_ref().to_vec())
         }
-    }
-
-    pub fn public_key(&mut self, peer_id: NumId) -> Option<agreement::PublicKey> {
-        self.generate_key_pair(peer_id)
     }
 
     pub fn transform<'a>(&'a mut self, peer_id: NumId, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
@@ -66,7 +62,9 @@ impl KeyStore {
     }
 
     pub fn agree(&mut self, peer_id: NumId, peer_public_key: Vec<u8>) -> Result<(), Error> {
-        // println!("{:?}, finding: {}", self.private_keys, peer_addr.to_string());
+        if !self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeys") {
+            return Ok(())
+        }
         let Some(my_private_key) = self.private_keys.pop(&peer_id) else { return Ok(()) };
         let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let symmetric_key = agreement::agree_ephemeral(my_private_key, &peer_public_key, |key_material| {
@@ -82,9 +80,6 @@ impl KeyStore {
         let (nonce_tx, nonce_rx) = mpsc::channel();
         let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value, nonce_tx));
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
-        if !self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeys") {
-            return Ok(())
-        }
         lock!(self.symmetric_keys.collection().map()).insert(peer_id, key_set);
         Ok(())
     }
@@ -92,6 +87,10 @@ impl KeyStore {
     pub fn reset_expiration(&mut self, peer_id: NumId) {
         self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeysRenew");
     }
+
+    // pub fn agreement_exists(&self, peer_id: NumId) -> bool {
+    //     self.symmetric_keys.contains_key(&peer_id)
+    // }
 }
 
 #[derive(Debug)]

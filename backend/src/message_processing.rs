@@ -5,7 +5,7 @@ use serde::Serialize;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info, instrument};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, Message, NumId, Peer, Sender, SeparateParts}, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, NumId, Peer, Sender, SeparateParts}, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection, TtlType}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -106,6 +106,7 @@ impl OutboundGateway {
     }
 
     pub fn send_static(socket: &Arc<UdpSocket>, dest: Sender, myself: Peer, message: &mut(impl Message + Serialize), key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) {
+        Self::send_key_agreement(socket.clone(), dest, key_store.clone());
         message.replace_dest(dest.socket);
         if message.check_expiry() {
             info!("PeerOps: Message expired: {}", message.id());
@@ -118,6 +119,21 @@ impl OutboundGateway {
             let socket_clone = socket.clone();
             tokio::spawn(async move { result_early_return!(socket_clone.send_to(&chunk, dest.socket).await); });
         }
+    }
+
+    fn send_key_agreement(socket: Arc<UdpSocket>, dest: Sender, key_store: Arc<Mutex<KeyStore>>) {
+        let mut key_store = lock!(key_store);
+        let public_key = option_early_return!(key_store.public_key(dest.id));
+        Self::send_key_agreement_message(&KeyAgreementMessage { public_key, peer_id: dest.id }, socket, dest.socket);
+    }
+
+    pub fn send_agreement(&self, message: &KeyAgreementMessage, dest: Sender) {
+        Self::send_key_agreement_message(message, self.socket.clone(), dest.socket)
+    }
+
+    fn send_key_agreement_message(message: &KeyAgreementMessage, socket: Arc<UdpSocket>, dest: SocketAddrV4) {
+        let serialized = result_early_return!(bincode::serialize(message));
+        tokio::spawn(async move { result_early_return!(socket.send_to(&serialized, dest).await); });
     }
 
     fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) -> Option<Vec<Vec<u8>>> {

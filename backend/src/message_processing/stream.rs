@@ -1,7 +1,7 @@
 use std::{collections::{HashMap, HashSet}, net::{Ipv4Addr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 use tokio::{fs, net::UdpSocket, sync::mpsc::{self, UnboundedSender}, time::sleep};
 use tracing::{debug, instrument, trace, warn};
-use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, ArcSet, TransientCollection, TtlType}};
+use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, KeyAgreementMessage, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, ArcSet, TransientCollection, TtlType}};
 use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor
@@ -166,7 +166,7 @@ impl SessionManager {
         let mut active_sessions = lock!(self.active_sessions_client.collection().map());
         let active_session = active_sessions.get_mut(key_agreement.host_name()).unwrap();
         active_session.initial_request(key_agreement, |message, cached_message, dest| {
-            self.outbound_gateway.send_individual(dest, message, false);
+            self.outbound_gateway.send_agreement(message, dest);
             self.outbound_gateway.send_individual(dest, cached_message, true);
         }, (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself));
     }
@@ -225,7 +225,7 @@ impl ActiveSessionInfo {
         debug!(%id, "Prevented request from client, reason: already received resource"); None
     }
 
-    fn initial_request(&mut self, mut key_agreement: StreamMessage, action: impl Fn(&mut StreamMessage, &mut StreamMessage, Sender), follow_up_components: FollowUpComponents) {
+    fn initial_request(&mut self, mut key_agreement: StreamMessage, action: impl Fn(&KeyAgreementMessage, &mut StreamMessage, Sender), follow_up_components: FollowUpComponents) {
         let dest = key_agreement.only_sender().unwrap();
         if self.active_dests.dests.contains_key(&dest) {
             return;
@@ -237,10 +237,8 @@ impl ActiveSessionInfo {
         self.resource_queue.set_timer_with_override(id, "Stream:ActiveSessionInfo:ResourceQueue");
         self.cached_messages.set_timer_with_override(id, "Stream:ActiveSessionInfo:CachedMessages");
         let mut cached_messages = lock!(self.cached_messages.collection().map());
-        {
-            let cached_message = option_early_return!(Self::handle_cached_message(id, cached_messages.get_mut(&id)));
-            action(&mut key_agreement, cached_message, dest);
-        }
+        let cached_message = option_early_return!(Self::handle_cached_message(id, cached_messages.get_mut(&id)));
+        action(&KeyAgreementMessage { public_key: key_agreement.payload().clone(), peer_id: dest.id }, cached_message, dest);
         cached_messages.insert(cached_key_agreement_id, (key_agreement, None));
         self.start_follow_ups(cached_key_agreement_id, follow_up_components.clone());
         self.start_follow_ups(id, follow_up_components);
