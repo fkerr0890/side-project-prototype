@@ -100,7 +100,7 @@ struct KeySet { opening_key: aead::LessSafeKey, sealing_key: aead::SealingKey<Cu
 struct CurrentNonce(u128, mpsc::Sender<aead::Nonce>);
 impl aead::NonceSequence for CurrentNonce {
     fn advance(&mut self) -> Result<aead::Nonce, ring::error::Unspecified> {
-        (self.0, _) = self.0.overflowing_add(1);
+        self.0 = self.0.checked_add(1).ok_or(ring::error::Unspecified)?;
         let bytes = self.0.to_be_bytes();
         let nonce = aead::Nonce::try_assume_unique_for_key(&bytes[bytes.len() - aead::NONCE_LEN..])?;
         let nonce_copy = aead::Nonce::try_assume_unique_for_key(&bytes[bytes.len() - aead::NONCE_LEN..])?;
