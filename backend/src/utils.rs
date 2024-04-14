@@ -83,7 +83,7 @@ impl<K: Send + Hash + Eq + Clone + Debug> ArcCollection for ArcDeque<K> {
 
 type AbortHandles<T> = Option<Arc<Mutex<T>>>;
 pub struct TransientCollection<C: ArcCollection> {
-    ttl: TtlType,
+    ttl: Duration,
     collection: C,
     abort_handles: AbortHandles<HashMap<C::K, AbortHandle>>
 }
@@ -97,7 +97,7 @@ impl<C: ArcCollection + Clone + Send> ArcCollection for TransientCollection<C> {
 }
 
 impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
-    pub fn new(ttl: TtlType, extend_timer: bool, collection: C) -> Self {
+    pub fn new(ttl: Duration, extend_timer: bool, collection: C) -> Self {
         Self {
             ttl,
             collection,
@@ -105,7 +105,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
         }
     }
 
-    pub fn from_existing(existing: &Self, ttl: TtlType) -> Self {
+    pub fn from_existing(existing: &Self, ttl: Duration) -> Self {
         Self {
             ttl,
             collection: existing.collection.clone(),
@@ -144,7 +144,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
         }
         let (mut collection, ttl, key_clone) = (self.collection.clone(), self.ttl, key.clone());
         let abort_handle = tokio::spawn(async move {
-            ttl.sleep().await;
+            time::sleep(ttl);
             // println!("Removing {:?}, label = {key_label}", key_clone);
             if let Some(mut send_action) = send_action {
                 send_action();
@@ -165,20 +165,6 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
 
     pub fn collection(&self) -> &C { &self.collection }
     pub fn collection_mut(&mut self) -> &mut C { &mut self.collection }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum TtlType {
-    Secs(u64),
-    Millis(u64)
-}
-impl TtlType {
-    pub fn sleep(&self) -> time::Sleep {
-        match self {
-            Self::Secs(secs) => time::sleep(Duration::from_secs(*secs)),
-            Self::Millis(millis) => time::sleep(Duration::from_millis(*millis)),
-        }
-    }
 }
 
 #[macro_export]

@@ -1,20 +1,20 @@
-use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}};
+use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use serde::Serialize;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info, instrument};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, NumId, Peer, Sender, SeparateParts}, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, NumId, Peer, Sender, SeparateParts}, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
-pub const SEARCH_TIMEOUT_SECONDS: i64 = 30;
-pub const DPP_TTL_MILLIS: u64 = 250;
-pub const SRP_TTL_SECONDS: u64 = 30;
-pub const ACTIVE_SESSION_TTL_SECONDS: u64 = 600;
-pub const HEARTBEAT_INTERVAL_SECONDS: u64 = 10;
-pub const DISTRIBUTION_TTL_SECONDS: u64 = 43200;
+pub const SEARCH_TIMEOUT_SECONDS: Duration = Duration::from_secs(30);
+pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(250);
+pub const SRP_TTL_SECONDS: Duration = Duration::from_secs(30);
+pub const ACTIVE_SESSION_TTL_SECONDS: Duration = Duration::from_secs(600);
+pub const HEARTBEAT_INTERVAL_SECONDS: Duration = Duration::from_secs(10);
+pub const DISTRIBUTION_TTL_SECONDS: Duration = Duration::from_secs(43200);
 
 pub mod stage;
 pub mod stream;
@@ -179,9 +179,9 @@ pub struct BreadcrumbService {
 }
 
 impl BreadcrumbService {
-    pub fn new(ttl: TtlType) -> Self { Self { breadcrumbs: TransientCollection::new(ttl, false, ArcMap::new()) } }
+    pub fn new(ttl: Duration) -> Self { Self { breadcrumbs: TransientCollection::new(ttl, false, ArcMap::new()) } }
 
-    pub fn clone(&self, ttl: TtlType) -> Self { Self { breadcrumbs: TransientCollection::from_existing(&self.breadcrumbs, ttl) } }
+    pub fn clone(&self, ttl: Duration) -> Self { Self { breadcrumbs: TransientCollection::from_existing(&self.breadcrumbs, ttl) } }
 
     pub fn try_add_breadcrumb(&mut self, early_return_context: Option<EarlyReturnContext>, id: NumId, dest: Option<Sender>) -> bool {
         let contains_key = if let Some(mut context) = early_return_context {

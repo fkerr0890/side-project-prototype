@@ -198,7 +198,7 @@ impl SearchMessage {
             id: hash,
             kind,
             origin,
-            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT_SECONDS)),
+            expiry: datetime_to_timestamp(datetime + Duration::seconds(SEARCH_TIMEOUT_SECONDS.as_secs() as i64)),
         }
     }
 

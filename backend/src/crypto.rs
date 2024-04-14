@@ -2,7 +2,7 @@ use std::{sync::mpsc, fmt::Display};
 
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 
-use crate::{lock, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{lock, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
@@ -22,8 +22,8 @@ impl Default for KeyStore {
 impl KeyStore {
     pub fn new() -> Self {
         Self {
-            private_keys: TransientCollection::new(TtlType::Secs(SRP_TTL_SECONDS), false, ArcMap::new()),
-            symmetric_keys: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcMap::new()),
+            private_keys: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            symmetric_keys: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()),
             rng: SystemRandom::new()
         }
     }

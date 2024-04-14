@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use tracing::{debug, instrument};
 
-use crate::{lock, message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcSet, TransientCollection, TtlType}};
+use crate::{lock, message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcSet, TransientCollection}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
@@ -21,7 +21,7 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
             breadcrumb_service,
             from_staging,
             to_smp,
-            active_sessions: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcSet::new()),
+            active_sessions: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcSet::new()),
             stop_condition
         }
     }

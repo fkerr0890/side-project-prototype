@@ -3,7 +3,7 @@ use std::{net::SocketAddrV4, sync::{Arc, Mutex}};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{instrument, warn};
 
-use crate::{crypto::KeyStore, lock, message::{DiscoverPeerMessage, DpMessageKind, Message, NumId, Peer, Sender}, option_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::KeyStore, lock, message::{DiscoverPeerMessage, DpMessageKind, Message, NumId, Peer, Sender}, option_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, DPP_TTL_MILLIS};
 
@@ -20,7 +20,7 @@ impl DiscoverPeerProcessor {
             outbound_gateway,
             breadcrumb_service,
             from_staging,
-            message_staging: TransientCollection::new(TtlType::Millis(DPP_TTL_MILLIS * 2), false, ArcMap::new()),
+            message_staging: TransientCollection::new(DPP_TTL_MILLIS * 2, false, ArcMap::new()),
         }
     }
 

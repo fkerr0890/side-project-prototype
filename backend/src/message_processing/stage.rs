@@ -1,8 +1,8 @@
-use std::{collections::{HashMap, HashSet}, net::SocketAddrV4, time::Duration};
+use std::{collections::{HashMap, HashSet}, net::SocketAddrV4};
 use ring::aead;
 use tokio::{sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 use super::{EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
@@ -39,9 +39,9 @@ impl MessageStaging {
             to_dsrp,
             to_dsmp,
             to_dh,
-            message_staging: TransientCollection::new(TtlType::Secs(SRP_TTL_SECONDS), false, ArcMap::new()),
-            message_caching: TransientCollection::new(TtlType::Secs(SRP_TTL_SECONDS), false, ArcMap::new()),
-            unconfirmed_peers: TransientCollection::new(TtlType::Secs(HEARTBEAT_INTERVAL_SECONDS*2), false, ArcMap::new()),
+            message_staging: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            message_caching: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            unconfirmed_peers: TransientCollection::new(HEARTBEAT_INTERVAL_SECONDS*2, false, ArcMap::new()),
             outbound_gateway
         }
     }
@@ -181,7 +181,7 @@ impl MessageStaging {
         tokio::spawn(async move {
             while unconfirmed_peers.contains_key(&peer.id) {
                 OutboundGateway::send_private_public_static(&socket, peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
-                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
+                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
             }
         });
     }

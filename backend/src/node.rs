@@ -1,11 +1,11 @@
-use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{Arc, Mutex}};
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::error;
 use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}, utils::TtlType};
+use crate::{crypto::KeyStore, http::{self, ServerContext}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}};
 
 pub struct Node {
     nat_kind: NatKind
@@ -52,9 +52,9 @@ impl Node {
         }
 
         let myself = Peer::new(endpoint_pair, id);
-        let bs = BreadcrumbService::new(TtlType::Secs(DISTRIBUTION_TTL_SECONDS));
-        let search_ttl = TtlType::Secs(SRP_TTL_SECONDS);
-        let discover_ttl = TtlType::Millis(DPP_TTL_MILLIS);
+        let bs = BreadcrumbService::new(DISTRIBUTION_TTL_SECONDS);
+        let search_ttl = SRP_TTL_SECONDS;
+        let discover_ttl = DPP_TTL_MILLIS;
         let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), dm_to_dh.clone(), OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()));
         let local_hosts_clone = local_hosts.clone();
         let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs.clone(search_ttl), srm_from_gateway, sm_to_smp.clone(), move |m| local_hosts_clone.contains_key(m.host_name()));
@@ -100,7 +100,7 @@ impl Node {
         let heartbeat_gateway = OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops);
         tokio::spawn(async move {
             loop {
-                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
+                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
                 heartbeat_gateway.send_request(&mut Heartbeat::new(), None);
             }
         });

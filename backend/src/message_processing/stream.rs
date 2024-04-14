@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::{Ipv4Addr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 use tokio::{fs, net::UdpSocket, sync::mpsc::{self, UnboundedSender}, time::sleep};
 use tracing::{debug, instrument, trace, warn};
-use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, KeyAgreementMessage, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, TransientCollection, TtlType}};
+use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, KeyAgreementMessage, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, TransientCollection}};
 use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
 
 pub struct StreamMessageProcessor
@@ -102,8 +102,8 @@ struct SessionManager {
 impl SessionManager {
     fn new(outbound_gateway: OutboundGateway) -> Self {
         Self {
-            active_sessions_client: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcMap::new()),
-            active_sessions_host: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcMap::new()),
+            active_sessions_client: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()),
+            active_sessions_host: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()),
             outbound_gateway
         }
     }
@@ -156,7 +156,7 @@ impl SessionManager {
                         OutboundGateway::send_static(&socket, *peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
                     }
                 }
-                sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
+                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
             }
         });
     }
@@ -186,7 +186,7 @@ struct ActiveDests {
 
 impl ActiveDests {
     fn new() -> Self {
-        Self { dests: TransientCollection::new(TtlType::Secs(ACTIVE_SESSION_TTL_SECONDS), true, ArcMap::new()) }
+        Self { dests: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()) }
     }
 
     fn dests_cloned(&self) -> Vec<Sender> { lock!(self.dests.collection().map()).keys().copied().collect() }
@@ -211,8 +211,8 @@ impl ActiveSessionInfo {
     fn new() -> Self {
         Self {
             active_dests: ActiveDests::new(),
-            cached_messages: TransientCollection::new(TtlType::Secs(SRP_TTL_SECONDS), false, ArcMap::new()),
-            resource_queue: TransientCollection::new(TtlType::Secs(SRP_TTL_SECONDS), false, ArcDeque::new())
+            cached_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            resource_queue: TransientCollection::new(SRP_TTL_SECONDS, false, ArcDeque::new())
         }
     }
 
@@ -317,7 +317,7 @@ struct DMessageStaging {
 
 impl DMessageStaging {
     fn new() -> Self {
-        Self { message_staging: TransientCollection::new(TtlType::Secs(1800), false, ArcMap::new()) }
+        Self { message_staging: TransientCollection::new(Duration::from_secs(1800), false, ArcMap::new()) }
     }
 
     async fn stage_message(&mut self, payload: Vec<u8>, host_name: String) -> Vec<u8> {

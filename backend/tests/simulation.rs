@@ -44,10 +44,10 @@ async fn basic() {
             let is_end = host_indices.contains(&i);
             let is_start = start == i;
             tokio::spawn(async move { Node::new().listen(is_start, is_end, Some(rx), introducer, id, Vec::with_capacity(0), endpoint_pair, socket).await });
-            sleep(Duration::from_millis(DPP_TTL_MILLIS*6)).await;
+            sleep(DPP_TTL_MILLIS*6).await;
             println!();
         }
-        sleep(Duration::from_secs(HEARTBEAT_INTERVAL_SECONDS)).await;
+        sleep(HEARTBEAT_INTERVAL_SECONDS).await;
         for (_, tx) in introducers {
             tx.send(()).await.unwrap();
         }
