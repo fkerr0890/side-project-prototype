@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, net::SocketAddrV4};
 use ring::aead;
 use tokio::{sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
+use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, Messagea, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 use super::{EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
@@ -17,7 +17,10 @@ pub struct MessageStaging {
     message_staging: TransientCollection<ArcMap<NumId, HashMap<usize, InboundMessage>>>,
     message_caching: TransientCollection<ArcMap<NumId, Vec<(SocketAddrV4, Vec<u8>)>>>,
     unconfirmed_peers: TransientCollection<ArcMap<NumId, EndpointPair>>,
-    outbound_gateway: OutboundGateway
+    outbound_gateway: OutboundGateway,
+    handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<Messagea>>>,
+    outbound: mpsc::UnboundedSender<Messagea>,
+    from_handlers: mpsc::UnboundedReceiver<Messagea>
 }
 
 impl MessageStaging {
@@ -29,8 +32,10 @@ impl MessageStaging {
         to_dsrp: mpsc::UnboundedSender<SearchMessage>,
         to_dsmp: mpsc::UnboundedSender<StreamMessage>,
         to_dh: mpsc::UnboundedSender<DistributionMessage>,
-        outbound_gateway: OutboundGateway) -> Self
+        outbound_gateway: OutboundGateway,
+        handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<Messagea>>>) -> Self
     {
+        let (outbound, from_handlers) = mpsc::unbounded_channel();
         Self {
             from_gateway,
             to_srp,
@@ -42,7 +47,10 @@ impl MessageStaging {
             message_staging: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             message_caching: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             unconfirmed_peers: TransientCollection::new(HEARTBEAT_INTERVAL_SECONDS*2, false, ArcMap::new()),
-            outbound_gateway
+            outbound_gateway,
+            handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            outbound,
+            from_handlers
         }
     }
 
@@ -51,6 +59,27 @@ impl MessageStaging {
         self.stage_message(message_bytes, sender_addr);
         Some(())
     }
+
+    fn register_basic_handler(&self, initial_message: Messagea, stop_condition: impl FnOnce(&Messagea) -> bool + Send, transformer: impl Fn(Messagea) -> Messagea + Send) {
+        let outbound = self.outbound.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.handlers.set_timer(initial_message.id(), "MessageStaging::RegisterBasicHandler");
+        lock!(self.handlers.collection().map()).insert(initial_message.id(), tx);
+        tokio::spawn(async move {
+            let sender = initial_message.only_sender();
+            let message = if stop_condition(&initial_message) {
+                transformer(initial_message)
+            }
+            else {
+                option_early_return!(rx.recv().await)
+            };
+            let Some(sender ) = sender else { self.on_finished(); return };
+            initial_message.replace_dest(sender.socket);
+            result_early_return!(outbound.send(initial_message));
+        });
+    }
+
+    fn on_finished(&self) { unimplemented!() }
 
     // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
     fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) {

@@ -5,8 +5,10 @@ use std::fmt::{Debug, Display};
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
+use crate::http::{SerdeHttpRequest, SerdeHttpResponse};
 use crate::message_processing::SEARCH_TIMEOUT_SECONDS;
 use crate::node::EndpointPair;
+use crate::option_early_return;
 
 pub const NO_POSITION: (usize, usize) = (0, 1);
 
@@ -83,6 +85,71 @@ impl Sender {
     pub fn new(socket: SocketAddrV4, id: NumId) -> Self {
         Self { socket, id }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Messagea {
+    dest: SocketAddrV4,
+    senders: Vec<Sender>,
+    timestamp: String,
+    id: NumId,
+    expiry: Option<String>,
+    metadata: MetadataKind
+}
+
+impl Messagea {
+    pub fn dest(&self) -> SocketAddrV4 { self.dest }
+    pub fn only_sender(&mut self) -> Option<Sender> { assert!(self.senders.len() <= 1); self.senders.pop() }
+    pub fn id(&self) -> NumId { self.id }
+    pub fn replace_dest(&mut self, dest: SocketAddrV4) { self.dest = dest; }
+    pub fn set_sender(&mut self, sender: Sender) { self.senders.push(sender); }
+
+    pub fn check_expiry(&self) -> bool {
+        let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&option_early_return!(&self.expiry, false)).unwrap().into();
+        expiry <= Utc::now()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum MetadataKind {
+    SearchMetadata(SearchMetadata),
+    StreamMetadata(StreamMetadata),
+    DiscoverMetadata(DiscoverMetadata),
+    DistributeMetadata(DistributeMetadata)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SearchMetadata {
+    host_name: String,
+    origin: Option<Peer>,
+    public_key: Option<Vec<u8>>
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StreamMetadata {
+    host_name: String,
+    resource_id: NumId,
+    payload: StreamMessageKinda
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DiscoverMetadata {
+    origin: Option<Peer>,
+    peer_list: Vec<Peer>,
+    hop_count: (u16, u16),
+    kind: DpMessageKind
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DistributeMetadata {
+    host_name: String,
+    hop_count: u16
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum StreamMessageKinda {
+    Request(SerdeHttpRequest),
+    Response(SerdeHttpResponse)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
