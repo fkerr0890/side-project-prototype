@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use tracing::{debug, instrument};
 
-use crate::{lock, message::{Message, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcSet, TransientCollection}};
+use crate::{lock, message::{Message, Messagea, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, SearchMetadata, Sender, StreamMessage, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcSet, TransientCollection}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
@@ -60,16 +60,13 @@ impl<F: Fn(&SearchMessage) -> bool> SearchRequestProcessor<F> {
         }
     }
     
-    fn construct_search_response(&self, id: NumId, origin: Peer, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
-        if let Some(mut search_response) = self.build_response(id, origin.id, host_name.clone(), is_resource_kind) {
-            self.outbound_gateway.send_individual(Sender::new(origin.endpoint_pair.private_endpoint, origin.id), &mut search_response, false);
-        }
+    fn construct_search_response(&self, id: NumId, origin: Peer, host_name: String, is_resource_kind: bool) -> SearchMessage {
         self.build_response(id, origin.id, host_name, is_resource_kind)
     }
 
-    fn build_response(&self, id: NumId, peer_id: NumId, host_name: String, is_resource_kind: bool) -> Option<SearchMessage> {
+    fn build_response(&self, id: NumId, peer_id: NumId, host_name: String, is_resource_kind: bool) -> SearchMessage {
         let public_key = lock!(self.outbound_gateway.key_store).public_key(peer_id);
-        Some(SearchMessage::key_response(self.outbound_gateway.myself, id, host_name, public_key, is_resource_kind))
+        SearchMessage::key_response(self.outbound_gateway.myself, id, host_name, public_key, is_resource_kind)
     }
 
     pub async fn receive(&mut self) -> EmptyOption {

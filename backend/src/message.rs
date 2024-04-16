@@ -93,14 +93,30 @@ pub struct Messagea {
     senders: Vec<Sender>,
     timestamp: String,
     id: NumId,
+    host_name: Option<String>,
     expiry: Option<String>,
     metadata: MetadataKind
 }
 
-impl Messagea {
+impl Messagea {    
+    pub fn new(dest: SocketAddrV4, id: NumId, host_name: Option<String>, expiry: Option<String>, metadata: MetadataKind) -> Self {
+        Self { dest, senders: Vec::new(), timestamp: String::new(), id, host_name, expiry, metadata }
+    }
+
+    pub fn new_search_message(dest: SocketAddrV4, host_name: String, metadata: SearchMetadata) -> Self {
+        Self::new(
+            dest,
+            NumId(Uuid::new_v4().as_u128()),
+            Some(host_name),
+            Some(datetime_to_timestamp(Utc::now() + Duration::seconds(SEARCH_TIMEOUT_SECONDS.as_secs() as i64))),
+            MetadataKind::SearchMetadata(metadata))
+    }
+    
     pub fn dest(&self) -> SocketAddrV4 { self.dest }
     pub fn only_sender(&mut self) -> Option<Sender> { assert!(self.senders.len() <= 1); self.senders.pop() }
     pub fn id(&self) -> NumId { self.id }
+    pub fn host_name(&self) -> &String { &self.host_name.unwrap() }
+    pub fn metadata(&self) -> &MetadataKind { &self.metadata }
     pub fn replace_dest(&mut self, dest: SocketAddrV4) { self.dest = dest; }
     pub fn set_sender(&mut self, sender: Sender) { self.senders.push(sender); }
 
@@ -118,18 +134,38 @@ pub enum MetadataKind {
     DistributeMetadata(DistributeMetadata)
 }
 
+impl MetadataKind {
+    pub fn unwrap_search(&mut self) -> &mut SearchMetadata {
+        match self {
+            Self::SearchMetadata(mut metadata) => &mut metadata,
+            _ => panic!()
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMetadata {
-    host_name: String,
     origin: Option<Peer>,
-    public_key: Option<Vec<u8>>
+    public_key: Vec<u8>,
+    kind: SearchMetadataKind
+}
+
+impl SearchMetadata {
+    pub fn new(origin: Option<Peer>, public_key: Vec<u8>, kind: SearchMetadataKind) -> Self {
+        Self { origin, public_key, kind }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SearchMetadataKind {
+    Request,
+    Response
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamMetadata {
-    host_name: String,
     resource_id: NumId,
-    payload: StreamMessageKinda
+    payload: StreamPayloadKind
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -142,12 +178,11 @@ pub struct DiscoverMetadata {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DistributeMetadata {
-    host_name: String,
     hop_count: u16
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum StreamMessageKinda {
+pub enum StreamPayloadKind {
     Request(SerdeHttpRequest),
     Response(SerdeHttpResponse)
 }

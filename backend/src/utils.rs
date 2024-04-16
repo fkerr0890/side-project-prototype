@@ -113,6 +113,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
         }
     }
 
+    pub fn ttl(&self) -> Duration { self.ttl }
     pub fn insert(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key.clone(), Some(key), None::<fn()>, key_label, false)}
     pub fn set_timer(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key, None, None::<fn()>, key_label, false) }
     pub fn set_timer_with_send_action(&mut self, key: C::K, send_action: impl FnMut() + Send + 'static, key_label: &str) -> bool { self.start_timer(key, None, Some(send_action), key_label, false) }

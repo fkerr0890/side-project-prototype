@@ -1,10 +1,11 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4};
 use ring::aead;
-use tokio::{sync::mpsc, time::sleep};
+use stun::message::Message;
+use tokio::{select, sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
 use crate::{crypto::{Direction, Error}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, Messagea, NumId, Peer, SearchMessage, SearchMessageKind, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
-use super::{EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
+use super::{search::SearchRequestProcessor, EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
     from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, Vec<u8>)>,
@@ -19,8 +20,8 @@ pub struct MessageStaging {
     unconfirmed_peers: TransientCollection<ArcMap<NumId, EndpointPair>>,
     outbound_gateway: OutboundGateway,
     handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<Messagea>>>,
-    outbound: mpsc::UnboundedSender<Messagea>,
-    from_handlers: mpsc::UnboundedReceiver<Messagea>
+    outbound: mpsc::UnboundedSender<Vec<u8>>,
+    from_handlers: mpsc::UnboundedReceiver<Vec<u8>>
 }
 
 impl MessageStaging {
@@ -60,23 +61,32 @@ impl MessageStaging {
         Some(())
     }
 
-    fn register_basic_handler(&self, initial_message: Messagea, stop_condition: impl FnOnce(&Messagea) -> bool + Send, transformer: impl Fn(Messagea) -> Messagea + Send) {
-        let outbound = self.outbound.clone();
+    fn register_basic_handler(&self, id: NumId, sender: Sender, default_return: Option<Messagea>) {
+        let (outbound, ttl) = (self.outbound.clone(), self.handlers.ttl());
         let (tx, rx) = mpsc::unbounded_channel();
-        self.handlers.set_timer(initial_message.id(), "MessageStaging::RegisterBasicHandler");
-        lock!(self.handlers.collection().map()).insert(initial_message.id(), tx);
+        self.handlers.set_timer(id, "MessageStaging::RegisterBasicHandler");
+        lock!(self.handlers.collection().map()).insert(id, tx);
         tokio::spawn(async move {
-            let sender = initial_message.only_sender();
-            let message = if stop_condition(&initial_message) {
-                transformer(initial_message)
-            }
-            else {
-                option_early_return!(rx.recv().await)
-            };
-            let Some(sender ) = sender else { self.on_finished(); return };
-            initial_message.replace_dest(sender.socket);
-            result_early_return!(outbound.send(initial_message));
+            let message = option_early_return!(
+                select!(
+                    _ = sleep(ttl) => default_return,
+                    message = rx.recv() => message
+                )
+            );
+            message.replace_dest(sender.socket);
+            let serialized = result_early_return!(bincode::serialize(&message));
+            result_early_return!(outbound.send(serialized));
         });
+    }
+
+    fn transformer<T: FnOnce(Messagea) -> Messagea + Send>(&self, message: Messagea) -> impl FnOnce(Messagea) -> Messagea + Send {
+        match message.metadata() {
+            //Implement this
+            crate::message::MetadataKind::SearchMetadata(_) => SearchRequestProcessor::search_transformer(self.outbound_gateway.myself, Vec::new()),
+            crate::message::MetadataKind::StreamMetadata(_) => todo!(),
+            crate::message::MetadataKind::DiscoverMetadata(_) => todo!(),
+            crate::message::MetadataKind::DistributeMetadata(_) => todo!(),
+        }
     }
 
     fn on_finished(&self) { unimplemented!() }
