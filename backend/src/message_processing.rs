@@ -5,7 +5,7 @@ use serde::Serialize;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info, instrument};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, NumId, Peer, Sender, SeparateParts}, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, MessageDirection, Messagea, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -65,35 +65,52 @@ type MessagesErrors = (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>);
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
     myself: Peer,
-    key_store: Arc<Mutex<KeyStore>>,
-    peer_ops: Arc<Mutex<PeerOps>>
+    peer_ops: PeerOps
 }
 
 impl OutboundGateway {
-    pub fn new(socket: Arc<UdpSocket>, myself: Peer, key_store: &Arc<Mutex<KeyStore>>, peer_ops: Arc<Mutex<PeerOps>>) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, myself: Peer) -> Self {
         Self {
-            socket: socket.clone(),
+            socket,
             myself,
-            key_store: key_store.clone(),
-            peer_ops
+            peer_ops: PeerOps::new()
         }
     }
 
     pub fn send_request(&self, request: &mut(impl Message + Serialize), prev_sender: Option<Sender>) {
-        for peer in lock!(self.peer_ops).peers() {
+        // for peer in lock!(self.peer_ops).peers() {
+        //     match prev_sender { Some(s) if s.id == peer.id => continue, _ => {}}
+        //     self.send(peer, request, false);
+        // }
+    }
+
+    pub fn send_request2(&self, request: &Messagea, prev_sender: Option<Sender>, key_store: &KeyStore) {
+        for peer in self.peer_ops.peers() {
             match prev_sender { Some(s) if s.id == peer.id => continue, _ => {}}
-            self.send(peer, request, false);
+            self.send(peer, request, false, key_store);
         }
     }
 
     #[instrument(level = "trace", skip(self))]
     fn add_new_peer(&self, peer: Peer) {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
-        lock!(self.peer_ops).add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
+        self.peer_ops.add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
     }
 
-    pub fn send(&self, dest: Peer, message: &mut(impl Message + Serialize), to_be_chunked: bool) {
-        Self::send_private_public_static(&self.socket, dest, self.myself, message, self.key_store.clone(), to_be_chunked)
+    pub fn send(&self, dest: Peer, message: &Messagea, to_be_chunked: bool, key_store: &KeyStore) {
+        self.send_individual2(option_early_return!(Self::sender_from_peer(dest)), message, to_be_chunked, key_store)
+    }
+
+    fn sender_from_peer(dest: Peer) -> Option<Sender> {
+        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+            Some(Sender::new(dest.endpoint_pair.private_endpoint, dest.id))
+        }
+        else if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+            Some(Sender::new(dest.endpoint_pair.public_endpoint, dest.id))
+        }
+        else {
+            None
+        }
     }
 
     pub fn send_private_public_static(socket: &Arc<UdpSocket>, dest: Peer, myself: Peer, message: &mut(impl Message + Serialize), key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) {
@@ -102,51 +119,55 @@ impl OutboundGateway {
     }
 
     pub fn send_individual(&self, dest: Sender, message: &mut(impl Message + Serialize), to_be_chunked: bool) {
-        Self::send_static(&self.socket, dest, self.myself, message, self.key_store.clone(), to_be_chunked);
+        // Self::send_static(&self.socket, dest, self.myself, message, self.key_store.clone(), to_be_chunked);
     }
 
-    pub fn send_static(socket: &Arc<UdpSocket>, dest: Sender, myself: Peer, message: &mut(impl Message + Serialize), key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) {
-        Self::send_key_agreement(socket.clone(), dest, key_store.clone());
-        message.replace_dest(dest.socket);
+    pub fn send_individual2(&self, dest: Sender, message: &Messagea, to_be_chunked: bool, key_store: &KeyStore) {
+        assert!(message.senders().len() == 0);
         if message.check_expiry() {
-            info!("PeerOps: Message expired: {}", message.id());
+            info!("Message expired: {}", message.id());
         }
-        let serialized = result_early_return!(bincode::serialize(message));
-        let sender = if dest.socket.ip().is_private() { myself.endpoint_pair.private_endpoint } else { myself.endpoint_pair.public_endpoint };
-        let separate_parts = SeparateParts::new(Sender::new(sender, myself.id), message.id());
-        let chunks = option_early_return!(Self::chunked(dest, serialized, separate_parts, key_store, to_be_chunked));
+        let serialized = result_early_return!(bincode::serialize(&message));
+        let sender = if dest.socket.ip().is_private() { self.myself.endpoint_pair.private_endpoint } else { self.myself.endpoint_pair.public_endpoint };
+        let separate_parts = SeparateParts::new(Sender::new(sender, self.myself.id), message.id());
+        let chunks = option_early_return!(Self::chunked(dest, serialized, separate_parts, to_be_chunked, key_store));
         for chunk in chunks {
-            let socket_clone = socket.clone();
+            let socket_clone = self.socket.clone();
             tokio::spawn(async move { result_early_return!(socket_clone.send_to(&chunk, dest.socket).await); });
         }
     }
 
-    fn send_key_agreement(socket: Arc<UdpSocket>, dest: Sender, key_store: Arc<Mutex<KeyStore>>) {
-        let mut key_store = lock!(key_store);
-        let public_key = key_store.public_key(dest.id);
-        if public_key.is_empty() {
-            return;
-        }
-        Self::send_key_agreement_message(socket, dest.socket, &KeyAgreementMessage { public_key, peer_id: dest.id });
+    pub fn send_static(socket: &Arc<UdpSocket>, dest: Sender, myself: Peer, message: &mut(impl Message + Serialize), key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) {
+
     }
 
-    pub fn send_agreement(&self, dest: Sender, message: &KeyAgreementMessage) {
-        Self::send_key_agreement_message(self.socket.clone(), dest.socket, message)
+    // fn send_key_agreement(socket: Arc<UdpSocket>, dest: Sender, key_store: Arc<Mutex<KeyStore>>) {
+    //     let mut key_store = lock!(key_store);
+    //     let public_key = key_store.public_key(dest.id);
+    //     if public_key.is_empty() {
+    //         return;
+    //     }
+    //     Self::send_key_agreement_message(socket, dest.socket, &KeyAgreementMessage { public_key, peer_id: dest.id });
+    // }
+
+    pub fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirection) {
+        let serialized = result_early_return!(bincode::serialize(&KeyAgreementMessage { public_key, peer_id: self.myself.id, direction }));
+        let socket = self.socket.clone();
+        tokio::spawn(async move { result_early_return!(self.socket.send_to(&serialized, option_early_return!(Self::sender_from_peer(dest)).socket).await); });
     }
 
     fn send_key_agreement_message(socket: Arc<UdpSocket>, dest: SocketAddrV4, message: &KeyAgreementMessage) {
-        let serialized = result_early_return!(bincode::serialize(message));
-        tokio::spawn(async move { result_early_return!(socket.send_to(&serialized, dest).await); });
+
     }
 
-    fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) -> Option<Vec<Vec<u8>>> {
+    fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_chunked: bool, key_store: &KeyStore) -> Option<Vec<Vec<u8>>> {
         let chunk_size = if to_be_chunked { 975 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { bytes.len() };
         let chunks = bytes.chunks(chunk_size);
         let num_chunks = chunks.len();
         //TODO: Encrypt for not chunked
         let (mut messages, errors): MessagesErrors = chunks
             .enumerate()
-            .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store.clone(), dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks)))
+            .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store, dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks)))
             .map(|r| { match r { Ok(bytes) => (bytes, String::new()), Err(e) => (Vec::new(), e) } })
             .partition(|r| !r.0.is_empty());
         if !errors.is_empty() {
@@ -156,8 +177,7 @@ impl OutboundGateway {
         Some(messages.into_iter().map(|o| o.0).collect())
     }
 
-    fn generate_inbound_message_bytes(key_store: Arc<Mutex<KeyStore>>, dest: Sender, chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
-        let mut key_store = lock!(key_store);
+    fn generate_inbound_message_bytes(key_store: &KeyStore, dest: Sender, chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
         key_store.reset_expiration(dest.id);
         let my_peer_id = separate_parts.sender().id.0;
         let mut bytes = bincode::serialize(&InboundMessage::new(chunk, separate_parts.set_position(position))).map_err(|e| e.to_string())?;
@@ -183,20 +203,20 @@ impl BreadcrumbService {
 
     pub fn clone(&self, ttl: Duration) -> Self { Self { breadcrumbs: TransientCollection::from_existing(&self.breadcrumbs, ttl) } }
 
-    pub fn try_add_breadcrumb(&mut self, early_return_context: Option<EarlyReturnContext>, id: NumId, dest: Option<Sender>) -> bool {
-        let contains_key = if let Some(mut context) = early_return_context {
+    pub fn try_add_breadcrumb(&mut self, id: NumId, early_return_context: Option<EarlyReturnContext>, dest: Option<Sender>) -> bool {
+        let is_new_key = if let Some(context) = early_return_context {
             self.breadcrumbs.set_timer_with_send_action(id, move || {
-                let (ref mut message, dest, myself, ref socket, ref key_store) = context;
-                OutboundGateway::send_static(socket, dest, myself, message, key_store.clone(), false);
+                let (tx, message) = context;
+                result_early_return!(tx.send(message));
             }, "BreadcrumbService")
         }
         else {
             self.breadcrumbs.set_timer(id, "BreadcrumbService")
         };
-        if contains_key {
+        if is_new_key {
             lock!(self.breadcrumbs.collection().map()).insert(id, dest);
         }
-        contains_key
+        is_new_key
     }
 
     pub fn get_dest(&self, id: &NumId) -> Option<Option<Sender>> {
@@ -208,10 +228,4 @@ impl BreadcrumbService {
     }
 }
 
-pub type EarlyReturnContext = (
-    DiscoverPeerMessage,
-    Sender,
-    Peer,
-    Arc<UdpSocket>,
-    Arc<Mutex<KeyStore>>
-);
+pub type EarlyReturnContext = (mpsc::UnboundedSender<Messagea>, Messagea);

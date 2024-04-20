@@ -89,36 +89,49 @@ impl Sender {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Messagea {
-    dest: SocketAddrV4,
+    dest: Peer,
     senders: Vec<Sender>,
     timestamp: String,
     id: NumId,
-    host_name: Option<String>,
     expiry: Option<String>,
-    metadata: MetadataKind
+    metadata: MetadataKind,
+    direction: MessageDirection
 }
 
 impl Messagea {    
-    pub fn new(dest: SocketAddrV4, id: NumId, host_name: Option<String>, expiry: Option<String>, metadata: MetadataKind) -> Self {
-        Self { dest, senders: Vec::new(), timestamp: String::new(), id, host_name, expiry, metadata }
+    pub fn new(dest: Peer, id: NumId, expiry: Option<String>, metadata: MetadataKind, direction: MessageDirection) -> Self {
+        Self { dest, senders: Vec::new(), timestamp: String::new(), id, expiry, metadata, direction }
     }
 
-    pub fn new_search_message(dest: SocketAddrV4, host_name: String, metadata: SearchMetadata) -> Self {
+    pub fn new_search_message(dest: Peer, metadata: SearchMetadata) -> Self {
         Self::new(
             dest,
             NumId(Uuid::new_v4().as_u128()),
-            Some(host_name),
             Some(datetime_to_timestamp(Utc::now() + Duration::seconds(SEARCH_TIMEOUT_SECONDS.as_secs() as i64))),
-            MetadataKind::SearchMetadata(metadata))
+            MetadataKind::Search(metadata),
+            MessageDirection::Request)
+    }
+
+    pub fn new_heartbeat(my_node_id: NumId) -> Self {
+        Self::new(
+            Peer::new(EndpointPair::new(EndpointPair::default_socket(), EndpointPair::default_socket()), my_node_id),
+            NumId(Uuid::new_v4().as_u128()),
+            None,
+            MetadataKind::None,
+            MessageDirection::Request
+        )
     }
     
-    pub fn dest(&self) -> SocketAddrV4 { self.dest }
+    pub fn dest(&self) -> Peer { self.dest }
     pub fn only_sender(&mut self) -> Option<Sender> { assert!(self.senders.len() <= 1); self.senders.pop() }
+    pub fn senders(&mut self) -> &Vec<Sender> { &self.senders }
     pub fn id(&self) -> NumId { self.id }
-    pub fn host_name(&self) -> &String { &self.host_name.unwrap() }
     pub fn metadata(&self) -> &MetadataKind { &self.metadata }
-    pub fn replace_dest(&mut self, dest: SocketAddrV4) { self.dest = dest; }
+    pub fn into_metadata(self) -> MetadataKind { self.metadata }
+    pub fn direction(&self) -> MessageDirection { self.direction }
+    pub fn replace_dest(&mut self, dest: Peer) { self.dest = dest; }
     pub fn set_sender(&mut self, sender: Sender) { self.senders.push(sender); }
+    pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
 
     pub fn check_expiry(&self) -> bool {
         let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&option_early_return!(&self.expiry, false)).unwrap().into();
@@ -127,17 +140,24 @@ impl Messagea {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum MessageDirection {
+    Request,
+    Response
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum MetadataKind {
-    SearchMetadata(SearchMetadata),
-    StreamMetadata(StreamMetadata),
-    DiscoverMetadata(DiscoverMetadata),
-    DistributeMetadata(DistributeMetadata)
+    Search(SearchMetadata),
+    Stream(StreamMetadata),
+    Discover(DiscoverMetadata),
+    Distribute(DistributeMetadata),
+    None
 }
 
 impl MetadataKind {
     pub fn unwrap_search(&mut self) -> &mut SearchMetadata {
         match self {
-            Self::SearchMetadata(mut metadata) => &mut metadata,
+            Self::Search(mut metadata) => &mut metadata,
             _ => panic!()
         }
     }
@@ -145,46 +165,57 @@ impl MetadataKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMetadata {
-    origin: Option<Peer>,
-    public_key: Vec<u8>,
-    kind: SearchMetadataKind
-}
-
-impl SearchMetadata {
-    pub fn new(origin: Option<Peer>, public_key: Vec<u8>, kind: SearchMetadataKind) -> Self {
-        Self { origin, public_key, kind }
-    }
+    pub origin: Option<Peer>,
+    pub public_key: Vec<u8>,
+    pub kind: SearchMetadataKind,
+    pub host_name: String
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum SearchMetadataKind {
-    Request,
-    Response
+    Retrieval,
+    Distribution
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamMetadata {
-    resource_id: NumId,
-    payload: StreamPayloadKind
+    pub resource_id: NumId,
+    pub payload: StreamPayloadKind,
+    pub host_name: String
+}
+
+impl StreamMetadata {
+    pub fn new(resource_id: NumId, payload: StreamPayloadKind, host_name: String) -> Self {
+        Self { resource_id, payload, host_name }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiscoverMetadata {
-    origin: Option<Peer>,
-    peer_list: Vec<Peer>,
-    hop_count: (u16, u16),
-    kind: DpMessageKind
+    pub origin: Option<Peer>,
+    pub peer_list: Vec<Peer>,
+    pub hop_count: (u16, u16),
+    pub kind: DpMessageKind
+}
+
+impl DiscoverMetadata {
+    pub fn new(origin: Option<Peer>, peer_list: Vec<Peer>, hop_count: (u16, u16), kind: DpMessageKind) -> Self {
+        Self { origin, peer_list, hop_count, kind }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DistributeMetadata {
-    hop_count: u16
+    pub hop_count: u16,
+    pub host_name: String
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum StreamPayloadKind {
     Request(SerdeHttpRequest),
-    Response(SerdeHttpResponse)
+    Response(SerdeHttpResponse),
+    Distribution(Vec<u8>),
+    Empty
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -221,7 +252,8 @@ impl Message for Heartbeat {
 #[derive(Serialize, Deserialize)]
 pub struct KeyAgreementMessage {
     pub public_key: Vec<u8>,
-    pub peer_id: NumId
+    pub peer_id: NumId,
+    pub direction: MessageDirection
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -275,6 +307,18 @@ pub struct Peer {
 impl Peer {
     pub fn new(endpoint_pair: EndpointPair, id: NumId) -> Self {
         Self { endpoint_pair, id }
+    }
+}
+
+impl From<Sender> for Peer {
+    fn from(value: Sender) -> Self {
+        let endpoint_pair = if value.socket.ip().is_private() {
+            EndpointPair::new(EndpointPair::default_socket(), value.socket)
+        }
+        else {
+            EndpointPair::new(value.socket, EndpointPair::default_socket())
+        };
+        Self::new(endpoint_pair, value.id)
     }
 }
 

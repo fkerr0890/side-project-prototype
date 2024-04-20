@@ -89,9 +89,9 @@ impl KeyStore {
         self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeysRenew");
     }
 
-    // pub fn agreement_exists(&self, peer_id: NumId) -> bool {
-    //     self.symmetric_keys.contains_key(&peer_id)
-    // }
+    pub fn agreement_exists(&self, peer_id: &NumId) -> bool {
+        self.symmetric_keys.contains_key(peer_id)
+    }
 }
 
 #[derive(Debug)]
