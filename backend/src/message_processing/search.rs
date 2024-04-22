@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddrV4};
 use tokio::sync::mpsc;
 use tracing::{debug, instrument};
 
-use crate::{lock, message::{Message, MessageDirection, Messagea, MetadataKind, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, SearchMetadata, SearchMetadataKind, Sender, StreamMessage, StreamMessageKind, StreamMetadata, StreamPayloadKind}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcSet, TransientCollection}};
+use crate::{lock, message::{Message, MessageDirection, Messagea, MetadataKind, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, SearchMetadata, Sender, StreamMessage, StreamMessageKind, StreamMetadata, StreamPayloadKind}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcSet, TransientCollection}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
@@ -28,26 +28,14 @@ impl SearchRequestProcessor {
         }
     }
 
-    #[instrument(level = "trace", skip_all, fields(dest, host_name, kind = ?metadata.kind))]
-    pub fn continue_propagating(&self, dest: Peer, host_name: &str, metadata: &SearchMetadata) -> bool {
-        let should_stop = match metadata.kind {
-            SearchMetadataKind::Retrieval => self.check_stop_retrieval(host_name),
-            SearchMetadataKind::Distribution => self.check_stop_distribution(dest, metadata)
-        };
+    #[instrument(level = "trace", skip_all, fields(dest, host_name))]
+    pub fn continue_propagating(&self, dest: Peer, metadata: &SearchMetadata) -> bool {
+        let should_stop = self.local_hosts.contains_key(&metadata.host_name);
         if !should_stop {
             return true;
         }
         debug!("Stopped propagating search request");
         false
-    }
-
-    fn check_stop_retrieval(&self, host_name: &str) -> bool {
-        self.local_hosts.contains_key(host_name)
-    }
-
-    fn check_stop_distribution(&self, dest: Peer, metadata: &SearchMetadata) -> bool {
-        let origin = metadata.origin.unwrap();
-        origin.id != dest.id
     }
 
     #[instrument(level = "trace", skip_all, fields(search_request.sender = ?search_request.sender(), search_request.id = %search_request.id()))]
@@ -85,9 +73,8 @@ impl SearchRequestProcessor {
     }
 
     #[instrument(level = "trace", skip_all, fields(id))]
-    pub fn execute_final_action(&self, id: NumId, sender: Peer, origin: Peer, host_name: String) -> Messagea {
-        let sender = if sender.endpoint_pair.private_endpoint == EndpointPair::default_socket() { origin } else { sender };
-        Messagea::new(sender, id, None, MetadataKind::Stream(StreamMetadata::new(id, StreamPayloadKind::Empty, host_name)), MessageDirection::Request)
+    pub fn execute_final_action(&self, sender: Sender, origin: Peer) -> Sender {
+        if sender.socket == origin.endpoint_pair.private_endpoint && sender.id == origin.id { sender } else { Sender::new(origin.endpoint_pair.public_endpoint, origin.id) }
     }
     
     fn construct_search_response(&self, id: NumId, origin: Peer, host_name: String, is_resource_kind: bool) -> SearchMessage {

@@ -18,6 +18,7 @@ pub const DISTRIBUTION_TTL_SECONDS: Duration = Duration::from_secs(43200);
 
 pub mod stage;
 pub mod stream;
+pub mod stream2;
 pub mod search;
 pub mod discover;
 pub mod distribute;
@@ -84,33 +85,27 @@ impl OutboundGateway {
         // }
     }
 
-    pub fn send_request2(&self, request: &Messagea, prev_sender: Option<Sender>, key_store: &KeyStore) {
-        for peer in self.peer_ops.peers() {
-            match prev_sender { Some(s) if s.id == peer.id => continue, _ => {}}
-            self.send(peer, request, false, key_store);
-        }
-    }
-
     #[instrument(level = "trace", skip(self))]
-    fn add_new_peer(&self, peer: Peer) {
+    fn add_new_peer(&mut self, peer: Peer) {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
         self.peer_ops.add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
     }
 
-    pub fn send(&self, dest: Peer, message: &Messagea, to_be_chunked: bool, key_store: &KeyStore) {
-        self.send_individual2(option_early_return!(Self::sender_from_peer(dest)), message, to_be_chunked, key_store)
+    pub async fn send(&self, message: &Messagea, to_be_chunked: bool, key_store: &mut KeyStore) {
+        let dest = message.dest();
+        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+            self.send_individual2(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        }
+        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+            self.send_individual2(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        }
+        // self.send_individual2(option_early_return!(Self::sender_from_peer(&mut dest)), message, to_be_chunked, key_store);
     }
 
-    fn sender_from_peer(dest: Peer) -> Option<Sender> {
-        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-            Some(Sender::new(dest.endpoint_pair.private_endpoint, dest.id))
-        }
-        else if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            Some(Sender::new(dest.endpoint_pair.public_endpoint, dest.id))
-        }
-        else {
-            None
-        }
+    fn dests_from_peer(dest: Peer) -> Vec<Sender> {
+        let mut dests = Vec::new();
+
+        dests
     }
 
     pub fn send_private_public_static(socket: &Arc<UdpSocket>, dest: Peer, myself: Peer, message: &mut(impl Message + Serialize), key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) {
@@ -122,8 +117,7 @@ impl OutboundGateway {
         // Self::send_static(&self.socket, dest, self.myself, message, self.key_store.clone(), to_be_chunked);
     }
 
-    pub fn send_individual2(&self, dest: Sender, message: &Messagea, to_be_chunked: bool, key_store: &KeyStore) {
-        assert!(message.senders().len() == 0);
+    pub async fn send_individual2(&self, dest: Sender, message: &Messagea, to_be_chunked: bool, key_store: &mut KeyStore) {
         if message.check_expiry() {
             info!("Message expired: {}", message.id());
         }
@@ -132,8 +126,7 @@ impl OutboundGateway {
         let separate_parts = SeparateParts::new(Sender::new(sender, self.myself.id), message.id());
         let chunks = option_early_return!(Self::chunked(dest, serialized, separate_parts, to_be_chunked, key_store));
         for chunk in chunks {
-            let socket_clone = self.socket.clone();
-            tokio::spawn(async move { result_early_return!(socket_clone.send_to(&chunk, dest.socket).await); });
+            result_early_return!(self.socket.send_to(&chunk, dest.socket).await);
         }
     }
 
@@ -150,17 +143,16 @@ impl OutboundGateway {
     //     Self::send_key_agreement_message(socket, dest.socket, &KeyAgreementMessage { public_key, peer_id: dest.id });
     // }
 
-    pub fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirection) {
-        let serialized = result_early_return!(bincode::serialize(&KeyAgreementMessage { public_key, peer_id: self.myself.id, direction }));
-        let socket = self.socket.clone();
-        tokio::spawn(async move { result_early_return!(self.socket.send_to(&serialized, option_early_return!(Self::sender_from_peer(dest)).socket).await); });
+    pub async fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirection) {
+        let serialized = result_early_return!(bincode::serialize(&KeyAgreementMessage::new(public_key, self.myself.id, direction)));
+        self.send_public_private(dest, &serialized).await;
     }
 
     fn send_key_agreement_message(socket: Arc<UdpSocket>, dest: SocketAddrV4, message: &KeyAgreementMessage) {
 
     }
 
-    fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_chunked: bool, key_store: &KeyStore) -> Option<Vec<Vec<u8>>> {
+    fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_chunked: bool, key_store: &mut KeyStore) -> Option<Vec<Vec<u8>>> {
         let chunk_size = if to_be_chunked { 975 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { bytes.len() };
         let chunks = bytes.chunks(chunk_size);
         let num_chunks = chunks.len();
@@ -177,14 +169,22 @@ impl OutboundGateway {
         Some(messages.into_iter().map(|o| o.0).collect())
     }
 
-    fn generate_inbound_message_bytes(key_store: &KeyStore, dest: Sender, chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
-        key_store.reset_expiration(dest.id);
+    fn generate_inbound_message_bytes(key_store: &mut KeyStore, dest: Sender, chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
         let my_peer_id = separate_parts.sender().id.0;
         let mut bytes = bincode::serialize(&InboundMessage::new(chunk, separate_parts.set_position(position))).map_err(|e| e.to_string())?;
         let nonce = key_store.transform(dest.id, &mut bytes, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
         bytes.extend(my_peer_id.to_be_bytes());
         bytes.extend(nonce);
         Ok(bytes)
+    }
+
+    async fn send_public_private(&self, dest: Peer, bytes: &Vec<u8>) {
+        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+            result_early_return!(self.socket.send_to(bytes, dest.endpoint_pair.private_endpoint).await);
+        }
+        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+            result_early_return!(self.socket.send_to(bytes, dest.endpoint_pair.private_endpoint).await);
+        }
     }
 }
 
@@ -205,8 +205,8 @@ impl BreadcrumbService {
 
     pub fn try_add_breadcrumb(&mut self, id: NumId, early_return_context: Option<EarlyReturnContext>, dest: Option<Sender>) -> bool {
         let is_new_key = if let Some(context) = early_return_context {
+            let EarlyReturnContext(tx, message) = context;
             self.breadcrumbs.set_timer_with_send_action(id, move || {
-                let (tx, message) = context;
                 result_early_return!(tx.send(message));
             }, "BreadcrumbService")
         }
@@ -228,4 +228,4 @@ impl BreadcrumbService {
     }
 }
 
-pub type EarlyReturnContext = (mpsc::UnboundedSender<Messagea>, Messagea);
+pub struct EarlyReturnContext(mpsc::UnboundedSender<Messagea>, Messagea);

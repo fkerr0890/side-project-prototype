@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{http::ServerContext, message::{DistributionMessage, NumId, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, result_early_return};
 
-use super::{stream::StreamResponseType, BreadcrumbService, EmptyOption, OutboundGateway};
+use super::{stream2::StreamResponseType, BreadcrumbService, EmptyOption, OutboundGateway};
 
 pub struct DistributionHandler {
     from_staging: mpsc::UnboundedReceiver<DistributionMessage>,

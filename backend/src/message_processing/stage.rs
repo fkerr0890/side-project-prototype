@@ -1,10 +1,10 @@
 use std::{collections::{HashMap, HashSet}, net::SocketAddrV4};
-use ring::aead;
+use ring::{aead, hmac::Key};
 use tokio::{select, sync::mpsc, time::sleep};
 use tracing::{debug, error, instrument, trace, warn};
-use crate::{crypto::{Direction, Error, KeyStore}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, KeyAgreementMessage, Message, MessageDirection, Messagea, MetadataKind, NumId, Peer, SearchMessage, SearchMessageKind, SearchMetadata, Sender, StreamMessage, StreamMessageKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
+use crate::{crypto::{Direction, Error, KeyStore}, http::SerdeHttpResponse, lock, message::{self, DiscoverMetadata, DiscoverPeerMessage, DistributeMetadata, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, KeyAgreementMessage, Message, MessageDirection, Messagea, MetadataKind, NumId, Peer, SearchMessage, SearchMessageKind, SearchMetadata, Sender, StreamMessage, StreamMessageKind, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, BidirectionalMpsc, TransientCollection}};
 
-use super::{search::SearchRequestProcessor, BreadcrumbService, DiscoverPeerProcessor, EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
+use super::{search::SearchRequestProcessor, stream::{SessionManagerDistribution, SessionManagerRetrieval}, stream2::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
     from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, Vec<u8>)>,
@@ -15,7 +15,7 @@ pub struct MessageStaging {
     to_dsmp: mpsc::UnboundedSender<StreamMessage>,
     to_dh: mpsc::UnboundedSender<DistributionMessage>,
     message_staging: TransientCollection<ArcMap<NumId, HashMap<usize, InboundMessage>>>,
-    message_caching: TransientCollection<ArcMap<NumId, Vec<(SocketAddrV4, Vec<u8>)>>>,
+    cached_outbound_messages: TransientCollection<ArcMap<NumId, Vec<Messagea>>>,
     unconfirmed_peers: TransientCollection<ArcMap<NumId, EndpointPair>>,
     outbound_gateway: OutboundGateway,
     handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<Messagea>>>,
@@ -23,8 +23,13 @@ pub struct MessageStaging {
     breadcrumb_service: BreadcrumbService,
     search_request_processor: SearchRequestProcessor,
     discover_peer_processor: DiscoverPeerProcessor,
-    early_return_trigger_tx: mpsc::UnboundedSender<Messagea>,
-    early_return_trigger_rx: mpsc::UnboundedReceiver<Messagea>
+    stream_message_processor: StreamMessageProcessor,
+    outbound_channel_tx: mpsc::UnboundedSender<Messagea>,
+    outbound_channel_rx: mpsc::UnboundedReceiver<Messagea>,
+    session_manager: SessionManagerRetrieval,
+    session_manager_distribution: SessionManagerDistribution,
+    to_http_handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<HttpSignal>>>,
+    from_http_handlers: mpsc::UnboundedReceiver<(Messagea, mpsc::UnboundedSender<HttpSignal>)>
 }
 
 impl MessageStaging {
@@ -39,7 +44,10 @@ impl MessageStaging {
         outbound_gateway: OutboundGateway,
         breadcrumbs: TransientCollection<ArcMap<NumId, Option<Sender>>>,
         search_request_processor: SearchRequestProcessor,
-        discover_peer_processor: DiscoverPeerProcessor) -> Self
+        discover_peer_processor: DiscoverPeerProcessor,
+        stream_message_processor: StreamMessageProcessor,
+        from_http_handlers: mpsc::UnboundedReceiver<(Messagea, mpsc::UnboundedSender<HttpSignal>)>,
+        local_hosts: HashMap<String, SocketAddrV4>) -> Self
     {
         let (early_return_trigger_tx, early_return_trigger_rx) = mpsc::unbounded_channel();
         Self {
@@ -51,53 +59,50 @@ impl MessageStaging {
             to_dsmp,
             to_dh,
             message_staging: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
-            message_caching: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            cached_outbound_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             unconfirmed_peers: TransientCollection::new(HEARTBEAT_INTERVAL_SECONDS*2, false, ArcMap::new()),
             outbound_gateway,
             handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             key_store: KeyStore::new(),
             breadcrumb_service: BreadcrumbService::new(SRP_TTL_SECONDS),
             search_request_processor,
-            early_return_trigger_tx,
-            early_return_trigger_rx,
-            discover_peer_processor
+            outbound_channel_tx: early_return_trigger_tx,
+            outbound_channel_rx: early_return_trigger_rx,
+            discover_peer_processor,
+            stream_message_processor,
+            session_manager: SessionManagerRetrieval::new(local_hosts.clone()),
+            session_manager_distribution: SessionManagerDistribution::new(local_hosts),
+            to_http_handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            from_http_handlers
         }
     }
 
     pub async fn receive(&mut self) -> EmptyOption {
         let (sender_addr, message_bytes) = select! {
             message = self.from_gateway.recv() => message?,
-            outbound_message = self.early_return_trigger_rx.recv() => return Some(())
+            message = self.outbound_channel_rx.recv() => return Some(self.process_outbound_message(message?).await),
+            message = self.from_http_handlers.recv() => return Some(self.send_http_request(message?).await)
         };
-        self.stage_message(message_bytes, sender_addr);
+        if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes) {
+            return Some(self.handle_key_agreement(message, sender_addr).await);
+        }
+        if let Some(message) = self.stage_message(message_bytes, sender_addr) {
+            self.send_outbound_message(message).await;
+        };
         Some(())
     }
 
-    fn on_finished(&self) { unimplemented!() }
-
     // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
-    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) {
+    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) -> Option<Messagea> {
         // let (is_encrypted, sender) = (message_bytes.take_is_encrypted(), message_bytes.separate_parts().sender().socket);
         let mut suffix = message_bytes.split_off(message_bytes.len() - aead::NONCE_LEN - 16);
         let nonce = suffix.split_off(suffix.len() - aead::NONCE_LEN);
         let peer_id = NumId(u128::from_be_bytes(suffix.try_into().unwrap()));
-        let crypto_result = self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce));
-        match crypto_result {
-            Ok(plaintext) => { message_bytes = plaintext },
-            Err(Error::NoKey) => {
-                self.message_caching.set_timer(peer_id, "Stage:MessageCaching");
-                let mut message_caching = lock!(self.message_caching.collection().map());
-                let cached_messages = message_caching.entry(peer_id).or_default();
-                cached_messages.push((sender_addr, message_bytes));
-                debug!("no key");
-                return;
-            },
-            Err(error) => { error!(?error); return; }
-        };
-        let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes));
+        self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)).unwrap();
+        let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
         if inbound_message.separate_parts().sender().socket != sender_addr {
             warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
-            return;
+            return None;
         }
         if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
             // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
@@ -105,8 +110,7 @@ impl MessageStaging {
         }
         let (index, num_chunks) = inbound_message.separate_parts().position();
         if num_chunks == 1 {
-            // gateway::log_debug(&format!("Hash on the way back: {}", message.message_ext().hash()));
-            return;
+            return Some(self.reassemble_message(vec![inbound_message]))
         }
         let id = inbound_message.separate_parts().id();
         let staged_messages_len = {
@@ -118,33 +122,16 @@ impl MessageStaging {
         };
         if staged_messages_len == num_chunks {
             // gateway::log_debug("Collected all messages");
-            let messages = option_early_return!(self.message_staging.pop(&id));
+            let messages = option_early_return!(self.message_staging.pop(&id), None);
             let messages: Vec<InboundMessage> = messages.into_values().collect();
-            self.reassemble_message(messages);
+            return Some(self.reassemble_message(messages))
         }
+        None
     }
 
-    fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) {
+    fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> Messagea {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
-        let mut message = self.deserialize_message(&message_bytes, senders, timestamp);
-        let continue_propogating = self.continue_propagating(&message);
-        if continue_propogating {
-            
-            self.outbound_gateway.send_request2(&message, message.only_sender(), &self.key_store)
-        }
-        else {
-            let dest = option_early_return!(self.breadcrumb_service.get_dest(&message.id()));
-            if let Some(dest) = dest {
-                self.outbound_gateway.send_individual2(dest, &message, false, &self.key_store);
-            }
-            else {
-                todo!()
-            }
-        }
-    }
-
-    fn deserialize_message(&mut self, message_bytes: &[u8], mut senders: HashSet<Sender>, timestamp: String) -> Messagea {
-        let mut message = bincode::deserialize::<Messagea>(message_bytes).unwrap();
+        let mut message = bincode::deserialize::<Messagea>(&message_bytes).unwrap();
         for sender in senders {
             message.set_sender(sender);
         }
@@ -152,14 +139,101 @@ impl MessageStaging {
         message
     }
 
-    fn check_key_agreement(&self, message: Messagea) -> Option<Messagea> {
-        if self.key_store.agreement_exists(&message.dest().id) {
-            Some(message)
+    async fn process_outbound_message(&mut self, mut message: Messagea) {
+        if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name}) = message.metadata() {
+            for dest in self.session_manager.get_destinations(host_name) {
+                message = option_early_return!(self.send_checked(message, Some(Peer::from(dest)), true).await);
+            }
+        }
+        else if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::DistributionRequest(_), ..}) = message.metadata() {
+            self.send_request2(message).await;
         }
         else {
-            let public_key = self.key_store.public_key(message.dest().id);
-            self.outbound_gateway.send_agreement(message.dest(), public_key, MessageDirection::Request);
-            None
+            self.send_response(message).await;
+        }
+    }
+
+    async fn send_outbound_message(&mut self, mut message: Messagea) {
+        let new_direction = self.get_direction(&mut message);
+        match new_direction {
+            PropagationDirection::Forward => self.send_request2(message).await,
+            PropagationDirection::Reverse => self.send_response(message).await,
+            PropagationDirection::Final => self.execute_final_action(message).await,
+            PropagationDirection::Stop => {}
+        };
+    }
+
+    async fn send_request2(&mut self, mut message: Messagea) {
+        let prev_sender = message.only_sender();
+        message.set_direction(MessageDirection::Request);
+        for peer in self.outbound_gateway.peer_ops.peers() {
+            match prev_sender { Some(s) if s.id == peer.id => continue, _ => {}}
+            message = option_early_return!(self.send_checked(message, Some(peer), false).await);
+        }
+    }
+
+    async fn send_response(&mut self, mut message: Messagea) {
+        let dest = option_early_return!(self.breadcrumb_service.get_dest(&message.id()));
+        message.set_direction(MessageDirection::Response);
+        if let Some(dest) = dest {
+            self.send_checked(message, Some(Peer::from(dest)), false).await;
+        }
+        else {
+            self.execute_final_action(message).await;
+        }
+    }
+
+    async fn send_checked(&mut self, mut message: Messagea, dest: Option<Peer>, to_be_chunked: bool) -> Option<Messagea> {
+        if let Some(dest) = dest {
+            message.replace_dest(dest);
+        }
+        let mut message = self.check_key_agreement(message).await?;
+        message.clear_senders();
+        self.outbound_gateway.send(&message, to_be_chunked, &mut self.key_store).await;
+        Some(message)
+    }
+
+    async fn check_key_agreement(&mut self, message: Messagea) -> Option<Messagea> {
+        if self.key_store.agreement_exists(&message.dest().id) {
+            return Some(message);
+        }
+        self.cached_outbound_messages.set_timer(message.dest().id, "Stage:MessageCaching");
+        let dest = message.dest();
+        {
+            let mut message_caching = lock!(self.cached_outbound_messages.collection().map());
+            let cached_messages = message_caching.entry(message.dest().id).or_default();
+            cached_messages.push(message);
+        }
+        self.send_agreement(dest).await;
+        None
+    }
+
+    async fn send_agreement(&mut self, dest: Peer) {
+        let public_key = self.key_store.public_key(dest.id);
+        self.outbound_gateway.send_agreement(dest, public_key, MessageDirection::Request).await;
+    }
+
+    async fn send_http_request(&mut self, from_http_handler: (Messagea, mpsc::UnboundedSender<HttpSignal>)) {
+        let (mut message, tx) = from_http_handler;
+        let (id, host_name) = (message.id(), message.metadata().host_name());
+        if !self.session_manager.session_manager().session_active(host_name) {
+            let search_message = Messagea::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name.clone()));
+            self.send_outbound_message(search_message).await;
+            return tx.send(HttpSignal::Wait(message)).unwrap();
+        }
+        self.to_http_handlers.set_timer(id, "Staging:ToHttpHandlers");
+        lock!(self.to_http_handlers.collection().map()).insert(id, tx);
+        for dest in self.session_manager.get_destinations(host_name) {
+            message = option_early_return!(self.send_checked(message, Some(Peer::from(dest)), true).await);
+        }
+        self.session_manager.session_manager_mut().push_resource(message);
+    }
+
+    async fn send_distribution_request(&mut self, metadata: DistributeMetadata) {
+        if !self.session_manager_distribution.session_manager().session_active(&metadata.host_name) {
+            let mut dests = self.outbound_gateway.peer_ops.peers();
+            self.session_manager_distribution.new_active_session(metadata.host_name, self.outbound_channel_tx.clone(), metadata.hop_count);
+            // for dest in 
         }
     }
 
@@ -219,52 +293,80 @@ impl MessageStaging {
     //     }
     // }
 
-    fn continue_propagating(&self, message: &Messagea) -> bool {
+    fn get_direction(&mut self, message: &mut Messagea) -> PropagationDirection {
         if let MessageDirection::Response = message.direction() {
-            return false;
-        }        
-        let (origin, early_return_context) = match message.metadata() {
-            MetadataKind::Search(metadata) => {
-                if self.search_request_processor.continue_propagating(message.dest(), &metadata.host_name, metadata) { (None, None) } else { (Some(metadata.origin), None) }
-            },
-            MetadataKind::Discover(mut metadata) => {
-                if self.discover_peer_processor.continue_propagating(&mut metadata) { (None, Some((self.early_return_trigger_tx.clone(), message.clone()))) } else { (Some(metadata.origin), None) }
-            }
-            MetadataKind::Stream(_) => (None, None),
-            _ => todo!()
-        };
-        if !self.breadcrumb_service.try_add_breadcrumb(message.id(), early_return_context, message.only_sender()) {
-            return false;
+            return PropagationDirection::Reverse;
         }
-        if let Some(origin) = origin {
-            self.traverse_nat(origin);
-            return false;
-        }
-        true
-    }
-
-    fn execute_final_action(&self, mut message: Messagea) {
-        match message.into_metadata() {
+        let dest = message.dest();
+        let (origin, early_return_context) = match message.metadata_mut() {
             MetadataKind::Search(metadata) => {
-                let SearchMetadata { origin, public_key, kind, host_name } = metadata;
-                self.key_store.agree(message.id(), public_key);
-                let sender = if let Some(sender) = message.only_sender() { Peer::from(sender) } else { self.outbound_gateway.myself };
-                self.search_request_processor.execute_final_action(message.id(), sender, origin.unwrap(), host_name);
+                if self.search_request_processor.continue_propagating(dest, metadata) { (None, None) } else { (Some(metadata.origin), None) }
             },
             MetadataKind::Discover(metadata) => {
-                let peer_len_curr_max = self.discover_peer_processor.peer_len_curr_max(&message.id());
-                if peer_len_curr_max == 0 {
-                    self.discover_peer_processor.set_staging_early_return(self.early_return_trigger_tx.clone(), message.id());
-                }
-                self.discover_peer_processor.stage_message1(message.id(), metadata, peer_len_curr_max);
-            }
-            _ => {}
+                metadata.peer_list.push(self.outbound_gateway.myself);                
+                if self.discover_peer_processor.continue_propagating(metadata) { (None, Some(EarlyReturnContext(self.outbound_channel_tx.clone(), message.clone()))) } else { (Some(metadata.origin), None) }
+            },
+            _ => return PropagationDirection::Final
+        };
+        if !self.breadcrumb_service.try_add_breadcrumb(message.id(), early_return_context, message.only_sender()) {
+            return PropagationDirection::Stop;
         }
+        if let Some(origin) = origin {
+            self.send_nat_heartbeats(origin);
+            return PropagationDirection::Reverse;
+        }
+        PropagationDirection::Forward
     }
 
-    fn traverse_nat(&mut self, peer: Option<Peer>) {
-        let Some(peer) = peer else { return };
-        self.send_nat_heartbeats(peer);
+    async fn execute_final_action(&mut self, message: Messagea) {
+        let (sender, id) = (message.only_sender(), message.id());
+        let sender = if let Some(sender) = sender { sender } else { Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself.id) };
+        if let MetadataKind::Discover(DiscoverMetadata {kind: DpMessageKind::IveGotSome, .. }) = message.metadata() {
+            self.send_checked(message, None, false).await;
+            return;
+        }
+        match message.into_metadata() {
+            MetadataKind::Search(metadata) => {
+                let SearchMetadata { origin, host_name } = metadata;
+                let sender = self.search_request_processor.execute_final_action(sender, origin);
+                if !self.session_manager.session_manager().session_active(&host_name) {
+                    self.session_manager.new_active_session(host_name, sender, self.outbound_channel_tx.clone());
+                }
+                else if !self.session_manager.add_destination(&host_name, sender) {
+                    return;
+                }
+                lock!(self.to_http_handlers.collection().map()).get_mut(&id).unwrap().send(HttpSignal::Go).unwrap();
+            },
+            MetadataKind::Discover(metadata) => {
+                let peer_len_curr_max = self.discover_peer_processor.peer_len_curr_max(&id);
+                if peer_len_curr_max == 0 {
+                    self.discover_peer_processor.set_staging_early_return(self.outbound_channel_tx.clone(), id);
+                }
+                self.discover_peer_processor.stage_message1(id, metadata, peer_len_curr_max);
+            },
+            MetadataKind::Stream(metadata) => {
+                let response = match metadata.payload {
+                    StreamPayloadKind::Request(payload) => {
+                        if !self.session_manager.session_active_host(&metadata.host_name) {
+                            self.session_manager.new_active_session_host(metadata.host_name.clone(), sender)
+                        }
+                        else {
+                            self.session_manager.add_destination_host(&metadata.host_name, sender);
+                        }
+                        self.session_manager.http_response_action(payload, metadata.host_name, id).await
+                    },
+                    StreamPayloadKind::Response(payload) => {
+                        self.session_manager.session_manager_mut().finalize_resource(&metadata.host_name, &id);
+                        return lock!(self.to_http_handlers.collection().map()).get(&id).unwrap().send(HttpSignal::Ok(payload)).unwrap();
+                    },
+                    StreamPayloadKind::DistributionRequest(payload) => self.session_manager_distribution.distribution_response_action(payload, metadata.host_name, id).await,
+                    StreamPayloadKind::DistributionResponse(_) => todo!()
+                };
+                self.send_checked(response, Some(Peer::from(sender)), true).await;
+            },
+            MetadataKind::Distribute(metadata) => self.send_distribution_request(metadata).await,
+            _ => {}
+        }
     }
 
     fn send_nat_heartbeats(&mut self, peer: Peer) {
@@ -277,26 +379,48 @@ impl MessageStaging {
         self.unconfirmed_peers.set_timer(peer.id, "Stage:UnconfirmedPeers");
         lock!(self.unconfirmed_peers.collection().map()).insert(peer.id, peer.endpoint_pair);
         let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
-        let (outbound_channel, my_node_id) = (self.early_return_trigger_tx.clone(), self.outbound_gateway.myself.id);
+        let outbound_channel = self.outbound_channel_tx.clone();
         tokio::spawn(async move {
             while unconfirmed_peers.contains_key(&peer.id) {
-                result_early_return!(outbound_channel.send(Messagea::new_heartbeat(my_node_id)));
+                result_early_return!(outbound_channel.send(Messagea::new_heartbeat()));
                 sleep(HEARTBEAT_INTERVAL_SECONDS).await;
             }
         });
     }
 
-    #[instrument(level = "trace", skip_all, fields(message.sender = ?message.senders()[0], message.host_name = message.host_name()))]
-    fn handle_key_agreement(&mut self, mut message: StreamMessage) {
-        let sender = message.only_sender().unwrap();
-        let (id, peer_public_key) = message.into_hash_payload();
-        result_early_return!(self.key_store.agree(sender.id, peer_public_key));
-        let cached_messages = self.message_caching.pop(&id);
+    #[instrument(level = "trace", skip_all, fields(message.peer_id))]
+    async fn handle_key_agreement(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) {
+        let KeyAgreementMessage { public_key, peer_id, direction } = message;
+        let cached_messages = match direction {
+            MessageDirection::Request => {
+                let my_public_key = self.key_store.public_key(peer_id);
+                return self.outbound_gateway.send_agreement(Peer::from(Sender::new(sender, peer_id)), my_public_key, direction).await;
+            },
+            MessageDirection::Response => self.cached_outbound_messages.pop(&peer_id)
+        };
+        result_early_return!(self.key_store.agree(peer_id, public_key));
         if let Some(cached_messages) = cached_messages {
-            debug!("Staging cached messages");
-            for (sender_addr, message) in cached_messages {
-                self.stage_message(message, sender_addr);
+            debug!("Sending cached outbound messages");
+            for message in cached_messages {
+                let (to_be_chunked, is_http_request) = message.to_be_chunked();
+                let message = option_early_return!(self.send_checked(message, None, to_be_chunked).await);
+                if is_http_request {
+                    self.session_manager.session_manager_mut().push_resource(message);
+                }
             }
         }
     }
+}
+
+pub enum HttpSignal {
+    Wait(Messagea),
+    Go,
+    Ok(SerdeHttpResponse)
+}
+
+pub enum PropagationDirection {
+    Forward,
+    Reverse,
+    Stop,
+    Final
 }

@@ -30,6 +30,7 @@ impl KeyStore {
 
     pub fn public_key(&mut self, peer_id: NumId) -> Vec<u8> {
         if self.symmetric_keys.contains_key(&peer_id) {
+            todo!("Change to return none");
             return Vec::with_capacity(0);
         }
         let is_new_key = self.private_keys.set_timer(peer_id, "Crypto:PrivateKeys");
@@ -46,6 +47,7 @@ impl KeyStore {
     }
 
     pub fn transform<'a>(&'a mut self, peer_id: NumId, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
+        self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeysRenew");
         let mut symmetric_keys = lock!(self.symmetric_keys.collection().map());
         let (aad, key_set) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_id).ok_or(Error::NoKey)?);
         match mode {
@@ -83,10 +85,6 @@ impl KeyStore {
         let key_set = KeySet { opening_key, sealing_key, nonce_rx };
         lock!(self.symmetric_keys.collection().map()).insert(peer_id, key_set);
         Ok(())
-    }
-
-    pub fn reset_expiration(&mut self, peer_id: NumId) {
-        self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeysRenew");
     }
 
     pub fn agreement_exists(&self, peer_id: &NumId) -> bool {

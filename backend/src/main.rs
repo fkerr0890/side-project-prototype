@@ -5,6 +5,7 @@ use std::{env, panic, process};
 
 #[tokio::main]
 async fn main() {
+    return;
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         // invoke the default handler and exit the process

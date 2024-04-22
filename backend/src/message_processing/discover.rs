@@ -83,7 +83,7 @@ impl DiscoverPeerProcessor {
 
     pub fn set_staging_early_return(&mut self, outbound: mpsc::UnboundedSender<Messagea>, id: NumId) {
         let mut message_staging_clone = self.message_staging.collection().clone();
-        self.message_staging.set_timer_with_send_action(id, move || { Self::send_final_response_static(&mut message_staging_clone, id, outbound); }, "Discover:MessageStaging");
+        self.message_staging.set_timer_with_send_action(id, move || { Self::send_final_response_static(&mut message_staging_clone, id, &outbound); }, "Discover:MessageStaging");
     }
 
     #[instrument(level = "trace", skip_all, fields(hop_count = ?metadata.hop_count))]
@@ -91,7 +91,7 @@ impl DiscoverPeerProcessor {
         let target_num_peers = metadata.hop_count.1;
         let peers_len = metadata.peer_list.len();
         if peers_len == target_num_peers as usize {
-            return Some(Messagea::new(metadata.origin.unwrap(), id, None, MetadataKind::Discover(metadata), MessageDirection::Response));
+            return Some(Messagea::new(metadata.origin, id, None, MetadataKind::Discover(metadata), MessageDirection::Response));
         }
         if peers_len > peer_len_curr_max {
             lock!(self.message_staging.collection().map()).insert(id, metadata);
@@ -141,10 +141,10 @@ impl DiscoverPeerProcessor {
     }
 
     #[instrument(level = "trace", skip(message_staging))]
-    fn send_final_response_static(message_staging: &mut ArcMap<NumId, DiscoverMetadata>, id: NumId, outbound: mpsc::UnboundedSender<Messagea>) {
+    fn send_final_response_static(message_staging: &mut ArcMap<NumId, DiscoverMetadata>, id: NumId, outbound: &mpsc::UnboundedSender<Messagea>) {
         if let Some(mut staged_metadata) = message_staging.pop(&id) {
             staged_metadata.kind = DpMessageKind::IveGotSome;
-            result_early_return!(outbound.send(Messagea::new(staged_metadata.origin.unwrap(), id, None, MetadataKind::Discover(staged_metadata), MessageDirection::Response)));
+            result_early_return!(outbound.send(Messagea::new(staged_metadata.origin, id, None, MetadataKind::Discover(staged_metadata), MessageDirection::Response)));
         }
     }
 

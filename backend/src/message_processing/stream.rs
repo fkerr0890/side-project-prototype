@@ -1,316 +1,173 @@
-use std::{collections::HashMap, net::{Ipv4Addr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
-use tokio::{fs, net::UdpSocket, sync::mpsc::{self, UnboundedSender}, time::sleep};
-use tracing::{debug, instrument, trace, warn};
-use crate::{crypto::KeyStore, http::{self, SerdeHttpResponse}, lock, message::{Heartbeat, KeyAgreementMessage, Message, NumId, Peer, Sender, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcDeque, ArcMap, TransientCollection}};
-use super::{EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS};
+use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV4}, time::Duration};
 
-pub struct StreamMessageProcessor
-{
+use serde::{Serialize, Deserialize};
+use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
+use tracing::{debug, warn};
+
+use crate::{http::{self, SerdeHttpRequest}, lock, message::{MessageDirection, Messagea, MetadataKind, NumId, Peer, Sender, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
+
+use super::SRP_TTL_SECONDS;
+
+pub struct SessionManagerRetrieval {
     session_manager: SessionManager,
-    sm_from: mpsc::UnboundedReceiver<StreamMessage>,
-    from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<StreamResponseType>>,
-    local_hosts: HashMap<String, SocketAddrV4>,
-    dmessage_staging: DMessageStaging
+    active_sessions_host: HashMap<String, HashSet<Sender>>
 }
-impl StreamMessageProcessor
-{
-    pub fn new(outbound_gateway: OutboundGateway, sm_from: mpsc::UnboundedReceiver<StreamMessage>, local_hosts: HashMap<String, SocketAddrV4>, from_http_handler: mpsc::UnboundedReceiver<mpsc::UnboundedSender<StreamResponseType>>) -> Self {
-        Self
-        {
-            session_manager: SessionManager::new(outbound_gateway),
-            sm_from,
-            from_http_handler,
-            local_hosts,
-            dmessage_staging: DMessageStaging::new()
-        }
+
+impl SessionManagerRetrieval {
+    pub fn new(local_hosts: HashMap<String, SocketAddrV4>) -> Self {
+        Self { session_manager: SessionManager::new(local_hosts), active_sessions_host: HashMap::new() }
     }
 
-    pub async fn receive(&mut self) -> EmptyOption {
-        let message = self.sm_from.recv().await?;
-        match message {
-            StreamMessage { kind: StreamMessageKind::KeyAgreement, ..} => self.handle_key_agreement(message),
-            StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::Request) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request), .. } => self.handle_request(message).await,
-            StreamMessage { kind: StreamMessageKind::Resource(StreamMessageInnerKind::Response) | StreamMessageKind::Distribution(StreamMessageInnerKind::Response), ..} => self.session_manager.return_resource(message)
-        }
-        Some(())
+    pub fn new_active_session(&mut self, host_name: String, initial_dest: Sender, outbound_channel: mpsc::UnboundedSender<Messagea>) {
+        self.session_manager.new_active_session(host_name, Some(initial_dest), outbound_channel);
     }
 
-    #[instrument(level = "trace", skip_all, fields(message.senders = ?message.senders(), message.host_name = message.host_name()))]
-    fn handle_key_agreement(&mut self, message: StreamMessage) {
-        self.session_manager.initial_request(message)
+    pub fn session_active_host(&self, host_name: &str) -> bool { self.active_sessions_host.contains_key(host_name) }
+
+    pub fn new_active_session_host(&mut self, host_name: String, initial_dest: Sender) {
+        self.active_sessions_host.insert(host_name, HashSet::from([initial_dest]));
     }
 
-    #[instrument(level = "trace", skip_all, fields(message.senders = ?message.senders(), message.id = %message.id()))]
-    async fn handle_request(&mut self, mut message: StreamMessage) {
-        let host_name = message.host_name().to_owned();
-        let sender = message.only_sender();
-        if let Some(sender) = sender {
-            self.session_manager.session_logic(IsHost::True(sender), host_name).await;
-            let (id, payload, host_name, kind) = message.into_hash_payload_host_name_kind();
-            self.send_response(payload, sender, host_name, id, kind).await;
-        }
-        else {
-            let Ok(to_http_handler) = self.from_http_handler.try_recv() else { panic!("Oh fuck nah") };
-            self.session_manager.session_logic(IsHost::False((to_http_handler, message)), host_name).await;
-        }
+    pub fn get_destinations(&self, host_name: &str) -> HashSet<Sender> { self.session_manager.active_sessions_client.get(host_name).unwrap().active_dests.clone() }
+
+    pub fn add_destination(&mut self, host_name: &str, dest: Sender) -> bool {
+        self.session_manager.active_sessions_client.get_mut(host_name).unwrap().active_dests.insert(dest)
     }
 
-    #[instrument(level = "trace", skip(self, payload))]
-    async fn send_response(&mut self, payload: Vec<u8>, dest: Sender, host_name: String, id: NumId, kind: StreamMessageKind) {
-        let response = match kind {
-            StreamMessageKind::Resource(_) => self.http_response_action(&payload, host_name, id).await,
-            StreamMessageKind::Distribution(_) => self.distribution_response_action(payload, host_name, id).await,
-            _ => unimplemented!()
-        };
-        if let Some(mut response) = response {
-            self.session_manager.outbound_gateway.send_individual(dest, &mut response, true);
-        }
+    pub fn add_destination_host(&mut self, host_name: &str, dest: Sender) {
+        self.active_sessions_host.get_mut(host_name).unwrap().insert(dest);
     }
 
-    async fn http_response_action(&self, payload: &[u8], host_name: String, id: NumId) -> Option<StreamMessage> {
-        let request = result_early_return!(bincode::deserialize(payload), None);
-        let socket = self.local_hosts.get(&host_name).unwrap();
+    pub async fn http_response_action(&self, request: SerdeHttpRequest, host_name: String, id: NumId) -> Messagea {
+        let socket = self.session_manager.local_hosts.get(&host_name).unwrap();
         let response = http::make_request(request, &socket.to_string()).await;
-        let response_bytes = result_early_return!(bincode::serialize(&response), None);
-        Some(StreamMessage::new(
-            host_name,
+        Messagea::new(
+            Peer::default(),
             id,
-            StreamMessageKind::Resource(StreamMessageInnerKind::Response),
-            response_bytes))
+            None,
+            MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::Response(response), host_name)),
+            MessageDirection::Response
+        )
+    }
+
+    pub fn session_manager(&self) -> &SessionManager { &self.session_manager }
+    pub fn session_manager_mut(&mut self) -> &mut SessionManager { &mut self.session_manager }
+}
+
+pub struct SessionManagerDistribution {
+    session_manager: SessionManager,
+    dmessage_staging: DMessageStaging,
+    curr_hop_count: u16
+}
+
+impl SessionManagerDistribution {
+    pub fn new(local_hosts: HashMap<String, SocketAddrV4>) -> Self {
+        Self { session_manager: SessionManager::new(local_hosts), dmessage_staging: DMessageStaging::new(), curr_hop_count: 0 }
+    }
+
+    pub fn new_active_session(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Messagea>, hop_count: u16) {
+        self.curr_hop_count = hop_count;
+        self.session_manager.new_active_session(host_name, None, outbound_channel);
     }
     
-    async fn distribution_response_action(&mut self, payload: Vec<u8>, host_name: String, id: NumId) -> Option<StreamMessage> {
-        let result = self.dmessage_staging.stage_message(payload, host_name.clone()).await;
-        if !result.is_empty() && result[0] == 1 {
-            self.local_hosts.insert(host_name.clone(), SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3000));
+    pub async fn distribution_response_action(&mut self, payload: Vec<u8>, host_name: String, id: NumId) -> Messagea {
+        let result = if self.session_manager.local_hosts.contains_key(&host_name) { DistributionResponse::NotModified } else { self.dmessage_staging.stage_message(payload, host_name.clone()).await };
+        if let DistributionResponse::InstallOk = result {
+            self.session_manager.local_hosts.insert(host_name.clone(), SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3000));
         }
-        Some(StreamMessage::new(host_name, id, StreamMessageKind::Distribution(StreamMessageInnerKind::Response), result))
+        Messagea::new(
+            Peer::default(),
+            id,
+            None,
+            MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionResponse(result), host_name)),
+            MessageDirection::Response
+        )
     }
+
+    pub fn session_manager(&self) -> &SessionManager { &self.session_manager }
+    pub fn session_manager_mut(&mut self) -> &mut SessionManager { &mut self.session_manager }
 }
 
-enum IsHost {
-    True(Sender),
-    False((mpsc::UnboundedSender<StreamResponseType>, StreamMessage))
-}
-
-struct SessionManager {
-    active_sessions_client: TransientCollection<ArcMap<String, ActiveSessionInfo>>,
-    active_sessions_host: TransientCollection<ArcMap<String, ActiveDests>>,
-    outbound_gateway: OutboundGateway
+pub struct SessionManager {
+    active_sessions_client: HashMap<String, ActiveSessionInfo>,
+    local_hosts: HashMap<String, SocketAddrV4>
 }
 
 impl SessionManager {
-    fn new(outbound_gateway: OutboundGateway) -> Self {
+    pub fn new(local_hosts: HashMap<String, SocketAddrV4>) -> Self {
         Self {
-            active_sessions_client: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()),
-            active_sessions_host: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()),
-            outbound_gateway
+            active_sessions_client: HashMap::new(),
+            local_hosts
         }
     }
 
-    async fn session_logic(&mut self, is_host: IsHost, host_name: String) {
-        match is_host {
-            IsHost::True(dest) => self.renew_dests_host(host_name, dest),
-            IsHost::False((to_http_handler, message)) => self.renew_dests_client(host_name, message, to_http_handler)
-        };
+    pub fn session_active(&self, host_name: &str) -> bool { self.active_sessions_client.contains_key(host_name) }
+
+    pub fn new_active_session(&mut self, host_name: String, initial_dest: Option<Sender>, outbound_channel: mpsc::UnboundedSender<Messagea>) {
+        self.active_sessions_client.insert(host_name, ActiveSessionInfo::new(outbound_channel, 5, initial_dest));
     }
 
-    fn renew_dests_host(&mut self, host_name: String, dest: Sender) {
-        let new_entry = self.active_sessions_host.set_timer(host_name.clone(), "Stream:ActiveSessionsHostRenew");
-        let mut active_sessions_host = lock!(self.active_sessions_host.collection().map());
-        let active_dests = active_sessions_host.entry(host_name).or_default();
-        self.keep_peer_conns_alive(active_dests.dests.collection().clone(), new_entry);
-        active_dests.dests.set_timer(dest, "Stream:ActiveDestsHostRenew");
-        lock!(active_dests.dests.collection().map()).insert(dest, None);
+    pub fn push_resource(&mut self, message: Messagea) {
+        self.active_sessions_client.get_mut(message.metadata().host_name()).unwrap().push_resource(message);
     }
 
-    fn renew_dests_client(&mut self, host_name: String, mut message: StreamMessage, to_http_handler: UnboundedSender<StreamResponseType>) {
-        let new_entry = self.active_sessions_client.set_timer(host_name.clone(), "Stream:ActiveSessionsClientRenew");
-        let mut active_sessions_client = lock!(self.active_sessions_client.collection().map());
-        let active_session_info = active_sessions_client.entry(host_name.clone()).or_default();
-        self.keep_peer_conns_alive(active_session_info.active_dests.dests.collection().clone(), new_entry);
-        let dests = active_session_info.active_dests.dests_cloned();
-        let set_cached_message_timer = !dests.is_empty();
-        for dest in dests {
-            self.outbound_gateway.send_individual(dest, &mut message, true);
-            active_session_info.active_dests.dests.set_timer(dest, "Stream:ActiveDestsClientRenew");
-        }
-        let id = message.id();
-        trace!(%id, "Pushed");
-        active_session_info.push_resource(message, if set_cached_message_timer { Some((self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself)) } else { None }, to_http_handler);
-    }
-    
-    #[instrument(level = "trace", skip_all)]
-    fn keep_peer_conns_alive(&self, dests: ArcMap<Sender, Option<KeyAgreementMessage>>, begin: bool) {
-        if !begin {
-            return;
-        }
-        let (socket, myself, peer_ops, key_store) = (self.outbound_gateway.socket.clone(), self.outbound_gateway.myself, self.outbound_gateway.peer_ops.clone(), self.outbound_gateway.key_store.clone());
-        tokio::spawn(async move {
-            loop {
-                {
-                    let dests = lock!(dests.map());
-                    let mut dests_filtered = dests.iter().filter(|(peer, _)|peer.id != myself.id && !lock!(peer_ops).has_peer(peer.id));
-                    if (&mut dests_filtered).peekable().peek().is_none() { return };
-                    for (peer, _) in dests_filtered {
-                        OutboundGateway::send_static(&socket, *peer, myself, &mut Heartbeat::new(), key_store.clone(), true);
-                    }
-                }
-                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
-            }
-        });
-    }
-
-    fn initial_request(&self, key_agreement: StreamMessage) {
-        let mut active_sessions = lock!(self.active_sessions_client.collection().map());
-        let active_session = active_sessions.get_mut(key_agreement.host_name()).unwrap();
-        active_session.initial_request(key_agreement, |message, cached_message, dest| {
-            if let Some(key_agreement) = message {
-                self.outbound_gateway.send_agreement(dest, key_agreement);
-            }
-            self.outbound_gateway.send_individual(dest, cached_message, true);
-        }, (self.outbound_gateway.socket.clone(), self.outbound_gateway.key_store.clone(), self.outbound_gateway.myself));
-    }
-
-    #[instrument(level = "trace", skip_all, fields(message.senders = ?message.senders(), message.id = %message.id()))]
-    fn return_resource(&self, message: StreamMessage) {
-        let mut active_sessions = lock!(self.active_sessions_client.collection().map());
-        let active_session = option_early_return!(active_sessions.get_mut(message.host_name()));
-        active_session.pop_resource(message);
+    pub fn finalize_resource(&mut self, host_name: &str, id: &NumId) {
+        self.active_sessions_client.get_mut(host_name).unwrap().finalize_resource(id);
     }
 }
-
-struct ActiveDests {
-    dests: TransientCollection<ArcMap<Sender, Option<KeyAgreementMessage>>>
-}
-
-impl ActiveDests {
-    fn new() -> Self {
-        Self { dests: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()) }
-    }
-
-    fn dests_cloned(&self) -> Vec<Sender> { lock!(self.dests.collection().map()).keys().copied().collect() }
-}
-
-impl Default for ActiveDests {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-type FollowUpComponents = (Arc<UdpSocket>, Arc<Mutex<KeyStore>>, Peer);
-type CachedMessages = TransientCollection<ArcMap<NumId, (StreamMessage, Option<mpsc::UnboundedSender<StreamResponseType>>)>>;
 
 struct ActiveSessionInfo {
-    active_dests: ActiveDests,
-    cached_messages: CachedMessages,
-    resource_queue: TransientCollection<ArcDeque<NumId>>
+    active_dests: HashSet<Sender>,
+    resource_queue: VecDeque<NumId>,
+    abort_handlers: HashMap<NumId, AbortHandle>,
+    outbound_channel: mpsc::UnboundedSender<Messagea>,
+    cached_size_max: usize
 }
 
 impl ActiveSessionInfo {
-    fn new() -> Self {
+    fn new(outbound_channel: mpsc::UnboundedSender<Messagea>, cached_size_max: usize, initial_dest: Option<Sender>) -> Self {
+        assert!(cached_size_max >= 1);
         Self {
-            active_dests: ActiveDests::new(),
-            cached_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
-            resource_queue: TransientCollection::new(SRP_TTL_SECONDS, false, ArcDeque::new())
+            active_dests: if let Some(initial_dest) = initial_dest { HashSet::from([initial_dest]) } else { HashSet::with_capacity(0) },
+            resource_queue: VecDeque::new(),
+            abort_handlers: HashMap::new(),
+            outbound_channel,
+            cached_size_max
         }
     }
 
-    fn handle_cached_message(id: NumId, cached_message: Option<&mut (StreamMessage, Option<mpsc::UnboundedSender<StreamResponseType>>)>) -> Option<&mut StreamMessage> {
-        let Some(cached_message) = cached_message else {
-            debug!(%id, "Prevented request from client, reason: request expired for resource"); return None;
-        };
-        if let StreamMessageKind::KeyAgreement | StreamMessageKind::Resource(StreamMessageInnerKind::Request) | StreamMessageKind::Distribution(StreamMessageInnerKind::Request) = cached_message.0.kind {
-            return Some(&mut cached_message.0);
-        }
-        debug!(%id, "Prevented request from client, reason: already received resource"); None
-    }
-
-    fn initial_request(&mut self, mut key_agreement: StreamMessage, action: impl Fn(&Option<KeyAgreementMessage>, &mut StreamMessage, Sender), follow_up_components: FollowUpComponents) {
-        let dest = key_agreement.only_sender().unwrap();
-        if !self.active_dests.dests.set_timer(dest, "Stream:ActiveSessionInfo:ActiveDests") {
-            return;
-        }
-        let id = key_agreement.id();
-        self.resource_queue.set_timer_with_override(id, "Stream:ActiveSessionInfo:ResourceQueue");
-        self.cached_messages.set_timer_with_override(id, "Stream:ActiveSessionInfo:CachedMessages");
-        let mut cached_messages = lock!(self.cached_messages.collection().map());
-        let cached_message = option_early_return!(Self::handle_cached_message(id, cached_messages.get_mut(&id)));
-        let public_key = key_agreement.into_hash_payload().1;
-        let key_agreement_message = if public_key.is_empty() { None } else { Some(KeyAgreementMessage { public_key, peer_id: dest.id }) };
-        action(&key_agreement_message, cached_message, dest);
-        lock!(self.active_dests.dests.collection().map()).insert(dest, key_agreement_message);
-        self.start_follow_ups(id, follow_up_components);
-    }
-
-    #[instrument(level = "trace", skip_all, fields(id))]
-    fn start_follow_ups(&self, id: NumId, follow_up_components: FollowUpComponents) {
-        let (dests, cached_messages) = (self.active_dests.dests.collection().clone(), self.cached_messages.collection().map().clone());
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_secs(2)).await;
-                let mut cached_messages = lock!(cached_messages);
-                let cached_message = match Self::handle_cached_message(id, cached_messages.get_mut(&id)) { Some(cached_message) => cached_message, None => { return } };
-                let (ref socket, ref key_store, myself) = follow_up_components;
-                for (dest, key_agreement) in lock!(dests.map()).iter() {
-                    debug!(%id, ?dest, "Sending follow up");
-                    if let Some(key_agreement) = key_agreement {
-                        OutboundGateway::send_key_agreement_message(socket.clone(), dest.socket, key_agreement);
-                    }
-                    OutboundGateway::send_static(socket, *dest, myself, cached_message, key_store.clone(), true);
-                }
-            }
-        });
-    }
-
-    fn push_resource(&mut self, message: StreamMessage, set_timer: Option<FollowUpComponents>, to_http_handler: mpsc::UnboundedSender<StreamResponseType>) {
-        if let Some(follow_up_components) = set_timer {
-            self.cached_messages.set_timer(message.id(), "Stream:ActiveSessionInfo:CachedMessages");
-            self.start_follow_ups(message.id(), follow_up_components);
-        }
-        let mut cached_messages = lock!(self.cached_messages.collection().map());
-        if cached_messages.contains_key(&message.id()) {
+    fn push_resource(&mut self, message: Messagea) {
+        let id = message.id();
+        if self.abort_handlers.contains_key(&id) {
             warn!(id = %message.id(), "ActiveSessionInfo: Attempted to insert duplicate request");
             return;
         }
-        self.resource_queue.collection_mut().push(message.id());
-        cached_messages.insert(message.id(), (message, Some(to_http_handler)));
-    }
-
-    fn pop_resource(&mut self, message: StreamMessage) {
-        let mut cached_messages = lock!(self.cached_messages.collection().map());
-        let Some((cached_message, _)) = cached_messages.get_mut(&message.id()) else {
-            return debug!(senders = ?message.senders(), id = %message.id(), "Blocked response from host, reason: unsolicited response for resource")
-        };
-        *cached_message = message;
-        while let Some(id) = self.resource_queue.collection().front() {
-            let kind = &cached_messages.get(&id).unwrap().0.kind;
-            if let StreamMessageKind::Resource(StreamMessageInnerKind::Response) = kind {
-                let (cached_message, tx) = cached_messages.remove(&self.resource_queue.pop(&id).unwrap()).unwrap();
-                cached_messages.remove(&NumId(id.0 + 1));
-                trace!(id = %cached_message.id(), "Popped");
-                let response = bincode::deserialize(cached_message.payload()).unwrap_or_else(|e| http::construct_error_response((*e).to_string(), String::from("HTTP/1.1")));
-                result_early_return!(tx.unwrap().send(StreamResponseType::Http(response)));
-            }
-            else if let StreamMessageKind::Distribution(StreamMessageInnerKind::Response) = kind {
-                let (cached_message, tx) = cached_messages.remove(&self.resource_queue.pop(&id).unwrap()).unwrap();
-                let (id, payload) = cached_message.into_hash_payload();
-                let message = if payload.len() == 1 { StreamResponseType::Distribution(NumId(payload[0] as u128)) } else { StreamResponseType::Distribution(id) };
-                result_early_return!(tx.unwrap().send(message));
-            }
-            else {
-                break;
-            }
+        if self.resource_queue.len() == self.cached_size_max {
+            self.abort_handlers.remove(&self.resource_queue.pop_front().unwrap()).unwrap().abort();
         }
+        self.resource_queue.push_back(id);
+        let abort_handle = self.start_follow_ups(message);
+        self.abort_handlers.insert(id, abort_handle);
+    }
+
+    fn start_follow_ups(&self, message: Messagea) -> AbortHandle {
+        let outbound_channel = self.outbound_channel.clone();
+        tokio::spawn(async move {
+            let num_retries = SRP_TTL_SECONDS.as_secs() / 2;
+            for _ in 0..num_retries {
+                sleep(Duration::from_secs(2)).await;
+                result_early_return!(outbound_channel.send(message.clone()));
+            }
+        }).abort_handle()
+    }
+
+    fn finalize_resource(&mut self, id: &NumId) {
+        let  abort_handler = option_early_return!(self.abort_handlers.remove(id));
+        abort_handler.abort();
+        let index = self.resource_queue.iter().enumerate().filter(|(_, curr_id) | *curr_id == id).last().unwrap().0;
+        debug!(id = %self.resource_queue.remove(index).unwrap(), "Popped from queue");
     }
 }
-
-impl Default for ActiveSessionInfo {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 struct DMessageStaging {
     message_staging: TransientCollection<ArcMap<String, Vec<Vec<u8>>>>
 }
@@ -320,23 +177,22 @@ impl DMessageStaging {
         Self { message_staging: TransientCollection::new(Duration::from_secs(1800), false, ArcMap::new()) }
     }
 
-    async fn stage_message(&mut self, payload: Vec<u8>, host_name: String) -> Vec<u8> {
+    async fn stage_message(&mut self, payload: Vec<u8>, host_name: String) -> DistributionResponse {
         if !payload.is_empty() {
             lock!(self.message_staging.collection().map()).entry(host_name).or_default().push(payload);
-            Vec::with_capacity(0)
+            DistributionResponse::Continue
         }
         else {
-            let Some(contents) = self.message_staging.pop(&host_name) else { return vec![0u8] };
-            if fs::write("C:/Users/fredk/Downloads/p2p-dump.tar.gz", &contents.concat()).await.is_ok() { vec![1u8] } else { vec![0u8] }
+            let Some(contents) = self.message_staging.pop(&host_name) else { return DistributionResponse::InstallError };
+            if fs::write("C:/Users/fredk/Downloads/p2p-dump.tar.gz", &contents.concat()).await.is_ok() { DistributionResponse::InstallOk } else { DistributionResponse::InstallError }
         }
     }
 }
 
-pub enum StreamResponseType {
-    Http(SerdeHttpResponse),
-    Distribution(NumId)
-}
-impl StreamResponseType {
-    pub fn unwrap_http(self) -> SerdeHttpResponse { if let Self::Http(response) = self { response } else { panic!() }}
-    pub fn unwrap_distribution(self) -> NumId { if let Self::Distribution(response) = self { response } else { panic!() }}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum DistributionResponse {
+    Continue,
+    NotModified,
+    InstallOk,
+    InstallError
 }

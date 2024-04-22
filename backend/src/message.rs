@@ -6,6 +6,7 @@ use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
 use crate::http::{SerdeHttpRequest, SerdeHttpResponse};
+use crate::message_processing::stream::DistributionResponse;
 use crate::message_processing::SEARCH_TIMEOUT_SECONDS;
 use crate::node::EndpointPair;
 use crate::option_early_return;
@@ -103,43 +104,56 @@ impl Messagea {
         Self { dest, senders: Vec::new(), timestamp: String::new(), id, expiry, metadata, direction }
     }
 
-    pub fn new_search_message(dest: Peer, metadata: SearchMetadata) -> Self {
+    pub fn new_search_request(id: NumId, metadata: SearchMetadata) -> Self {
         Self::new(
-            dest,
-            NumId(Uuid::new_v4().as_u128()),
+            Peer::default(),
+            id,
             Some(datetime_to_timestamp(Utc::now() + Duration::seconds(SEARCH_TIMEOUT_SECONDS.as_secs() as i64))),
             MetadataKind::Search(metadata),
             MessageDirection::Request)
     }
 
-    pub fn new_heartbeat(my_node_id: NumId) -> Self {
+    pub fn new_heartbeat() -> Self {
         Self::new(
-            Peer::new(EndpointPair::new(EndpointPair::default_socket(), EndpointPair::default_socket()), my_node_id),
+            Peer::default(),
             NumId(Uuid::new_v4().as_u128()),
             None,
-            MetadataKind::None,
+            MetadataKind::Heartbeat,
             MessageDirection::Request
         )
     }
     
     pub fn dest(&self) -> Peer { self.dest }
-    pub fn only_sender(&mut self) -> Option<Sender> { assert!(self.senders.len() <= 1); self.senders.pop() }
-    pub fn senders(&mut self) -> &Vec<Sender> { &self.senders }
+    pub fn only_sender(&self) -> Option<Sender> { assert!(self.senders.len() <= 1); self.senders.last().copied() }
+    pub fn clear_senders(&mut self) { self.senders = Vec::with_capacity(0); }
     pub fn id(&self) -> NumId { self.id }
     pub fn metadata(&self) -> &MetadataKind { &self.metadata }
+    pub fn metadata_mut(&mut self) -> &mut MetadataKind { &mut self.metadata }
     pub fn into_metadata(self) -> MetadataKind { self.metadata }
     pub fn direction(&self) -> MessageDirection { self.direction }
     pub fn replace_dest(&mut self, dest: Peer) { self.dest = dest; }
     pub fn set_sender(&mut self, sender: Sender) { self.senders.push(sender); }
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
+    pub fn set_direction(&mut self, direction: MessageDirection) { self.direction = direction}
 
     pub fn check_expiry(&self) -> bool {
         let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&option_early_return!(&self.expiry, false)).unwrap().into();
         expiry <= Utc::now()
     }
+
+    pub fn to_be_chunked(&self) -> (bool, bool) {
+        match self.metadata {
+            MetadataKind::Search(_) => (false, false),
+            MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), .. }) => (true, true),
+            MetadataKind::Stream(StreamMetadata { payload: _, .. }) => (true, false),
+            MetadataKind::Discover(_) => (false, false),
+            MetadataKind::Distribute(_) => (false, false),
+            MetadataKind::Heartbeat => (true, false)
+        }
+    }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum MessageDirection {
     Request,
     Response
@@ -151,13 +165,15 @@ pub enum MetadataKind {
     Stream(StreamMetadata),
     Discover(DiscoverMetadata),
     Distribute(DistributeMetadata),
-    None
+    Heartbeat
 }
 
 impl MetadataKind {
-    pub fn unwrap_search(&mut self) -> &mut SearchMetadata {
+    pub fn host_name(&self) -> &String {
         match self {
-            Self::Search(mut metadata) => &mut metadata,
+            Self::Search(metadata) => &metadata.host_name,
+            Self::Stream(metadata) => &metadata.host_name,
+            Self::Distribute(metadata) => &metadata.host_name,
             _ => panic!()
         }
     }
@@ -165,41 +181,38 @@ impl MetadataKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMetadata {
-    pub origin: Option<Peer>,
-    pub public_key: Vec<u8>,
-    pub kind: SearchMetadataKind,
+    pub origin: Peer,
     pub host_name: String
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum SearchMetadataKind {
-    Retrieval,
-    Distribution
+impl SearchMetadata {
+    pub fn new(origin: Peer, host_name: String) -> Self {
+        Self { origin, host_name }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamMetadata {
-    pub resource_id: NumId,
     pub payload: StreamPayloadKind,
     pub host_name: String
 }
 
 impl StreamMetadata {
-    pub fn new(resource_id: NumId, payload: StreamPayloadKind, host_name: String) -> Self {
-        Self { resource_id, payload, host_name }
+    pub fn new(payload: StreamPayloadKind, host_name: String) -> Self {
+        Self { payload, host_name }
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DiscoverMetadata {
-    pub origin: Option<Peer>,
+    pub kind: DpMessageKind,
+    pub origin: Peer,
     pub peer_list: Vec<Peer>,
     pub hop_count: (u16, u16),
-    pub kind: DpMessageKind
 }
 
 impl DiscoverMetadata {
-    pub fn new(origin: Option<Peer>, peer_list: Vec<Peer>, hop_count: (u16, u16), kind: DpMessageKind) -> Self {
+    pub fn new(origin: Peer, peer_list: Vec<Peer>, hop_count: (u16, u16), kind: DpMessageKind) -> Self {
         Self { origin, peer_list, hop_count, kind }
     }
 }
@@ -214,8 +227,8 @@ pub struct DistributeMetadata {
 pub enum StreamPayloadKind {
     Request(SerdeHttpRequest),
     Response(SerdeHttpResponse),
-    Distribution(Vec<u8>),
-    Empty
+    DistributionRequest(Vec<u8>),
+    DistributionResponse(DistributionResponse)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -249,11 +262,17 @@ impl Message for Heartbeat {
     fn set_sender(&mut self, sender: Sender) { self.sender = Some(sender); }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct KeyAgreementMessage {
     pub public_key: Vec<u8>,
     pub peer_id: NumId,
     pub direction: MessageDirection
+}
+
+impl KeyAgreementMessage {
+    pub fn new(public_key: Vec<u8>, peer_id: NumId, direction: MessageDirection) -> Self {
+        Self { public_key, peer_id, direction }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -307,6 +326,12 @@ pub struct Peer {
 impl Peer {
     pub fn new(endpoint_pair: EndpointPair, id: NumId) -> Self {
         Self { endpoint_pair, id }
+    }
+}
+
+impl Default for Peer {
+    fn default() -> Self {
+        Self::new(EndpointPair::new(EndpointPair::default_socket(), EndpointPair::default_socket()), NumId(0))
     }
 }
 

@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
-use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::stream::StreamResponseType};
+use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::stream2::StreamResponseType};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
