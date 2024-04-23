@@ -1,10 +1,18 @@
 use p2p::{message::NumId, node::Node};
 use tokio::fs;
 use uuid::Uuid;
-use std::{env, panic, process};
+use std::{collections::HashSet, env, panic, process, sync::Mutex};
 
 #[tokio::main]
 async fn main() {
+    let set = HashSet::from([1, 2, 3]);
+    println!("Before: {:?}", set);
+    let mut iter = set.iter();
+    let remaining = loop {
+        if let None = iter.next() { break HashSet::new() }
+        break iter.copied().collect::<HashSet<i32>>();
+    };
+    println!("After: {:?}", remaining);
     return;
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {

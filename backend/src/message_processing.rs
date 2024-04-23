@@ -5,7 +5,7 @@ use serde::Serialize;
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info, instrument};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, MessageDirection, Messagea, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcMap, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, MessageDirection, Messagea, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -223,8 +223,8 @@ impl BreadcrumbService {
         lock!(self.breadcrumbs.collection().map()).get(id).copied()
     }
 
-    pub fn remove_breadcrumb(&self, id: &NumId) {
-        lock!(self.breadcrumbs.collection().map()).remove(id);
+    pub fn remove_breadcrumb(&mut self, id: &NumId) {
+        self.breadcrumbs.pop(id);
     }
 }
 

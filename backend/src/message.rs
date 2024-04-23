@@ -144,7 +144,7 @@ impl Messagea {
     pub fn to_be_chunked(&self) -> (bool, bool) {
         match self.metadata {
             MetadataKind::Search(_) => (false, false),
-            MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), .. }) => (true, true),
+            MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_) | StreamPayloadKind::DistributionRequest(_), .. }) => (true, true),
             MetadataKind::Stream(StreamMetadata { payload: _, .. }) => (true, false),
             MetadataKind::Discover(_) => (false, false),
             MetadataKind::Distribute(_) => (false, false),
@@ -182,13 +182,20 @@ impl MetadataKind {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMetadata {
     pub origin: Peer,
-    pub host_name: String
+    pub host_name: String,
+    pub kind: SearchMetadataKind
 }
 
 impl SearchMetadata {
-    pub fn new(origin: Peer, host_name: String) -> Self {
-        Self { origin, host_name }
+    pub fn new(origin: Peer, host_name: String, kind: SearchMetadataKind) -> Self {
+        Self { origin, host_name, kind }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum SearchMetadataKind {
+    Retrieval,
+    Distribution
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -221,6 +228,12 @@ impl DiscoverMetadata {
 pub struct DistributeMetadata {
     pub hop_count: u16,
     pub host_name: String
+}
+
+impl DistributeMetadata {
+    pub fn new(hop_count: u16, host_name: String) -> Self {
+        Self { hop_count, host_name }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

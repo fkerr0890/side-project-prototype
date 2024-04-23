@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddrV4};
 use tokio::sync::mpsc;
 use tracing::{debug, instrument};
 
-use crate::{lock, message::{Message, MessageDirection, Messagea, MetadataKind, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, SearchMetadata, Sender, StreamMessage, StreamMessageKind, StreamMetadata, StreamPayloadKind}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcSet, TransientCollection}};
+use crate::{lock, message::{Message, MessageDirection, Messagea, MetadataKind, NumId, Peer, SearchMessage, SearchMessageInnerKind, SearchMessageKind, SearchMetadata, SearchMetadataKind, Sender, StreamMessage, StreamMessageKind, StreamMetadata, StreamPayloadKind}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcSet, TransientCollection}};
 
 use super::{BreadcrumbService, EmptyOption, OutboundGateway, ACTIVE_SESSION_TTL_SECONDS};
 
@@ -29,8 +29,11 @@ impl SearchRequestProcessor {
     }
 
     #[instrument(level = "trace", skip_all, fields(dest, host_name))]
-    pub fn continue_propagating(&self, dest: Peer, metadata: &SearchMetadata) -> bool {
-        let should_stop = self.local_hosts.contains_key(&metadata.host_name);
+    pub fn continue_propagating(&self, myself: Peer, metadata: &SearchMetadata) -> bool {
+        let should_stop = match metadata.kind {
+            SearchMetadataKind::Retrieval => self.local_hosts.contains_key(&metadata.host_name),
+            SearchMetadataKind::Distribution => myself.id != metadata.origin.id
+        };
         if !should_stop {
             return true;
         }
@@ -89,7 +92,7 @@ impl SearchRequestProcessor {
     pub async fn receive(&mut self) -> EmptyOption {
         let mut message = self.from_staging.recv().await?;
         if message.origin().is_none() {
-            if !self.active_sessions.insert(message.host_name().clone(), "Search:ActiveSession") {
+            if !self.active_sessions.insert_key(message.host_name().clone(), "Search:ActiveSession") {
                 debug!(host_name = message.host_name(), search_message = ?message, "SearchMessageProcessor: Blocked search request, reason: active session exists"); return Some(());
             }
             message.set_origin(self.outbound_gateway.myself);

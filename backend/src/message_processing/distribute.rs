@@ -1,12 +1,33 @@
 use std::fmt::Display;
 
-use tokio::{fs, sync::mpsc};
+use tokio::{fs::{self, File}, io::AsyncReadExt, sync::mpsc};
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
 
 use crate::{http::ServerContext, message::{DistributionMessage, NumId, Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, result_early_return};
 
 use super::{stream2::StreamResponseType, BreadcrumbService, EmptyOption, OutboundGateway};
+
+pub struct DistributionHandler2 {
+    file: File,
+    sent_id: Option<NumId>
+}
+impl DistributionHandler2 {
+    pub async fn new(host_name: &str) -> Self {
+        Self { file: File::open(format!("C:/Users/fredk/Downloads/{host_name}.gz")).await.unwrap(), sent_id: None }
+    }
+
+    pub async fn next_chunk_and_id(&mut self, received_id: Option<NumId>) -> Result<(NumId, Vec<u8>), Error> {
+        if received_id != self.sent_id {
+            return Err(Error::IdMismatch);
+        }
+        let mut buffer = [0; 1024];
+        let n = self.file.read(&mut buffer).await.unwrap();
+        let id = NumId(Uuid::new_v4().as_u128());
+        self.sent_id = Some(id);
+        Ok((id, if n == 0 { Vec::with_capacity(0) } else { buffer[..n].to_vec() }))
+    }
+}
 
 pub struct DistributionHandler {
     from_staging: mpsc::UnboundedReceiver<DistributionMessage>,
@@ -38,7 +59,7 @@ impl DistributionHandler {
             self.outbound_gateway.send_request(&mut DistributionMessage::new(id, hop_count, host_name), Some(sender));
         }
         Some(())
-    }
+    } 
 }
 
 impl ServerContext {
@@ -80,7 +101,7 @@ impl ServerContext {
 }
 
 #[derive(Debug)]
-enum Error {
+pub enum Error {
     IdMismatch,
     HostInstall,
 }

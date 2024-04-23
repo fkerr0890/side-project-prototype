@@ -114,7 +114,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
     }
 
     pub fn ttl(&self) -> Duration { self.ttl }
-    pub fn insert(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key.clone(), Some(key), None::<fn()>, key_label, false)}
+    pub fn insert_key(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key.clone(), Some(key), None::<fn()>, key_label, false)}
     pub fn set_timer(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key, None, None::<fn()>, key_label, false) }
     pub fn set_timer_with_send_action(&mut self, key: C::K, send_action: impl FnOnce() + Send + 'static, key_label: &str) -> bool { self.start_timer(key, None, Some(send_action), key_label, false) }
     pub fn set_timer_with_override(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key, None, None::<fn()>, key_label, true) }
@@ -166,6 +166,17 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
 
     pub fn collection(&self) -> &C { &self.collection }
     pub fn collection_mut(&mut self) -> &mut C { &mut self.collection }
+}
+
+impl<K: Send + Hash + Eq + Clone + Debug + 'static, V: Send + 'static> TransientCollection<ArcMap<K, V>> {
+    pub fn insert(&mut self, key: K, value: V, key_label: &str) -> bool {
+        let is_new_key = self.set_timer(key.clone(), key_label);
+        if !is_new_key {
+            return false;
+        }
+        lock!(self.collection.map()).insert(key, value);
+        true
+    }
 }
 
 pub struct BidirectionalMpsc<T, U> {
