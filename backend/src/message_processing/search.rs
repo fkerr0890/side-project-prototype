@@ -32,7 +32,7 @@ impl SearchRequestProcessor {
     pub fn continue_propagating(&self, myself: Peer, metadata: &SearchMetadata) -> bool {
         let should_stop = match metadata.kind {
             SearchMetadataKind::Retrieval => self.local_hosts.contains_key(&metadata.host_name),
-            SearchMetadataKind::Distribution => myself.id != metadata.origin.id
+            SearchMetadataKind::Distribution => myself.id != metadata.origin.id && !self.local_hosts.contains_key(&metadata.host_name)
         };
         if !should_stop {
             return true;
