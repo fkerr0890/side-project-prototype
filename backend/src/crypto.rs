@@ -55,7 +55,7 @@ impl KeyStore {
                 key_set.nonce_rx.recv().map(|nonce| nonce.as_ref().to_vec()).map_err(|e| Error::Generic(e.to_string()))
             },
             Direction::Decode(nonce_bytes) => {
-                let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)?;
+                let nonce = aead::Nonce::try_assume_unique_for_key(nonce_bytes)?;
                 let res = key_set.opening_key.open_in_place(nonce, aad, payload)?.to_vec();
                 Ok(res)
             }
@@ -140,7 +140,7 @@ impl Display for Error {
     }
 }
 
-pub enum Direction {
+pub enum Direction<'a> {
     Encode,
-    Decode(Vec<u8>)
+    Decode(&'a[u8])
 }

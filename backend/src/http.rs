@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error};
 use uuid::Uuid;
 
-use crate::message::{MessageDirection, Messagea, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind};
+use crate::message::{MessageDirection, Message, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -144,11 +144,11 @@ fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> Result<Heade
 
 #[derive(Clone)]
 pub struct ServerContext {
-    pub to_staging: mpsc::UnboundedSender<(Messagea, mpsc::UnboundedSender<SerdeHttpResponse>)>
+    pub to_staging: mpsc::UnboundedSender<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>
 }
 
 impl ServerContext {
-    pub fn new(to_staging: mpsc::UnboundedSender<(Messagea, mpsc::UnboundedSender<SerdeHttpResponse>)>) -> Self {
+    pub fn new(to_staging: mpsc::UnboundedSender<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>) -> Self {
         Self { to_staging }
     }
 }
@@ -165,7 +165,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         return Ok(construct_hyper_error_response(String::from("Invalid host name"), request_version, 400));
     }
     request.set_uri(path);
-    let sm = Messagea::new(
+    let sm = Message::new(
         Peer::default(),
         NumId(Uuid::new_v4().as_u128()),
         None,

@@ -66,7 +66,7 @@ impl Sender {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Messagea {
+pub struct Message {
     dest: Peer,
     senders: Vec<Sender>,
     timestamp: String,
@@ -76,7 +76,7 @@ pub struct Messagea {
     direction: MessageDirection
 }
 
-impl Messagea {    
+impl Message {    
     pub fn new(dest: Peer, id: NumId, expiry: Option<String>, metadata: MetadataKind, direction: MessageDirection) -> Self {
         Self { dest, senders: Vec::new(), timestamp: String::new(), id, expiry, metadata, direction }
     }
@@ -91,12 +91,12 @@ impl Messagea {
         )
     }
 
-    pub fn new_discover_peer_request(myself: Peer, introducer: Peer) -> Self {
+    pub fn new_discover_peer_request(myself: Peer, introducer: Peer, target_num_peers: u16) -> Self {
         Self::new(
             Peer::default(),
             NumId(Uuid::new_v4().as_u128()),
             Some(datetime_to_timestamp(Utc::now() + Duration::seconds(SEARCH_TIMEOUT_SECONDS.as_secs() as i64))),
-            MetadataKind::Discover(DiscoverMetadata::new(myself, vec![introducer], DpMessageKind::INeedSome)),
+            MetadataKind::Discover(DiscoverMetadata::new(myself, vec![introducer], DpMessageKind::INeedSome, target_num_peers)),
             MessageDirection::Request
         )
     }
@@ -207,8 +207,8 @@ pub struct DiscoverMetadata {
 }
 
 impl DiscoverMetadata {
-    pub fn new(origin: Peer, peer_list: Vec<Peer>, kind: DpMessageKind) -> Self {
-        Self { origin, peer_list, hop_count: (0, 0), kind }
+    pub fn new(origin: Peer, peer_list: Vec<Peer>, kind: DpMessageKind, target_num_peers: u16) -> Self {
+        Self { origin, peer_list, hop_count: (target_num_peers, target_num_peers), kind }
     }
 }
 

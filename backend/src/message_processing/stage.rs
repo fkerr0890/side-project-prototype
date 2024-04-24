@@ -1,15 +1,15 @@
 use std::{collections::HashMap, net::SocketAddrV4, sync::{Arc, Mutex}};
 use ring::aead;
 use tokio::{select, sync::mpsc, time::sleep};
-use tracing::{debug, instrument, warn};
-use crate::{crypto::{Direction, KeyStore}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, MessageDirection, Messagea, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
+use tracing::{debug, info, instrument, trace, warn};
+use crate::{crypto::{Direction, KeyStore}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, MessageDirection, Message, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
-    from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, Vec<u8>)>,
+    from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
     message_staging: TransientCollection<ArcMap<NumId, HashMap<usize, InboundMessage>>>,
-    cached_outbound_messages: TransientCollection<ArcMap<NumId, Vec<(Messagea, Vec<Peer>)>>>,
+    cached_outbound_messages: TransientCollection<ArcMap<NumId, Vec<(Message, Vec<Peer>)>>>,
     unconfirmed_peers: TransientCollection<ArcMap<NumId, EndpointPair>>,
     outbound_gateway: OutboundGateway,
     key_store: KeyStore,
@@ -17,19 +17,19 @@ pub struct MessageStaging {
     breadcrumb_service: BreadcrumbService,
     discover_peer_processor: DiscoverPeerProcessor,
     stream_session_manager: StreamSessionManager,
-    outbound_channel_tx: mpsc::UnboundedSender<Messagea>,
-    outbound_channel_rx: mpsc::UnboundedReceiver<Messagea>,
+    outbound_channel_tx: mpsc::UnboundedSender<Message>,
+    outbound_channel_rx: mpsc::UnboundedReceiver<Message>,
     to_http_handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>>,
-    from_http_handlers: mpsc::UnboundedReceiver<(Messagea, mpsc::UnboundedSender<SerdeHttpResponse>)>,
-    initial_http_requests: TransientCollection<ArcMap<NumId, Messagea>>
+    from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
+    initial_http_requests: TransientCollection<ArcMap<NumId, Message>>
 }
 
 impl MessageStaging {
     pub fn new(
-        from_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, Vec<u8>)>,
+        from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
         outbound_gateway: OutboundGateway,
         discover_peer_processor: DiscoverPeerProcessor,
-        from_http_handlers: mpsc::UnboundedReceiver<(Messagea, mpsc::UnboundedSender<SerdeHttpResponse>)>,
+        from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
         local_hosts: HashMap<String, SocketAddrV4>,
         intial_peers: Vec<Peer>) -> Self
     {
@@ -39,13 +39,14 @@ impl MessageStaging {
             peer_ops.add_initial_peer(peer)
         }
         Self {
-            from_inbound_gateway: from_gateway,
+            from_inbound_gateway,
             message_staging: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             cached_outbound_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             unconfirmed_peers: TransientCollection::new(HEARTBEAT_INTERVAL_SECONDS*2, false, ArcMap::new()),
             outbound_gateway,
             key_store: KeyStore::new(),
             peer_ops: Arc::new(Mutex::new(peer_ops)),
+            //TODO: Fix ttl
             breadcrumb_service: BreadcrumbService::new(SRP_TTL_SECONDS),
             outbound_channel_tx,
             outbound_channel_rx,
@@ -63,7 +64,7 @@ impl MessageStaging {
             message = self.outbound_channel_rx.recv() => return Some(self.process_outbound_message(message?).await),
             message = self.from_http_handlers.recv() => return Some(self.handle_http_request(message?).await)
         };
-        if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes) {
+        if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes.1) {
             return Some(self.handle_key_agreement(message, sender_addr).await);
         }
         if let Some(message) = self.stage_message(message_bytes, sender_addr) {
@@ -72,13 +73,17 @@ impl MessageStaging {
         Some(())
     }
 
-    // #[instrument(level = "trace", skip_all, fields(inbound_message.sender = ?inbound_message.separate_parts().sender(), inbound_message.id = %inbound_message.separate_parts().id()))]
-    fn stage_message(&mut self, mut message_bytes: Vec<u8>, sender_addr: SocketAddrV4) -> Option<Messagea> {
+    #[instrument(level = "trace", skip_all, fields(%sender_addr))]
+    fn stage_message(&mut self, message_bytes: (usize, [u8; 1024]), sender_addr: SocketAddrV4) -> Option<Message> {
         // let (is_encrypted, sender) = (message_bytes.take_is_encrypted(), message_bytes.separate_parts().sender().socket);
-        let mut suffix = message_bytes.split_off(message_bytes.len() - aead::NONCE_LEN - 16);
-        let nonce = suffix.split_off(suffix.len() - aead::NONCE_LEN);
-        let peer_id = NumId(u128::from_be_bytes(suffix.try_into().unwrap()));
-        self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)).unwrap();
+        let (length, message_bytes) = message_bytes;
+        let (message_bytes, _tail) = message_bytes.split_at(length);
+        let (message_bytes, suffix) = message_bytes.split_at(message_bytes.len() - aead::NONCE_LEN - 16);
+        let (peer_id_bytes, nonce) = suffix.split_at(suffix.len() - aead::NONCE_LEN);
+        let peer_id = NumId(u128::from_be_bytes(peer_id_bytes.try_into().unwrap()));
+        info!(%peer_id, ?nonce);
+        let mut message_bytes = message_bytes.to_vec();
+        message_bytes = self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)).unwrap();
         let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
         if inbound_message.separate_parts().sender().socket != sender_addr {
             warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
@@ -109,9 +114,9 @@ impl MessageStaging {
         None
     }
 
-    fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> Messagea {
+    fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> Message {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
-        let mut message = bincode::deserialize::<Messagea>(&message_bytes).unwrap();
+        let mut message = bincode::deserialize::<Message>(&message_bytes).unwrap();
         for sender in senders {
             message.set_sender(sender);
         }
@@ -119,7 +124,9 @@ impl MessageStaging {
         message
     }
 
-    async fn process_outbound_message(&mut self, message: Messagea) {
+    #[instrument(level = "trace", skip_all, fields(dest = %message.dest().id, id = %message.id(), metadata = ?message.metadata(), myself = %self.outbound_gateway.myself.id))]
+    async fn process_outbound_message(&mut self, mut message: Message) {
+        let id = message.id();
         if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name}) = message.metadata() {
             self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await;
         }
@@ -129,30 +136,40 @@ impl MessageStaging {
         else if let MetadataKind::Heartbeat = message.metadata() {
             self.process_outbound_heartbeat(message).await;
         }
+        else if let MetadataKind::Discover(ref mut metadata) = message.metadata_mut() {
+            let introducer = metadata.peer_list.pop().unwrap();
+            self.breadcrumb_service.try_add_breadcrumb(id, None, None);
+            metadata.kind = DpMessageKind::Request;
+            self.send_checked(vec![introducer], message, false).await;
+        }
         else {
             self.send_response(message).await;
         }
     }
 
-    async fn process_outbound_heartbeat(&mut self, message: Messagea) {
+    #[instrument(level = "trace", skip_all)]
+    async fn process_outbound_heartbeat(&mut self, message: Message) {
         let mut peers = lock!(self.peer_ops).peers();
         peers.append(&mut self.stream_session_manager.get_all_destinations_source_retrieval());
         peers.append(&mut self.stream_session_manager.get_all_destinations_source_distribution());
         peers.append(&mut self.stream_session_manager.get_all_destinations_sink());
+        trace!(?peers);
         self.send_checked(peers, message, true).await;
     }
 
-    async fn send_outbound_message(&mut self, mut message: Messagea) {
+    #[instrument(level = "trace", skip_all, fields(id = %message.id(), myself = %self.outbound_gateway.myself.id))]
+    async fn send_outbound_message(&mut self, mut message: Message) {
         let new_direction = self.get_direction(&mut message);
+        trace!(?new_direction);
         match new_direction {
-            PropagationDirection::Forward => { self.send_request2(message).await; },
+            PropagationDirection::Forward => { self.send_request(message).await; },
             PropagationDirection::Reverse => self.send_response(message).await,
             PropagationDirection::Final => self.execute_final_action(message).await,
             PropagationDirection::Stop => {}
         };
     }
 
-    async fn send_request2(&mut self, mut message: Messagea) -> Option<Messagea> {
+    async fn send_request(&mut self, mut message: Message) -> Option<Message> {
         let prev_sender = message.only_sender();
         message.set_direction(MessageDirection::Request);
         let dests = lock!(self.peer_ops).peers().into_iter().filter(|p| prev_sender.is_none() || prev_sender.unwrap().id != p.id);
@@ -160,7 +177,7 @@ impl MessageStaging {
         Some(message)
     }
 
-    async fn send_response(&mut self, mut message: Messagea) {
+    async fn send_response(&mut self, mut message: Message) {
         let dest = option_early_return!(self.breadcrumb_service.get_dest(&message.id()));
         message.set_direction(MessageDirection::Response);
         if let Some(dest) = dest {
@@ -171,41 +188,49 @@ impl MessageStaging {
         }
     }
 
-    async fn send_checked(&mut self, dests: impl IntoIterator<Item = Peer>, mut message: Messagea, to_be_chunked: bool) -> Option<Messagea> {
+    async fn send_checked(&mut self, dests: impl IntoIterator<Item = Peer>, mut message: Message, to_be_chunked: bool) -> Option<Message> {
         let mut remaining_dests = dests.into_iter();
         while let Some(dest) = remaining_dests.next() {
-            if !self.check_key_agreement(&message).await {
-                self.insert_cached_outbound_message(message, remaining_dests.collect());
-                return None;
+            if dest.id == self.outbound_gateway.myself.id || lock!(self.peer_ops).has_peer(dest.id) {
+                continue;
             }
             message.replace_dest(dest);
             message.clear_senders();
+            if !self.check_key_agreement(&message).await {
+                let mut remaining_dests: Vec<Peer> = remaining_dests.collect();
+                remaining_dests.push(dest);
+                self.insert_cached_outbound_message(message, remaining_dests);
+                return None;
+            }
             self.outbound_gateway.send(&message, to_be_chunked, &mut self.key_store).await;
         }
         Some(message)
     }
 
-    async fn check_key_agreement(&mut self, message: &Messagea) -> bool {
+    async fn check_key_agreement(&mut self, message: &Message) -> bool {
         if self.key_store.agreement_exists(&message.dest().id) {
             return true;
         }
-        self.cached_outbound_messages.set_timer(message.dest().id, "Stage:MessageCaching");
         self.send_agreement(message.dest(), MessageDirection::Request).await;
         false
     }
 
-    fn insert_cached_outbound_message(&mut self, message: Messagea, remaining_dests: Vec<Peer>) {
+    #[instrument(level = "trace", skip_all, fields(id = %message.id(), ?remaining_dests))]
+    fn insert_cached_outbound_message(&mut self, message: Message, remaining_dests: Vec<Peer>) {
+        self.cached_outbound_messages.set_timer(message.dest().id, "Stage:MessageCaching");
         let mut message_caching = lock!(self.cached_outbound_messages.collection().map());
         let cached_messages = message_caching.entry(message.dest().id).or_default();
         cached_messages.push((message, remaining_dests));
     }
 
+    #[instrument(level = "trace", skip(self))]
     async fn send_agreement(&mut self, dest: Peer, direction: MessageDirection) {
         let public_key = option_early_return!(self.key_store.public_key(dest.id));
         self.outbound_gateway.send_agreement(dest, public_key, direction).await;
     }
 
-    async fn handle_http_request(&mut self, from_http_handler: (Messagea, mpsc::UnboundedSender<SerdeHttpResponse>)) {
+    #[instrument(level = "trace", skip_all, fields(id = %from_http_handler.0.id(), host_name = from_http_handler.0.metadata().host_name(), myself = %self.outbound_gateway.myself.id))]
+    async fn handle_http_request(&mut self, from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>)) {
         let (message, tx) = from_http_handler;
         let (id, host_name) = (message.id(), message.metadata().host_name().clone());
         self.to_http_handlers.insert(id, tx, "Staging:ToHttpHandlers");
@@ -213,17 +238,18 @@ impl MessageStaging {
             self.send_http_request(message, &host_name).await;
         } else {
             self.stream_session_manager.new_source_retrieval(host_name.clone(), self.outbound_channel_tx.clone());
-            let search_message = Messagea::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name.clone(), SearchMetadataKind::Retrieval));
+            let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name.clone(), SearchMetadataKind::Retrieval));
             self.send_outbound_message(search_message).await;
             self.initial_http_requests.insert(id, message, "Staging:InitialHttpRequests");
         }
     }
 
-    async fn send_http_request(&mut self, message: Messagea, host_name: &str) {
+    async fn send_http_request(&mut self, message: Message, host_name: &str) {
         let message = option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await);
         self.stream_session_manager.push_resource(message);
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
     async fn handle_distribution_request(&mut self, id: NumId, metadata: DistributeMetadata) {
         if !self.stream_session_manager.host_installed(&metadata.host_name) {
             return;
@@ -233,9 +259,9 @@ impl MessageStaging {
         }
         else {
             self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), self.outbound_channel_tx.clone(), id, metadata.hop_count).await;
-            let search_message = Messagea::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name, SearchMetadataKind::Distribution));
+            let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name, SearchMetadataKind::Distribution));
             self.breadcrumb_service.try_add_breadcrumb(id, None, None);
-            self.send_request2(search_message).await;
+            self.send_request(search_message).await;
         }
     }
 
@@ -243,12 +269,12 @@ impl MessageStaging {
         let file = self.stream_session_manager.file_mut(&host_name);
         let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(received_id).await);
         let dests = self.stream_session_manager.get_destinations_source_distribution(&host_name);
-        let message = Messagea::new(Peer::default(), new_id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), host_name)), MessageDirection::Request);
+        let message = Message::new(Peer::default(), new_id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), host_name)), MessageDirection::Request);
         let message = option_early_return!(self.send_checked(dests, message, true).await);
         self.stream_session_manager.push_resource(message)
     }
 
-    fn get_direction(&mut self, message: &mut Messagea) -> PropagationDirection {
+    fn get_direction(&mut self, message: &mut Message) -> PropagationDirection {
         if let MessageDirection::Response = message.direction() {
             return PropagationDirection::Reverse;
         }
@@ -272,7 +298,8 @@ impl MessageStaging {
         PropagationDirection::Forward
     }
 
-    async fn execute_final_action(&mut self, message: Messagea) {
+    #[instrument(level = "trace", skip_all, fields(id = %message.id()))]
+    async fn execute_final_action(&mut self, message: Message) {
         let (sender, id) = (message.only_sender(), message.id());
         let sender = if let Some(sender) = sender { sender } else { Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself.id) };
         if let MetadataKind::Discover(DiscoverMetadata {kind: DpMessageKind::IveGotSome, .. }) = message.metadata() {
@@ -331,13 +358,13 @@ impl MessageStaging {
                                 if hop_count <= 0 {
                                     return;
                                 }
-                                let distribution_message = Messagea::new(
+                                let distribution_message = Message::new(
                                     Peer::default(),
                                     distribution_id,
                                     None,
                                     MetadataKind::Distribute(DistributeMetadata::new(hop_count, metadata.host_name)),
                                     MessageDirection::Request);
-                                self.send_request2(distribution_message).await;
+                                self.send_request(distribution_message).await;
                             }
                         }
                     }
@@ -349,6 +376,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
     fn send_nat_heartbeats(&mut self, peer: Peer) {
         if peer.id == self.outbound_gateway.myself.id
             || self.unconfirmed_peers.contains_key(&peer.id)
@@ -361,13 +389,13 @@ impl MessageStaging {
         let outbound_channel = self.outbound_channel_tx.clone();
         tokio::spawn(async move {
             while unconfirmed_peers.contains_key(&peer.id) {
-                result_early_return!(outbound_channel.send(Messagea::new_heartbeat()));
+                result_early_return!(outbound_channel.send(Message::new_heartbeat()));
                 sleep(HEARTBEAT_INTERVAL_SECONDS).await;
             }
         });
     }
 
-    #[instrument(level = "trace", skip(self))]
+    #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
     fn add_new_peer(&mut self, peer: Peer) {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
         lock!(self.peer_ops).add_peer(peer, DiscoverPeerProcessor::get_score(self.outbound_gateway.myself.endpoint_pair.public_endpoint, peer_endpoint))
@@ -377,10 +405,11 @@ impl MessageStaging {
     async fn handle_key_agreement(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) {
         let KeyAgreementMessage { public_key, peer_id, direction } = message;
         let cached_messages = match direction {
-            MessageDirection::Request => return self.send_agreement(Peer::from(Sender::new(sender, peer_id)), MessageDirection::Response).await,
+            MessageDirection::Request => { self.send_agreement(Peer::from(Sender::new(sender, peer_id)), MessageDirection::Response).await; None },
             MessageDirection::Response => self.cached_outbound_messages.pop(&peer_id)
         };
         result_early_return!(self.key_store.agree(peer_id, public_key));
+        info!(%peer_id);
         if let Some(cached_messages) = cached_messages {
             debug!("Sending cached outbound messages");
             for (message, remaining_dests) in cached_messages {
@@ -393,10 +422,11 @@ impl MessageStaging {
         }
     }
 
-    pub fn outbound_channel_tx(&self) -> &mpsc::UnboundedSender<Messagea> { &self.outbound_channel_tx }
+    pub fn outbound_channel_tx(&self) -> &mpsc::UnboundedSender<Message> { &self.outbound_channel_tx }
     pub fn peer_ops(&self) -> &Arc<Mutex<PeerOps>> { &self.peer_ops }
 }
 
+#[derive(Debug)]
 pub enum PropagationDirection {
     Forward,
     Reverse,

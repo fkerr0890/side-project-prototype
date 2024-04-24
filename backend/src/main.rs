@@ -1,7 +1,7 @@
 use p2p::{message::NumId, node::Node};
 use tokio::fs;
 use uuid::Uuid;
-use std::{collections::HashSet, env, panic, process, sync::Mutex};
+use std::{env, panic, process};
 
 #[tokio::main]
 async fn main() {

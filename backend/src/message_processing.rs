@@ -4,7 +4,7 @@ use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, MessageDirection, Messagea, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, MessageDirection, Message, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -25,13 +25,13 @@ pub type EmptyOption = Option<()>;
 
 pub struct InboundGateway {
     socket: Arc<UdpSocket>,
-    to_staging: mpsc::UnboundedSender<(SocketAddrV4, Vec<u8>)>
+    to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>
 }
 
 impl InboundGateway {
     pub fn new(
         socket: &Arc<UdpSocket>,
-        to_staging: mpsc::UnboundedSender<(SocketAddrV4, Vec<u8>)>) -> Self 
+        to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>) -> Self 
     {
         Self {
             socket: socket.clone(),
@@ -40,14 +40,13 @@ impl InboundGateway {
     }
 
     pub async fn receive(&mut self) {
-        let mut buf = Vec::with_capacity(1024);
+        let mut buf = [0u8; 1024];
         let (n, addr) = result_early_return!(self.socket.recv_from(&mut buf).await);
-        buf.truncate(n);
-        self.handle_message(buf, addr);
+        self.handle_message((n, buf), addr);
     }
 
     // #[instrument(level = "trace", skip(self, message_bytes))]
-    fn handle_message(&self, message_bytes: Vec<u8>, addr: SocketAddr) {
+    fn handle_message(&self, message_bytes: (usize, [u8; 1024]), addr: SocketAddr) {
         if let SocketAddr::V4(socket) = addr {
             result_early_return!(self.to_staging.send((socket, message_bytes))); return;
         }
@@ -74,17 +73,17 @@ impl OutboundGateway {
         }
     }
 
-    pub async fn send(&self, message: &Messagea, to_be_chunked: bool, key_store: &mut KeyStore) {
+    pub async fn send(&self, message: &Message, to_be_chunked: bool, key_store: &mut KeyStore) {
         let dest = message.dest();
-        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-            self.send_individual(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
-        }
-        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-        //     self.send_individual2(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        // if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+        //     self.send_individual(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
         // }
+        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+            self.send_individual(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        }
     }
 
-    pub async fn send_individual(&self, dest: Sender, message: &Messagea, to_be_chunked: bool, key_store: &mut KeyStore) {
+    pub async fn send_individual(&self, dest: Sender, message: &Message, to_be_chunked: bool, key_store: &mut KeyStore) {
         if message.check_expiry() {
             info!("Message expired: {}", message.id());
         }
@@ -97,22 +96,13 @@ impl OutboundGateway {
         }
     }
 
-    // fn send_key_agreement(socket: Arc<UdpSocket>, dest: Sender, key_store: Arc<Mutex<KeyStore>>) {
-    //     let mut key_store = lock!(key_store);
-    //     let public_key = key_store.public_key(dest.id);
-    //     if public_key.is_empty() {
-    //         return;
-    //     }
-    //     Self::send_key_agreement_message(socket, dest.socket, &KeyAgreementMessage { public_key, peer_id: dest.id });
-    // }
-
     pub async fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirection) {
         let serialized = result_early_return!(bincode::serialize(&KeyAgreementMessage::new(public_key, self.myself.id, direction)));
-        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-            result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
-        }
+        // if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+        //     result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
+        // }
         if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
+            result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.public_endpoint).await);
         }
     }
 
@@ -120,7 +110,6 @@ impl OutboundGateway {
         let chunk_size = if to_be_chunked { 975 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { bytes.len() };
         let chunks = bytes.chunks(chunk_size);
         let num_chunks = chunks.len();
-        //TODO: Encrypt for not chunked
         let (mut messages, errors): MessagesErrors = chunks
             .enumerate()
             .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store, dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks)))
@@ -183,4 +172,4 @@ impl BreadcrumbService {
     }
 }
 
-pub struct EarlyReturnContext(mpsc::UnboundedSender<Messagea>, Messagea);
+pub struct EarlyReturnContext(mpsc::UnboundedSender<Message>, Message);

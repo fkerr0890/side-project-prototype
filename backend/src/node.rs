@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::error;
 
-use crate::{http::{self, ServerContext}, lock, message::{Messagea, NumId, Peer}, message_processing::{stage::MessageStaging, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, result_early_return};
+use crate::{http::{self, ServerContext}, lock, message::{Message, NumId, Peer}, message_processing::{stage::MessageStaging, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, peer, result_early_return};
 
 pub struct Node {
     nat_kind: NatKind
@@ -55,7 +55,7 @@ impl Node {
         let outbound_channel_tx_clone = message_staging.outbound_channel_tx().clone();
 
         if let Some(introducer) = introducer {
-            let message = Messagea::new_discover_peer_request(myself, introducer);
+            let message = Message::new_discover_peer_request(myself, introducer, peer::MAX_PEERS);
             outbound_channel_tx_clone.send(message).unwrap();
         }
         else {
@@ -95,7 +95,7 @@ impl Node {
         tokio::spawn(async move {
             loop {
                 sleep(HEARTBEAT_INTERVAL_SECONDS).await;
-                result_early_return!(outbound_channel_tx.send(Messagea::new_heartbeat()));
+                result_early_return!(outbound_channel_tx.send(Message::new_heartbeat()));
             }
         });
         

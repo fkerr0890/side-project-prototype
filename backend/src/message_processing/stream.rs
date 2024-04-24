@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
 use tracing::{debug, warn};
 
-use crate::{http::{self, SerdeHttpRequest}, message::{MessageDirection, Messagea, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return};
+use crate::{http::{self, SerdeHttpRequest}, message::{MessageDirection, Message, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return};
 
 use super::{distribute::ChunkedFileHandler, SRP_TTL_SECONDS};
 
@@ -59,11 +59,11 @@ impl StreamSessionManager {
 
     pub fn host_installed(&self, host_name: &str) -> bool { self.local_hosts.contains_key(host_name) }
 
-    pub fn new_source_retrieval(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Messagea>) {
+    pub fn new_source_retrieval(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Message>) {
         assert!(self.sources_retrieval.insert(host_name, StreamSource::new(outbound_channel, 5)).is_none());
     }
 
-    pub async fn new_source_distribution(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Messagea>, id: NumId, hop_count: u16) {
+    pub async fn new_source_distribution(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Message>, id: NumId, hop_count: u16) {
         let file = ChunkedFileHandler::new(&host_name).await;
         assert!(self.sources_distribution.insert(host_name, StreamSourceDistribution::new(StreamSource::new(outbound_channel, 5), id, hop_count, file).await).is_none());
     }
@@ -76,7 +76,7 @@ impl StreamSessionManager {
         assert!(self.sinks.insert(host_name, StreamSink::Distribution(DistributionStreamSink::new())).is_none());
     }
 
-    pub fn push_resource(&mut self, message: Messagea) {
+    pub fn push_resource(&mut self, message: Message) {
         match message.metadata() {
             MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name }) => self.sources_retrieval.get_mut(host_name).unwrap().push_resource(message),
             MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::DistributionRequest(_), host_name }) => self.sources_distribution.get_mut(host_name).unwrap().stream_source.push_resource(message),
@@ -92,10 +92,10 @@ impl StreamSessionManager {
         self.sources_distribution.get_mut(host_name).unwrap().stream_source.finalize_resource(id);
     }
 
-    pub async fn retrieval_response_action(&self, request: SerdeHttpRequest, host_name: String, id: NumId) -> Messagea {
+    pub async fn retrieval_response_action(&self, request: SerdeHttpRequest, host_name: String, id: NumId) -> Message {
         let socket = self.local_hosts.get(&host_name).unwrap();
         let response = http::make_request(request, &socket.to_string()).await;
-        Messagea::new(
+        Message::new(
             Peer::default(),
             id,
             None,
@@ -104,12 +104,12 @@ impl StreamSessionManager {
         )
     }
 
-    pub async fn distribution_response_action(&mut self, bytes: Vec<u8>, host_name: String, id: NumId) -> Messagea {
+    pub async fn distribution_response_action(&mut self, bytes: Vec<u8>, host_name: String, id: NumId) -> Message {
         let result = self.sinks.get_mut(&host_name).unwrap().unwrap_distribution().stage_message(bytes).await;
         if let DistributionResponse::InstallOk = result {
             self.local_hosts.insert(host_name.clone(), SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3000));
         }
-        Messagea::new(
+        Message::new(
             Peer::default(),
             id,
             None,
@@ -131,12 +131,12 @@ struct StreamSource {
     active_dests: HashSet<Peer>,
     resource_queue: VecDeque<NumId>,
     abort_handlers: HashMap<NumId, AbortHandle>,
-    outbound_channel: mpsc::UnboundedSender<Messagea>,
+    outbound_channel: mpsc::UnboundedSender<Message>,
     cached_size_max: usize
 }
 
 impl StreamSource {
-    fn new(outbound_channel: mpsc::UnboundedSender<Messagea>, cached_size_max: usize) -> Self {
+    fn new(outbound_channel: mpsc::UnboundedSender<Message>, cached_size_max: usize) -> Self {
         assert!(cached_size_max >= 1);
         Self {
             active_dests: HashSet::new(),
@@ -147,7 +147,7 @@ impl StreamSource {
         }
     }
 
-    fn push_resource(&mut self, message: Messagea) {
+    fn push_resource(&mut self, message: Message) {
         let id = message.id();
         if self.abort_handlers.contains_key(&id) {
             warn!(id = %message.id(), "ActiveSessionInfo: Attempted to insert duplicate request");
@@ -161,7 +161,7 @@ impl StreamSource {
         self.abort_handlers.insert(id, abort_handle);
     }
 
-    fn start_follow_ups(&self, message: Messagea) -> AbortHandle {
+    fn start_follow_ups(&self, message: Message) -> AbortHandle {
         let outbound_channel = self.outbound_channel.clone();
         tokio::spawn(async move {
             let num_retries = SRP_TTL_SECONDS.as_secs() / 2;
