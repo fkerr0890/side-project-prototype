@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 
 use crate::{http::{self, SerdeHttpRequest}, message::{MessageDirection, Messagea, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return};
 
-use super::{distribute::DistributionHandler2, SRP_TTL_SECONDS};
+use super::{distribute::ChunkedFileHandler, SRP_TTL_SECONDS};
 
 pub struct StreamSessionManager {
     sources_retrieval: HashMap<String, StreamSource>,
@@ -34,10 +34,16 @@ impl StreamSessionManager {
     pub fn sink_active_distribution(&self, host_name: &str) -> bool { matches!(self.sinks.get(host_name), Some(StreamSink::Distribution(_))) }
 
     pub fn get_destinations_source_retrieval(&self, host_name: &str) -> HashSet<Peer> { self.sources_retrieval.get(host_name).unwrap().active_dests.clone() }
+    
+    pub fn get_all_destinations_source_retrieval(&self) -> Vec<Peer> { self.sources_retrieval.values().flat_map(|s| s.active_dests.clone()).collect() }
 
     pub fn get_destinations_source_distribution(&self, host_name: &str) -> HashSet<Peer> { self.sources_distribution.get(host_name).unwrap().stream_source.active_dests.clone() }
 
+    pub fn get_all_destinations_source_distribution(&self) -> Vec<Peer> { self.sources_distribution.values().flat_map(|s| s.stream_source.active_dests.clone()).collect() }
+
     pub fn get_destinations_sink(&mut self, host_name: &str) -> HashSet<Peer> { self.sinks.get_mut(host_name).unwrap().unwrap_retrieval().clone() }
+
+    pub fn get_all_destinations_sink(&mut self) -> Vec<Peer> { self.sinks.values_mut().flat_map(|s| s.unwrap_retrieval().clone()).collect() }
 
     pub fn add_destination_source_retrieval(&mut self, host_name: &str, dest: Peer) -> bool {
         self.sources_retrieval.get_mut(host_name).unwrap().active_dests.insert(dest)
@@ -58,7 +64,7 @@ impl StreamSessionManager {
     }
 
     pub async fn new_source_distribution(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Messagea>, id: NumId, hop_count: u16) {
-        let file = DistributionHandler2::new(&host_name).await;
+        let file = ChunkedFileHandler::new(&host_name).await;
         assert!(self.sources_distribution.insert(host_name, StreamSourceDistribution::new(StreamSource::new(outbound_channel, 5), id, hop_count, file).await).is_none());
     }
 
@@ -112,7 +118,9 @@ impl StreamSessionManager {
         )
     }
 
-    pub fn file_mut(&mut self, host_name: &str) -> &mut DistributionHandler2 { &mut self.sources_distribution.get_mut(host_name).unwrap().file }
+    pub fn file_mut(&mut self, host_name: &str) -> &mut ChunkedFileHandler { &mut self.sources_distribution.get_mut(host_name).unwrap().file }
+    
+    pub fn local_hosts(&self) -> &HashMap<String, SocketAddrV4> { &self.local_hosts }
 
     pub fn curr_hop_count_and_distribution_id(&self, host_name: &str) -> (u16, NumId) {
         let source = self.sources_distribution.get(host_name).unwrap();
@@ -176,16 +184,16 @@ struct StreamSourceDistribution {
     stream_source: StreamSource,
     id: NumId,
     hop_count: u16,
-    file: DistributionHandler2
+    file: ChunkedFileHandler
 }
 
 impl StreamSourceDistribution {
-    async fn new(stream_source: StreamSource, id: NumId, hop_count: u16, file: DistributionHandler2) -> Self {
+    async fn new(stream_source: StreamSource, id: NumId, hop_count: u16, file: ChunkedFileHandler) -> Self {
         Self { stream_source, id, hop_count, file }
     }
 }
 
-pub enum StreamSink {
+enum StreamSink {
     Retrieval(HashSet<Peer>),
     Distribution(DistributionStreamSink)
 }

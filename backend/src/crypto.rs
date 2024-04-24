@@ -28,10 +28,9 @@ impl KeyStore {
         }
     }
 
-    pub fn public_key(&mut self, peer_id: NumId) -> Vec<u8> {
+    pub fn public_key(&mut self, peer_id: NumId) -> Option<Vec<u8>> {
         if self.symmetric_keys.contains_key(&peer_id) {
-            todo!("Change to return none");
-            return Vec::with_capacity(0);
+            return None
         }
         let is_new_key = self.private_keys.set_timer(peer_id, "Crypto:PrivateKeys");
         let mut private_keys = lock!(self.private_keys.collection().map());
@@ -39,10 +38,10 @@ impl KeyStore {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
             let public_key = my_private_key.compute_public_key().unwrap();
             private_keys.insert(peer_id, my_private_key);
-            public_key.as_ref().to_vec()
+            Some(public_key.as_ref().to_vec())
         }
         else {
-            private_keys.get(&peer_id).unwrap().compute_public_key().unwrap().as_ref().to_vec()
+            Some(private_keys.get(&peer_id).unwrap().compute_public_key().unwrap().as_ref().to_vec())
         }
     }
 

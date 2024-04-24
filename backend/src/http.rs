@@ -4,8 +4,9 @@ use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, heade
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
+use uuid::Uuid;
 
-use crate::{message::{Message, SearchMessage, StreamMessage, StreamMessageInnerKind, StreamMessageKind}, message_processing::stream2::StreamResponseType};
+use crate::message::{MessageDirection, Messagea, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -143,18 +144,12 @@ fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> Result<Heade
 
 #[derive(Clone)]
 pub struct ServerContext {
-    pub to_srp: mpsc::UnboundedSender<SearchMessage>,
-    pub to_smp: mpsc::UnboundedSender<StreamMessage>,
-    pub tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<StreamResponseType>>
+    pub to_staging: mpsc::UnboundedSender<(Messagea, mpsc::UnboundedSender<SerdeHttpResponse>)>
 }
 
 impl ServerContext {
-    pub fn new(to_srp: mpsc::UnboundedSender<SearchMessage>, to_smp: mpsc::UnboundedSender<StreamMessage>, tx_to_smp: mpsc::UnboundedSender<mpsc::UnboundedSender<StreamResponseType>>) -> Self {
-        Self {
-            to_srp,
-            to_smp,
-            tx_to_smp
-        }
+    pub fn new(to_staging: mpsc::UnboundedSender<(Messagea, mpsc::UnboundedSender<SerdeHttpResponse>)>) -> Self {
+        Self { to_staging }
     }
 }
 
@@ -170,20 +165,14 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         return Ok(construct_hyper_error_response(String::from("Invalid host name"), request_version, 400));
     }
     request.set_uri(path);
-    let search_request = SearchMessage::initial_search_request(host_name.to_owned(), true, None);
-    let payload = match bincode::serialize(&request) {
-        Ok(request) => request,
-        Err(e) => return Ok(construct_hyper_error_response((*e).to_string(), request_version, 400))
-    };
-    let sm = StreamMessage::new(
-        host_name.to_owned(),
-        search_request.id(),
-        StreamMessageKind::Resource(StreamMessageInnerKind::Request),
-        payload);
+    let sm = Messagea::new(
+        Peer::default(),
+        NumId(Uuid::new_v4().as_u128()),
+        None,
+        MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::Request(request), host_name.clone())),
+        MessageDirection::Request);
     let (tx, mut rx) = mpsc::unbounded_channel();
-    context.tx_to_smp.send(tx).ok();
-    context.to_smp.send(sm).ok();
-    context.to_srp.send(search_request).ok();
+    context.to_staging.send((sm, tx)).ok();
     let response = match rx.recv().await {
         Some(response) => response,
         None => {
@@ -191,7 +180,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
             return Ok(construct_hyper_error_response(String::from("Request timed out/p2p daemon terminated"), request_version, 500))
         }
     };
-    Ok(response.unwrap_http().into_hyper_response())
+    Ok(response.into_hyper_response())
 }
 
 pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {

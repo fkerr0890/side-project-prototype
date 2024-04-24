@@ -1,11 +1,10 @@
 use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
-use serde::Serialize;
 use tokio::{net::UdpSocket, sync::mpsc};
-use tracing::{error, info, instrument};
+use tracing::{error, info};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{DiscoverPeerMessage, InboundMessage, KeyAgreementMessage, Message, MessageDirection, Messagea, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, MessageDirection, Messagea, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -18,7 +17,6 @@ pub const DISTRIBUTION_TTL_SECONDS: Duration = Duration::from_secs(43200);
 
 pub mod stage;
 pub mod stream;
-pub mod stream2;
 pub mod search;
 pub mod discover;
 pub mod distribute;
@@ -65,59 +63,28 @@ type MessagesErrors = (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>);
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
-    myself: Peer,
-    peer_ops: PeerOps
+    myself: Peer
 }
 
 impl OutboundGateway {
     pub fn new(socket: Arc<UdpSocket>, myself: Peer) -> Self {
         Self {
             socket,
-            myself,
-            peer_ops: PeerOps::new()
+            myself
         }
-    }
-
-    pub fn send_request(&self, request: &mut(impl Message + Serialize), prev_sender: Option<Sender>) {
-        // for peer in lock!(self.peer_ops).peers() {
-        //     match prev_sender { Some(s) if s.id == peer.id => continue, _ => {}}
-        //     self.send(peer, request, false);
-        // }
-    }
-
-    #[instrument(level = "trace", skip(self))]
-    fn add_new_peer(&mut self, peer: Peer) {
-        let peer_endpoint = peer.endpoint_pair.public_endpoint;
-        self.peer_ops.add_peer(peer, DiscoverPeerProcessor::get_score(self.myself.endpoint_pair.public_endpoint, peer_endpoint))
     }
 
     pub async fn send(&self, message: &Messagea, to_be_chunked: bool, key_store: &mut KeyStore) {
         let dest = message.dest();
         if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-            self.send_individual2(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
+            self.send_individual(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
         }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.send_individual2(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
-        }
-        // self.send_individual2(option_early_return!(Self::sender_from_peer(&mut dest)), message, to_be_chunked, key_store);
+        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+        //     self.send_individual2(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        // }
     }
 
-    fn dests_from_peer(dest: Peer) -> Vec<Sender> {
-        let mut dests = Vec::new();
-
-        dests
-    }
-
-    pub fn send_private_public_static(socket: &Arc<UdpSocket>, dest: Peer, myself: Peer, message: &mut(impl Message + Serialize), key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) {
-        Self::send_static(socket, Sender::new(dest.endpoint_pair.public_endpoint, dest.id), myself, message, key_store, to_be_chunked);
-        // Self::send_static(socket, dest.private_endpoint, myself, message, to_be_encrypted, to_be_chunked);
-    }
-
-    pub fn send_individual(&self, dest: Sender, message: &mut(impl Message + Serialize), to_be_chunked: bool) {
-        // Self::send_static(&self.socket, dest, self.myself, message, self.key_store.clone(), to_be_chunked);
-    }
-
-    pub async fn send_individual2(&self, dest: Sender, message: &Messagea, to_be_chunked: bool, key_store: &mut KeyStore) {
+    pub async fn send_individual(&self, dest: Sender, message: &Messagea, to_be_chunked: bool, key_store: &mut KeyStore) {
         if message.check_expiry() {
             info!("Message expired: {}", message.id());
         }
@@ -128,10 +95,6 @@ impl OutboundGateway {
         for chunk in chunks {
             result_early_return!(self.socket.send_to(&chunk, dest.socket).await);
         }
-    }
-
-    pub fn send_static(socket: &Arc<UdpSocket>, dest: Sender, myself: Peer, message: &mut(impl Message + Serialize), key_store: Arc<Mutex<KeyStore>>, to_be_chunked: bool) {
-
     }
 
     // fn send_key_agreement(socket: Arc<UdpSocket>, dest: Sender, key_store: Arc<Mutex<KeyStore>>) {
@@ -145,11 +108,12 @@ impl OutboundGateway {
 
     pub async fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirection) {
         let serialized = result_early_return!(bincode::serialize(&KeyAgreementMessage::new(public_key, self.myself.id, direction)));
-        self.send_public_private(dest, &serialized).await;
-    }
-
-    fn send_key_agreement_message(socket: Arc<UdpSocket>, dest: SocketAddrV4, message: &KeyAgreementMessage) {
-
+        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+            result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
+        }
+        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+            result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
+        }
     }
 
     fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_chunked: bool, key_store: &mut KeyStore) -> Option<Vec<Vec<u8>>> {
@@ -176,15 +140,6 @@ impl OutboundGateway {
         bytes.extend(my_peer_id.to_be_bytes());
         bytes.extend(nonce);
         Ok(bytes)
-    }
-
-    async fn send_public_private(&self, dest: Peer, bytes: &Vec<u8>) {
-        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-            result_early_return!(self.socket.send_to(bytes, dest.endpoint_pair.private_endpoint).await);
-        }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            result_early_return!(self.socket.send_to(bytes, dest.endpoint_pair.private_endpoint).await);
-        }
     }
 }
 

@@ -1,11 +1,10 @@
-use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::{Arc, Mutex}};
+use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::Arc};
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::error;
-use uuid::Uuid;
 
-use crate::{crypto::KeyStore, http::{self, ServerContext}, lock, message::{DiscoverPeerMessage, DistributionMessage, DpMessageKind, Heartbeat, InboundMessage, Message, NumId, Peer, Sender, SeparateParts}, message_processing::{distribute::DistributionHandler, search::SearchRequestProcessor, stage::MessageStaging, stream2::StreamMessageProcessor, BreadcrumbService, DiscoverPeerProcessor, InboundGateway, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS, SRP_TTL_SECONDS}, option_early_return, peer::{self, PeerOps}};
+use crate::{http::{self, ServerContext}, lock, message::{Messagea, NumId, Peer}, message_processing::{stage::MessageStaging, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, result_early_return};
 
 pub struct Node {
     nat_kind: NatKind
@@ -33,138 +32,81 @@ impl Node {
     }
 
     pub async fn listen(&self, is_start: bool, is_end: bool, report_trigger: Option<mpsc::Receiver<()>>, introducer: Option<Peer>, id: NumId, initial_peers: Vec<(String, NumId)>, endpoint_pair: EndpointPair, socket: Arc<UdpSocket>) {
-        // let (srm_to_srp, srm_from_gateway) = mpsc::unbounded_channel();
-        // let (dpm_to_dpp, dpm_from_gateway) = mpsc::unbounded_channel();
-        // let (sm_to_smp, sm_from) = mpsc::unbounded_channel();
-        // let (to_staging, from_gateway) = mpsc::unbounded_channel();
-        // let (tx_to_smp, tx_from_http_handler) = mpsc::unbounded_channel();
-        // let (srm_to_srp2, srm_from_staging) = mpsc::unbounded_channel();
-        // let (sm_to_smp2, sm_from2) = mpsc::unbounded_channel();
-        // let (tx_to_smp2, tx_from_dp) = mpsc::unbounded_channel();
-        // let (dm_to_dh, dm_from_staging) = mpsc::unbounded_channel();
+        let (to_staging, from_gateway) = mpsc::unbounded_channel();
+        let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
     
-        // let key_store = Arc::new(Mutex::new(KeyStore::new()));
-        // let peer_ops = Arc::new(Mutex::new(PeerOps::new()));
-        // let peer_ops_clone = peer_ops.clone();
-        // let mut local_hosts = HashMap::new();
-        // if is_end {
-        //     local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
-        // }
+        let mut local_hosts = HashMap::new();
+        if is_end {
+            local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
+        }
 
-        // let myself = Peer::new(endpoint_pair, id);
-        // let bs = BreadcrumbService::new(DISTRIBUTION_TTL_SECONDS);
-        // let search_ttl = SRP_TTL_SECONDS;
-        // let discover_ttl = DPP_TTL_MILLIS;
-        // let mut message_staging = MessageStaging::new(from_gateway, srm_to_srp.clone(), dpm_to_dpp, sm_to_smp.clone(), srm_to_srp2.clone(), sm_to_smp2.clone(), dm_to_dh.clone(), OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()));
-        // let local_hosts_clone = local_hosts.clone();
-        // let mut srp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs.clone(search_ttl), srm_from_gateway, sm_to_smp.clone(), move |m| local_hosts_clone.contains_key(m.host_name()));
-        // let mut dpp = DiscoverPeerProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs.clone(discover_ttl), dpm_from_gateway);
-        // let mut smp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), sm_from, local_hosts.clone(), tx_from_http_handler);
-        // let mut dsrp = SearchRequestProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs.clone(search_ttl), srm_from_staging, sm_to_smp2.clone(), |m| m.origin().unwrap().endpoint_pair.private_endpoint != m.dest() && m.origin().unwrap().endpoint_pair.public_endpoint != m.dest());
-        // let mut dsmp = StreamMessageProcessor::new(OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), sm_from2, local_hosts, tx_from_dp);
-        // let mut distribution_handler = DistributionHandler::new(dm_from_staging, srm_to_srp2, sm_to_smp2, tx_to_smp2, OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops.clone()), bs);
-    
-        // for _ in 0..225 {
-        //     let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
-        //     tokio::spawn(async move {
-        //         loop {
-        //             inbound_gateway.receive().await;
-        //         }
-        //     });
-        // }
+        let myself = Peer::new(endpoint_pair, id);
 
-        // tokio::spawn(async move {
-        //     loop {
-        //         option_early_return!(message_staging.receive().await, error!("Staging channel closed"));
-        //     }
-        // });
-    
-        // tokio::spawn(async move {
-        //     loop {
-        //         option_early_return!(srp.receive().await, error!("SRP channel closed"));
-        //     }
-        // });
-    
-        // tokio::spawn(async move {
-        //     loop {
-        //         option_early_return!(dpp.receive().await, error!("DPP channel closed"));
-        //     }
-        // });
+        let mut peers = Vec::new();
+        for (peer, id) in initial_peers {
+            let public_endpoint = SocketAddrV4::from_str(&peer).unwrap();
+            let private_endpoint = SocketAddrV4::from_str(&peer).unwrap();
+            let peer = Peer::new(EndpointPair::new(public_endpoint, private_endpoint), id);
+            peers.push(peer);
+        }
 
-        // tokio::spawn(async move {
-        //     loop {
-        //         option_early_return!(smp.receive().await, error!("SMP channel closed"));
-        //     }
-        // });
+        let mut message_staging = MessageStaging::new(from_gateway, OutboundGateway::new(socket.clone(), myself), DiscoverPeerProcessor::new(), http_handler_rx, local_hosts, peers);
+        let outbound_channel_tx = message_staging.outbound_channel_tx().clone();
+        let outbound_channel_tx_clone = message_staging.outbound_channel_tx().clone();
+
+        if let Some(introducer) = introducer {
+            let message = Messagea::new_discover_peer_request(myself, introducer);
+            outbound_channel_tx_clone.send(message).unwrap();
+        }
+        else {
+            println!("No introducer");
+        }
+
+        let peer_ops = message_staging.peer_ops().clone();
+        if let Some(mut report_trigger) = report_trigger {
+            let (port, id) = (endpoint_pair.public_endpoint.port(), id);
+            tokio::spawn(async move {
+                report_trigger.recv().await;
+                let node_info = NodeInfo::new(lock!(peer_ops).peers_and_scores(), is_start, is_end, port, id.0);
+                fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
+                // if is_start {
+                //     println!("Starting distribution");
+                //     let dmessage = DistributionMessage::new(NumId(Uuid::new_v4().as_u128()), 2, String::from("Apple Cover Letter.pdf"));
+                //     dm_to_dh.send(dmessage).unwrap();
+                // }
+            });
+        }
+
+        for _ in 0..225 {
+            let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
+            tokio::spawn(async move {
+                loop {
+                    inbound_gateway.receive().await;
+                }
+            });
+        }
+
+        tokio::spawn(async move {
+            loop {
+                option_early_return!(message_staging.receive().await, error!("Staging channel closed"));
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
+                result_early_return!(outbound_channel_tx.send(Messagea::new_heartbeat()));
+            }
+        });
         
-        // let heartbeat_gateway = OutboundGateway::new(socket.clone(), myself, &key_store, peer_ops);
-        // tokio::spawn(async move {
-        //     loop {
-        //         sleep(HEARTBEAT_INTERVAL_SECONDS).await;
-        //         heartbeat_gateway.send_request(&mut Heartbeat::new(), None);
-        //     }
-        // });
-
-        // tokio::spawn(async move {
-        //     loop {
-        //         option_early_return!(dsrp.receive().await, error!("DSRP channel closed"));
-        //     }
-        // });
-
-        // tokio::spawn(async move {
-        //     loop {
-        //         option_early_return!(dsmp.receive().await, error!("DSMP channel closed"));
-        //     }
-        // });
-
-        // tokio::spawn(async move {
-        //     loop {
-        //         option_early_return!(distribution_handler.receive().await, error!("Distribution channel closed"));
-        //     }
-        // });
-
-        // if let Some(introducer) = introducer {
-        //     let mut message = DiscoverPeerMessage::new(DpMessageKind::INeedSome,
-        //         None,
-        //         NumId(Uuid::new_v4().as_u128()),
-        //         (peer::MAX_PEERS, peer::MAX_PEERS));
-        //     message.add_peer(introducer);
-        //     let inbound_message = InboundMessage::new(bincode::serialize(&message).unwrap(), SeparateParts::new(Sender::new(endpoint_pair.private_endpoint, id), message.id()));
-        //     socket.send_to(&bincode::serialize(&inbound_message).unwrap(), endpoint_pair.private_endpoint).await.unwrap();
-        // }
-        // else {
-        //     println!("No introducer");
-        // }
-
-        // for (peer, id) in initial_peers {
-        //     let public_endpoint = SocketAddrV4::from_str(&peer).unwrap();
-        //     let private_endpoint = SocketAddrV4::from_str(&peer).unwrap();
-        //     let peer = Peer::new(EndpointPair::new(public_endpoint, private_endpoint), id);
-        //     lock!(peer_ops_clone).add_initial_peer(peer);
-        // }
-
-        // if let Some(mut report_trigger) = report_trigger {
-        //     let (port, id) = (endpoint_pair.public_endpoint.port(), id);
-        //     tokio::spawn(async move {
-        //         report_trigger.recv().await;
-        //         let node_info = NodeInfo::new(peer_ops_clone, is_start, is_end, port, id.0);
-        //         fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
-        //         // if is_start {
-        //         //     println!("Starting distribution");
-        //         //     let dmessage = DistributionMessage::new(NumId(Uuid::new_v4().as_u128()), 2, String::from("Apple Cover Letter.pdf"));
-        //         //     dm_to_dh.send(dmessage).unwrap();
-        //         // }
-        //     });
-        // }
-        
-        // if is_start {
-        //     println!("Tcp listening");
-        //     let server_context = ServerContext::new(srm_to_srp, sm_to_smp, tx_to_smp);
-        //     http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
-        // }
-        // else {
-        //     future::pending::<()>().await;
-        // }
+        if is_start {
+            println!("Tcp listening");
+            let server_context = ServerContext::new(http_handler_tx);
+            http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
+        }
+        else {
+            future::pending::<()>().await;
+        }
     }
 
     pub fn read_node_info(value: NodeInfo) -> (u16, NumId, Vec<(String, NumId)>, bool, bool) {
@@ -215,14 +157,14 @@ pub struct NodeInfo {
     is_end: bool
 }
 impl NodeInfo {
-    pub fn new(peer_ops: Arc<Mutex<PeerOps>>, is_start: bool, is_end: bool, port: u16, id: u128) -> NodeInfo {
+    pub fn new(peers_and_scores: Vec<(EndpointPair, i32, NumId)>, is_start: bool, is_end: bool, port: u16, id: u128) -> NodeInfo {
         let port_str = port.to_string();
         let name = if is_start { String::from("START") } else if is_end { String::from("END") + &port_str } else { port_str };
         NodeInfo {
             name,
             port,
             id,
-            peers: lock!(peer_ops).peers_and_scores().into_iter().map(|(endpoint_pair, score, id)| (endpoint_pair.public_endpoint.port(), score, id.0)).collect(),
+            peers: peers_and_scores.into_iter().map(|(endpoint_pair, score, id)| (endpoint_pair.public_endpoint.port(), score, id.0)).collect(),
             is_start,
             is_end
         }
