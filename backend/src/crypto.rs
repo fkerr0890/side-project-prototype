@@ -2,7 +2,7 @@ use std::{sync::mpsc, fmt::Display};
 
 use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
 
-use crate::{lock, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TransientCollection}};
+use crate::{lock, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
@@ -32,7 +32,7 @@ impl KeyStore {
         if self.symmetric_keys.contains_key(&peer_id) {
             return None
         }
-        let is_new_key = self.private_keys.set_timer(peer_id, "Crypto:PrivateKeys");
+        let is_new_key = self.private_keys.set_timer(peer_id, TimerOptions::new(), "Crypto:PrivateKeys");
         let mut private_keys = lock!(self.private_keys.collection().map());
         if is_new_key {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
@@ -46,7 +46,7 @@ impl KeyStore {
     }
 
     pub fn transform<'a>(&'a mut self, peer_id: NumId, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
-        self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeysRenew");
+        self.symmetric_keys.set_timer(peer_id, TimerOptions::new(), "Crypto:SymmetricKeysRenew");
         let mut symmetric_keys = lock!(self.symmetric_keys.collection().map());
         let (aad, key_set) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_id).ok_or(Error::NoKey)?);
         match mode {
@@ -63,7 +63,7 @@ impl KeyStore {
     }
 
     pub fn agree(&mut self, peer_id: NumId, peer_public_key: Vec<u8>) -> Result<(), Error> {
-        if !self.symmetric_keys.set_timer(peer_id, "Crypto:SymmetricKeys") {
+        if !self.symmetric_keys.set_timer(peer_id, TimerOptions::new(), "Crypto:SymmetricKeys") {
             return Ok(())
         }
         assert!(!peer_public_key.is_empty());

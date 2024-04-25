@@ -4,7 +4,7 @@ use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, MessageDirection, Message, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirection, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -147,15 +147,16 @@ impl BreadcrumbService {
 
     pub fn clone(&self, ttl: Duration) -> Self { Self { breadcrumbs: TransientCollection::from_existing(&self.breadcrumbs, ttl) } }
 
-    pub fn try_add_breadcrumb(&mut self, id: NumId, early_return_context: Option<EarlyReturnContext>, dest: Option<Sender>) -> bool {
+    pub fn try_add_breadcrumb(&mut self, id: NumId, early_return_context: Option<EarlyReturnContext>, dest: Option<Sender>, ttl: Option<Duration>) -> bool {
         let is_new_key = if let Some(context) = early_return_context {
             let EarlyReturnContext(tx, message) = context;
-            self.breadcrumbs.set_timer_with_send_action(id, move || {
+            info!(dest = ?message.dest(), "fucker's dest: ");
+            self.breadcrumbs.set_timer_with_send_action(id, TimerOptions::new().with_ttl(ttl), move || {
                 result_early_return!(tx.send(message));
             }, "BreadcrumbService")
         }
         else {
-            self.breadcrumbs.set_timer(id, "BreadcrumbService")
+            self.breadcrumbs.set_timer(id, TimerOptions::new().with_ttl(ttl), "BreadcrumbService")
         };
         if is_new_key {
             lock!(self.breadcrumbs.collection().map()).insert(id, dest);

@@ -81,6 +81,17 @@ impl<K: Send + Hash + Eq + Clone + Debug> ArcCollection for ArcDeque<K> {
     fn pop(&mut self, _key: &K) -> Option<K> { lock!(self.0).pop_front() }
 }
 
+pub struct TimerOptions {
+    ttl: Option<Duration>,
+    override_early_return: bool
+}
+
+impl TimerOptions {
+    pub fn new() -> Self { Self { ttl: None, override_early_return: false } }
+    pub fn with_ttl(mut self, ttl: Option<Duration>) -> Self { self.ttl = ttl; self }
+    pub fn override_early_return(mut self, override_early_return: bool) -> Self { self.override_early_return = override_early_return; self }
+}
+
 type AbortHandles<T> = Option<Arc<Mutex<T>>>;
 pub struct TransientCollection<C: ArcCollection> {
     ttl: Duration,
@@ -114,10 +125,9 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
     }
 
     pub fn ttl(&self) -> Duration { self.ttl }
-    pub fn insert_key(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key.clone(), Some(key), None::<fn()>, key_label, false)}
-    pub fn set_timer(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key, None, None::<fn()>, key_label, false) }
-    pub fn set_timer_with_send_action(&mut self, key: C::K, send_action: impl FnOnce() + Send + 'static, key_label: &str) -> bool { self.start_timer(key, None, Some(send_action), key_label, false) }
-    pub fn set_timer_with_override(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key, None, None::<fn()>, key_label, true) }
+    pub fn insert_key(&mut self, key: C::K, key_label: &str) -> bool { self.start_timer(key.clone(), Some(key), None::<fn()>, key_label, TimerOptions::new())}
+    pub fn set_timer(&mut self, key: C::K, options: TimerOptions, key_label: &str) -> bool { self.start_timer(key, None, None::<fn()>, key_label, options) }
+    pub fn set_timer_with_send_action(&mut self, key: C::K, options: TimerOptions, send_action: impl FnOnce() + Send + 'static, key_label: &str) -> bool { self.start_timer(key, None, Some(send_action), key_label, options) }
 
     fn remove_existing_handle(&mut self, key: &C::K, value: Option<C::K>) -> (bool, bool) {
         if self.collection.contains_key(key) {
@@ -136,17 +146,17 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
         }
     }
 
-    fn start_timer(&mut self, key: C::K, value: Option<C::K>, send_action: Option<impl FnOnce() + Send + 'static>, _key_label: &str, override_early_return: bool) -> bool {
-        // println!("Creating {:?}, label = {key_label}", key);
+    fn start_timer(&mut self, key: C::K, value: Option<C::K>, send_action: Option<impl FnOnce() + Send + 'static>, key_label: &str, options: TimerOptions) -> bool {
+        println!("Creating {:?}, label = {key_label}", key);
         let (contains_key, early_return) = self.remove_existing_handle(&key, value);
-        if early_return && !override_early_return {
-            // println!("No recreate {:?}, label = {key_label}", key);
+        if early_return && !options.override_early_return {
+            println!("No recreate {:?}, label = {key_label}", key);
             return !contains_key;
         }
-        let (mut collection, ttl, key_clone) = (self.collection.clone(), self.ttl, key.clone());
+        let (mut collection, ttl, key_clone, key_label) = (self.collection.clone(), if let Some(ttl) = options.ttl { ttl } else { self.ttl }, key.clone(), key_label.to_owned());
         let abort_handle = tokio::spawn(async move {
             time::sleep(ttl).await;
-            // println!("Removing {:?}, label = {key_label}", key_clone);
+            println!("Removing {:?}, label = {key_label}", key_clone);
             if let Some(send_action) = send_action {
                 send_action();
                 tokio::spawn(async move {
@@ -170,10 +180,11 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
 
 impl<K: Send + Hash + Eq + Clone + Debug + 'static, V: Send + 'static> TransientCollection<ArcMap<K, V>> {
     pub fn insert(&mut self, key: K, value: V, key_label: &str) -> bool {
-        let is_new_key = self.set_timer(key.clone(), key_label);
+        let is_new_key = self.set_timer(key.clone(), TimerOptions::new(), key_label);
         if !is_new_key {
             return false;
         }
+        println!("Inserting from special insert");
         lock!(self.collection.map()).insert(key, value);
         true
     }
