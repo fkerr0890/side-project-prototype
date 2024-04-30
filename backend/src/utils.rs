@@ -146,17 +146,17 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
         }
     }
 
-    fn start_timer(&mut self, key: C::K, value: Option<C::K>, send_action: Option<impl FnOnce() + Send + 'static>, key_label: &str, options: TimerOptions) -> bool {
-        println!("Creating {:?}, label = {key_label}", key);
+    fn start_timer(&mut self, key: C::K, value: Option<C::K>, send_action: Option<impl FnOnce() + Send + 'static>, _key_label: &str, options: TimerOptions) -> bool {
+        // println!("Creating {:?}, label = {key_label}", key);
         let (contains_key, early_return) = self.remove_existing_handle(&key, value);
         if early_return && !options.override_early_return {
-            println!("No recreate {:?}, label = {key_label}", key);
+            // println!("No recreate {:?}, label = {key_label}", key);
             return !contains_key;
         }
-        let (mut collection, ttl, key_clone, key_label) = (self.collection.clone(), if let Some(ttl) = options.ttl { ttl } else { self.ttl }, key.clone(), key_label.to_owned());
+        let (mut collection, ttl, key_clone) = (self.collection.clone(), if let Some(ttl) = options.ttl { ttl } else { self.ttl }, key.clone());
         let abort_handle = tokio::spawn(async move {
             time::sleep(ttl).await;
-            println!("Removing {:?}, label = {key_label}", key_clone);
+            // println!("Removing {:?}, label = {key_label}", key_clone);
             if let Some(send_action) = send_action {
                 send_action();
                 tokio::spawn(async move {
@@ -184,7 +184,6 @@ impl<K: Send + Hash + Eq + Clone + Debug + 'static, V: Send + 'static> Transient
         if !is_new_key {
             return false;
         }
-        println!("Inserting from special insert");
         lock!(self.collection.map()).insert(key, value);
         true
     }

@@ -81,7 +81,6 @@ impl MessageStaging {
         let (message_bytes, suffix) = message_bytes.split_at(message_bytes.len() - aead::NONCE_LEN - 16);
         let (peer_id_bytes, nonce) = suffix.split_at(suffix.len() - aead::NONCE_LEN);
         let peer_id = NumId(u128::from_be_bytes(peer_id_bytes.try_into().unwrap()));
-        info!(%peer_id, ?nonce);
         let mut message_bytes = message_bytes.to_vec();
         message_bytes = self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)).unwrap();
         let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
@@ -89,7 +88,6 @@ impl MessageStaging {
             warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
             return None;
         }
-        info!(unconfirmed_peers = ?self.unconfirmed_peers.collection().map().lock().unwrap());
         if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
             // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
             self.add_new_peer(Peer::new(endpoint_pair, inbound_message.separate_parts().sender().id));
@@ -157,6 +155,7 @@ impl MessageStaging {
         peers.extend(self.stream_session_manager.get_all_destinations_source_retrieval().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_source_distribution().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_sink().into_iter());
+        peers.remove(&self.outbound_gateway.myself);
         tracing::Span::current().record("peers", format!("{:?}", peers));
         self.send_checked(peers, message, true).await;
     }
@@ -196,9 +195,6 @@ impl MessageStaging {
     async fn send_checked(&mut self, dests: impl IntoIterator<Item = Peer> + Debug, mut message: Message, to_be_chunked: bool) -> Option<Message> {
         let mut remaining_dests = dests.into_iter();
         while let Some(dest) = remaining_dests.next() {
-            if dest.id == self.outbound_gateway.myself.id {
-                continue;
-            }
             message.replace_dest(dest);
             message.clear_senders();
             if !self.check_key_agreement(&message).await {
@@ -280,18 +276,23 @@ impl MessageStaging {
     }
 
     fn get_direction(&mut self, message: &mut Message) -> PropagationDirection {
+        if let MetadataKind::Discover(metadata) = message.metadata() {
+            if let DpMessageKind::IveGotSome = metadata.kind {
+                for peer in metadata.peer_list.iter() {
+                    self.add_new_peer(*peer);
+                }
+                return PropagationDirection::Stop;
+            }
+        }
+        if let MessageDirection::Response = message.direction() {
+            return PropagationDirection::Reverse;
+        }
         let mut sender = message.only_sender();
         let (origin, early_return_context, ttl, reverse) = match message.metadata_mut() {
             MetadataKind::Search(metadata) => {
                 if search::continue_propagating(self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()) { (metadata.origin, None, None, false) } else { (metadata.origin, None, None, true) }
             },
             MetadataKind::Discover(metadata) => {
-                if let DpMessageKind::IveGotSome = metadata.kind {
-                    for peer in metadata.peer_list.iter() {
-                        self.add_new_peer(*peer);
-                    }
-                    return PropagationDirection::Stop;
-                }
                 if sender.is_some_and(|s| s.id == metadata.origin.id) { sender = None; }
                 metadata.peer_list.push(self.outbound_gateway.myself);                
                 if self.discover_peer_processor.continue_propagating(metadata) { (metadata.origin, Some(EarlyReturnContext(self.outbound_channel_tx.clone(), message.clone())), Some(DPP_TTL_MILLIS), false) } else { (metadata.origin, None, Some(DPP_TTL_MILLIS), true) }
@@ -299,9 +300,6 @@ impl MessageStaging {
             _ => return PropagationDirection::Final
         };
 
-        if let MessageDirection::Response = message.direction() {
-            return PropagationDirection::Reverse;
-        }
         if !self.breadcrumb_service.try_add_breadcrumb(message.id(), early_return_context, sender, ttl) {
             return PropagationDirection::Stop;
         }
@@ -324,7 +322,6 @@ impl MessageStaging {
                 match kind {
                     SearchMetadataKind::Retrieval => {
                         if !self.stream_session_manager.add_destination_source_retrieval(&host_name, sender) { return; }
-                        info!(initial_http_requests = ?lock!(self.initial_http_requests.collection().map()));
                         let initial_http_request = self.initial_http_requests.pop(&id).unwrap();
                         self.send_http_request(initial_http_request, &host_name).await;
                     },
@@ -352,7 +349,7 @@ impl MessageStaging {
                     },
                     StreamPayloadKind::Response(payload) => {
                         self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
-                        return self.to_http_handlers.pop(&id).unwrap().send(payload).unwrap();
+                        return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
                     },
                     StreamPayloadKind::DistributionRequest(bytes) => {
                         if !self.stream_session_manager.sink_active_distribution(&metadata.host_name) {
@@ -410,7 +407,9 @@ impl MessageStaging {
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
     fn add_new_peer(&mut self, peer: Peer) {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
-        lock!(self.peer_ops).add_peer(peer, DiscoverPeerProcessor::get_score(self.outbound_gateway.myself.endpoint_pair.public_endpoint, peer_endpoint))
+        let mut peers = lock!(self.peer_ops);
+        peers.add_peer(peer, DiscoverPeerProcessor::get_score(self.outbound_gateway.myself.endpoint_pair.public_endpoint, peer_endpoint));
+        info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
     }
 
     #[instrument(level = "trace", skip_all, fields(message.peer_id))]
@@ -421,7 +420,6 @@ impl MessageStaging {
             MessageDirection::Response => self.cached_outbound_messages.pop(&peer_id)
         };
         result_early_return!(self.key_store.agree(peer_id, public_key));
-        info!(%peer_id);
         if let Some(cached_messages) = cached_messages {
             debug!("Sending cached outbound messages");
             for (message, remaining_dests) in cached_messages {

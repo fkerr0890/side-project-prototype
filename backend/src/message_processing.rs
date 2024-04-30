@@ -9,7 +9,7 @@ use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAg
 pub use self::discover::DiscoverPeerProcessor;
 
 pub const SEARCH_TIMEOUT_SECONDS: Duration = Duration::from_secs(30);
-pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(250);
+pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(500);
 pub const SRP_TTL_SECONDS: Duration = Duration::from_secs(30);
 pub const ACTIVE_SESSION_TTL_SECONDS: Duration = Duration::from_secs(600);
 pub const HEARTBEAT_INTERVAL_SECONDS: Duration = Duration::from_secs(10);
@@ -107,7 +107,7 @@ impl OutboundGateway {
     }
 
     fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_chunked: bool, key_store: &mut KeyStore) -> Option<Vec<Vec<u8>>> {
-        let chunk_size = if to_be_chunked { 975 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { bytes.len() };
+        let chunk_size = if to_be_chunked { 800 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { bytes.len() };
         let chunks = bytes.chunks(chunk_size);
         let num_chunks = chunks.len();
         let (mut messages, errors): MessagesErrors = chunks
@@ -150,7 +150,6 @@ impl BreadcrumbService {
     pub fn try_add_breadcrumb(&mut self, id: NumId, early_return_context: Option<EarlyReturnContext>, dest: Option<Sender>, ttl: Option<Duration>) -> bool {
         let is_new_key = if let Some(context) = early_return_context {
             let EarlyReturnContext(tx, message) = context;
-            info!(dest = ?message.dest(), "fucker's dest: ");
             self.breadcrumbs.set_timer_with_send_action(id, TimerOptions::new().with_ttl(ttl), move || {
                 result_early_return!(tx.send(message));
             }, "BreadcrumbService")
