@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::{http::{self, SerdeHttpRequest}, message::{MessageDirection, Message, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return};
 
@@ -100,7 +100,7 @@ impl StreamSessionManager {
             id,
             None,
             MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::Response(response), host_name)),
-            MessageDirection::Response
+            MessageDirection::OneHop
         )
     }
 
@@ -114,7 +114,7 @@ impl StreamSessionManager {
             id,
             None,
             MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionResponse(result), host_name)),
-            MessageDirection::Response
+            MessageDirection::OneHop
         )
     }
 

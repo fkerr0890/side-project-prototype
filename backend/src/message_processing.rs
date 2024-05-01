@@ -4,7 +4,7 @@ use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirection, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -96,7 +96,7 @@ impl OutboundGateway {
         }
     }
 
-    pub async fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirection) {
+    pub async fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirectionAgreement) {
         let serialized = result_early_return!(bincode::serialize(&KeyAgreementMessage::new(public_key, self.myself.id, direction)));
         // if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
         //     result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);

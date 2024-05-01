@@ -95,7 +95,7 @@ impl Node {
         tokio::spawn(async move {
             loop {
                 sleep(HEARTBEAT_INTERVAL_SECONDS).await;
-                result_early_return!(outbound_channel_tx.send(Message::new_heartbeat()));
+                result_early_return!(outbound_channel_tx.send(Message::new_heartbeat(Peer::default())));
             }
         });
         

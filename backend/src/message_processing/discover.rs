@@ -43,16 +43,10 @@ impl DiscoverPeerProcessor {
     }
 
     #[instrument(level = "trace", skip_all, fields(hop_count = ?metadata.hop_count))]
-    pub fn stage_message(&mut self, id: NumId, metadata: DiscoverMetadata, peer_len_curr_max: usize) -> Option<Message> {
-        let target_num_peers = metadata.hop_count.1;
-        let peers_len = metadata.peer_list.len();
-        if peers_len == target_num_peers as usize {
-            return Some(Message::new(metadata.origin, id, None, MetadataKind::Discover(metadata), MessageDirection::Response));
-        }
-        if peers_len > peer_len_curr_max {
+    pub fn stage_message(&mut self, id: NumId, metadata: DiscoverMetadata, peer_len_curr_max: usize) {
+        if metadata.peer_list.len() > peer_len_curr_max {
             lock!(self.message_staging.collection().map()).insert(id, metadata);
         }
-        None
     }
 
     #[instrument(level = "trace", skip(message_staging))]

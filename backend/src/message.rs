@@ -101,9 +101,9 @@ impl Message {
         )
     }
 
-    pub fn new_heartbeat() -> Self {
+    pub fn new_heartbeat(dest: Peer) -> Self {
         Self::new(
-            Peer::default(),
+            dest,
             NumId(Uuid::new_v4().as_u128()),
             None,
             MetadataKind::Heartbeat,
@@ -143,6 +143,13 @@ impl Message {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum MessageDirection {
+    Request,
+    Response,
+    OneHop
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum MessageDirectionAgreement {
     Request,
     Response
 }
@@ -236,11 +243,11 @@ pub enum StreamPayloadKind {
 pub struct KeyAgreementMessage {
     pub public_key: Vec<u8>,
     pub peer_id: NumId,
-    pub direction: MessageDirection
+    pub direction: MessageDirectionAgreement
 }
 
 impl KeyAgreementMessage {
-    pub fn new(public_key: Vec<u8>, peer_id: NumId, direction: MessageDirection) -> Self {
+    pub fn new(public_key: Vec<u8>, peer_id: NumId, direction: MessageDirectionAgreement) -> Self {
         Self { public_key, peer_id, direction }
     }
 }

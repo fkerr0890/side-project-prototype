@@ -170,7 +170,7 @@ async fn handle_request(context: ServerContext, request: Request<Body>) -> Resul
         NumId(Uuid::new_v4().as_u128()),
         None,
         MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::Request(request), host_name.clone())),
-        MessageDirection::Request);
+        MessageDirection::OneHop);
     let (tx, mut rx) = mpsc::unbounded_channel();
     context.to_staging.send((sm, tx)).ok();
     let response = match rx.recv().await {

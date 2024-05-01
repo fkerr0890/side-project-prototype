@@ -13,6 +13,6 @@ pub fn continue_propagating(myself: Peer, metadata: &SearchMetadata, local_hosts
     if !should_stop {
         return true;
     }
-    debug!("Stopped propagating search request");
+    debug!(?myself, "Stopped propagating search request");
     false
 }
