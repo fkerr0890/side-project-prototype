@@ -24,14 +24,14 @@ async fn basic() {
         .with_max_level(Level::DEBUG).init();
     // console_subscriber::init();
 
-    let regenerate: bool = false;
+    let regenerate: bool = true;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();
     
         let mut introducers: Vec<(Peer, mpsc::Sender<()>)> = Vec::new();
-        let num_hosts = 1;
-        let num_nodes: u16 = 2;
+        let num_hosts = 10;
+        let num_nodes: u16 = 30;
         let mut rng = rand::thread_rng();
         let start = (0..num_nodes).choose(&mut rng).unwrap();
         let host_indices = HashSet::<u16>::from_iter((0..num_nodes).choose_multiple(&mut rng, num_hosts).into_iter());

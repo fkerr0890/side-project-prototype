@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, warn};
 
 use crate::{http::{self, SerdeHttpRequest}, message::{MessageDirection, Message, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return};
 
@@ -43,7 +43,7 @@ impl StreamSessionManager {
 
     pub fn get_destinations_sink(&mut self, host_name: &str) -> HashSet<Peer> { self.sinks.get_mut(host_name).unwrap().unwrap_retrieval().clone() }
 
-    pub fn get_all_destinations_sink(&mut self) -> Vec<Peer> { self.sinks.values_mut().flat_map(|s| s.unwrap_retrieval().clone()).collect() }
+    pub fn get_all_destinations_sink(&mut self) -> Vec<Peer> { self.sinks.values().filter_map(|s| if let StreamSink::Retrieval(dests) = s { Some(dests.clone()) } else { None }).flatten().collect() }
 
     pub fn add_destination_source_retrieval(&mut self, host_name: &str, dest: Peer) -> bool {
         self.sources_retrieval.get_mut(host_name).unwrap().active_dests.insert(dest)

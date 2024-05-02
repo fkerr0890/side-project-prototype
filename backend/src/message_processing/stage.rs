@@ -4,7 +4,7 @@ use tokio::{select, sync::mpsc, time::sleep};
 use tracing::{debug, field, info, instrument, trace, warn};
 use crate::{crypto::{Direction, KeyStore}, http::SerdeHttpResponse, lock, message::{DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
-use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
+use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
 
 pub struct MessageStaging {
     from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
@@ -147,6 +147,9 @@ impl MessageStaging {
                 return;
             }
         }
+        if let MetadataKind::Distribute(metadata) = message.metadata() {
+            return self.handle_distribution_request(message.id(), metadata.clone()).await;
+        }
         self.send_response(message).await;
     }
 
@@ -195,7 +198,7 @@ impl MessageStaging {
         }
     }
 
-    #[instrument(level = "trace", skip_all, fields(myself = %self.outbound_gateway.myself.id, ?dests))]
+    #[instrument(level = "trace", skip_all, fields(myself = %self.outbound_gateway.myself.id, ?message))]
     async fn send_checked(&mut self, dests: impl IntoIterator<Item = Peer> + Debug, mut message: Message, to_be_chunked: bool) -> Option<Message> {
         let mut remaining_dests = dests.into_iter();
         while let Some(dest) = remaining_dests.next() {
@@ -257,20 +260,22 @@ impl MessageStaging {
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
     async fn handle_distribution_request(&mut self, id: NumId, metadata: DistributeMetadata) {
         if !self.stream_session_manager.host_installed(&metadata.host_name) {
+            warn!("Blocked distribution request, reason: I do not host this app");
             return;
         }
         if self.stream_session_manager.source_active_distribution(&metadata.host_name) {
-            self.send_distribution_request(None, metadata.host_name).await;
+            return;
         }
-        else {
-            self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), self.outbound_channel_tx.clone(), id, metadata.hop_count).await;
-            let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name, SearchMetadataKind::Distribution));
-            self.breadcrumb_service.try_add_breadcrumb(id, None, None, None);
-            self.send_request(search_message).await;
-        }
+        self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), self.outbound_channel_tx.clone(), id, metadata.hop_count).await;
+        let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name, SearchMetadataKind::Distribution));
+        self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DISTRIBUTION_TTL_SECONDS));
+        self.send_request(search_message).await;
     }
 
     async fn send_distribution_request(&mut self, received_id: Option<NumId>, host_name: String) {
+        if let Some(received_id) = received_id {
+            self.stream_session_manager.finalize_resource_distribution(&host_name, &received_id);
+        }
         let file = self.stream_session_manager.file_mut(&host_name);
         let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(received_id).await);
         let dests = self.stream_session_manager.get_destinations_source_distribution(&host_name);
@@ -370,9 +375,11 @@ impl MessageStaging {
                             DistributionResponse::Continue => self.send_distribution_request(Some(id), metadata.host_name).await,
                             DistributionResponse::InstallError => panic!(),
                             DistributionResponse::InstallOk => {
+                                self.stream_session_manager.finalize_resource_distribution(&metadata.host_name, &id);
                                 let (mut hop_count, distribution_id) = self.stream_session_manager.curr_hop_count_and_distribution_id(&metadata.host_name);
                                 hop_count -= 1;
                                 if hop_count <= 0 {
+                                    info!(host_name = metadata.host_name, "Distribution finished");
                                     return;
                                 }
                                 let distribution_message = Message::new(
