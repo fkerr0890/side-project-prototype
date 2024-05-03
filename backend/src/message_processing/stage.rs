@@ -21,7 +21,7 @@ pub struct MessageStaging {
     outbound_channel_rx: mpsc::UnboundedReceiver<Message>,
     to_http_handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>>,
     from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
-    initial_http_requests: TransientCollection<ArcMap<NumId, Message>>
+    cached_stream_messages: TransientCollection<ArcMap<NumId, Message>>
 }
 
 impl MessageStaging {
@@ -53,15 +53,16 @@ impl MessageStaging {
             stream_session_manager: StreamSessionManager::new(local_hosts),
             to_http_handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             from_http_handlers,
-            initial_http_requests: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new())
+            cached_stream_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new())
         }
     }
 
     pub async fn receive(&mut self) -> EmptyOption {
         let (sender_addr, message_bytes) = select! {
             message = self.from_inbound_gateway.recv() => message?,
-            message = self.outbound_channel_rx.recv() => return Some(self.process_outbound_message(message?).await),
-            message = self.from_http_handlers.recv() => return Some(self.handle_http_request(message?).await)
+            message = self.outbound_channel_rx.recv() => return Some(self.process_user_message(message?).await),
+            message = self.from_http_handlers.recv() => return Some(self.handle_http_request(message?).await),
+            id = self.stream_session_manager.follow_up_rx().recv() => return Some(self.process_follow_up(id?).await)
         };
         if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes.1) {
             return Some(self.handle_key_agreement(message, sender_addr).await);
@@ -122,14 +123,8 @@ impl MessageStaging {
     }
 
     #[instrument(level = "trace", skip_all, fields(dest = %message.dest().id, id = %message.id(), metadata = ?message.metadata(), myself = %self.outbound_gateway.myself.id))]
-    async fn process_outbound_message(&mut self, mut message: Message) {
+    async fn process_user_message(&mut self, mut message: Message) {
         let id = message.id();
-        if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name}) = message.metadata() {
-            return { self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await; }
-        }
-        if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::DistributionRequest(_), host_name }) = message.metadata() {
-            return { self.send_checked(self.stream_session_manager.get_destinations_source_distribution(host_name), message, true).await; }
-        }
         if let MetadataKind::Heartbeat = message.metadata() {
             return self.process_outbound_heartbeat(message).await;
         }
@@ -151,6 +146,20 @@ impl MessageStaging {
             return self.handle_distribution_request(message.id(), metadata.clone()).await;
         }
         self.send_response(message).await;
+    }
+
+    async fn process_follow_up(&mut self, id: NumId) {
+        let message = option_early_return!(self.cached_stream_messages.pop(&id));
+        let message = if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name}) = message.metadata() {
+            option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await)
+        }
+        else if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::DistributionRequest(_), host_name }) = message.metadata() {
+            option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_distribution(host_name), message, true).await)
+        }
+        else {
+            panic!()
+        };
+        self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
     }
 
     #[instrument(level = "trace", skip_all, fields(peers = field::Empty))]
@@ -242,19 +251,17 @@ impl MessageStaging {
         let (message, tx) = from_http_handler;
         let (id, host_name) = (message.id(), message.metadata().host_name().clone());
         self.to_http_handlers.insert(id, tx, "Staging:ToHttpHandlers");
-        if self.stream_session_manager.source_active_retrieval(&host_name) {
-            self.send_http_request(message, &host_name).await;
+        let message = if self.stream_session_manager.source_active_retrieval(&host_name) {
+            self.stream_session_manager.push_resource_retrieval(&host_name, id);
+            option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(&host_name), message, true).await)
         } else {
-            self.stream_session_manager.new_source_retrieval(host_name.clone(), self.outbound_channel_tx.clone());
+            self.stream_session_manager.new_source_retrieval(host_name.clone());
+            self.stream_session_manager.push_resource_retrieval(&host_name, id);
             let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name.clone(), SearchMetadataKind::Retrieval));
-            self.initial_http_requests.insert(id, message, "Staging:InitialHttpRequests");
             self.send_outbound_message(search_message).await;
-        }
-    }
-
-    async fn send_http_request(&mut self, message: Message, host_name: &str) {
-        let message = option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await);
-        self.stream_session_manager.push_resource(message);
+            message
+        };
+        self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
@@ -266,7 +273,7 @@ impl MessageStaging {
         if self.stream_session_manager.source_active_distribution(&metadata.host_name) {
             return;
         }
-        self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), self.outbound_channel_tx.clone(), id, metadata.hop_count).await;
+        self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), id, metadata.hop_count).await;
         let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name, SearchMetadataKind::Distribution));
         self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DISTRIBUTION_TTL_SECONDS));
         self.send_request(search_message).await;
@@ -278,10 +285,11 @@ impl MessageStaging {
         }
         let file = self.stream_session_manager.file_mut(&host_name);
         let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(received_id).await);
+        self.stream_session_manager.push_resource_distribution(&host_name, new_id);
         let dests = self.stream_session_manager.get_destinations_source_distribution(&host_name);
         let message = Message::new(Peer::default(), new_id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), host_name)), MessageDirection::OneHop);
         let message = option_early_return!(self.send_checked(dests, message, true).await);
-        self.stream_session_manager.push_resource(message)
+        self.cached_stream_messages.insert(new_id, message, "Staging:CachedStreamMessages");
     }
 
     fn get_direction(&mut self, message: &mut Message) -> PropagationDirection {
@@ -329,8 +337,16 @@ impl MessageStaging {
                 match kind {
                     SearchMetadataKind::Retrieval => {
                         if !self.stream_session_manager.add_destination_source_retrieval(&host_name, sender) { return; }
-                        let initial_http_request = self.initial_http_requests.pop(&id).unwrap();
-                        self.send_http_request(initial_http_request, &host_name).await;
+                        let Some(request) = self.cached_stream_messages.pop(&id) else {
+                            debug!("Cached stream retrieval message unavailable, checking for pending outbound message");
+                            let mut cached_outbound_messages = lock!(self.cached_outbound_messages.collection().map());
+                            let cached_messages = option_early_return!(cached_outbound_messages.get_mut(&sender.id));
+                            let cached_message = option_early_return!(cached_messages.iter_mut().find(|m| m.0.id() == id));
+                            cached_message.1.push(sender);
+                            return;
+                        };
+                        let request = option_early_return!(self.send_checked(vec![sender], request, true).await);
+                        self.cached_stream_messages.insert(id, request, "Staging:CachedStreamMessages");
                     },
                     SearchMetadataKind::Distribution => {
                         if !self.stream_session_manager.add_destination_source_distribution(&host_name, Peer::from(sender)) { return; }
@@ -362,6 +378,7 @@ impl MessageStaging {
                     },
                     StreamPayloadKind::Response(payload) => {
                         self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
+                        self.cached_stream_messages.pop(&id);
                         return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
                     },
                     StreamPayloadKind::DistributionRequest(bytes) => {
@@ -441,7 +458,7 @@ impl MessageStaging {
                 let (to_be_chunked, is_stream_request) = message.to_be_chunked();
                 let message = option_early_return!(self.send_checked(remaining_dests, message, to_be_chunked).await);
                 if is_stream_request {
-                    self.stream_session_manager.push_resource(message);
+                    self.cached_stream_messages.insert(message.id(), message, "Staging:CachedStreamMessages");
                 }
             }
         }

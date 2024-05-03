@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{http::{self, SerdeHttpRequest}, message::{MessageDirection, Message, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return};
 
@@ -12,16 +12,21 @@ pub struct StreamSessionManager {
     sources_retrieval: HashMap<String, StreamSource>,
     sources_distribution: HashMap<String, StreamSourceDistribution>,
     sinks: HashMap<String, StreamSink>,
-    local_hosts: HashMap<String, SocketAddrV4>
+    local_hosts: HashMap<String, SocketAddrV4>,
+    follow_up_tx: mpsc::UnboundedSender<NumId>,
+    follow_up_rx: mpsc::UnboundedReceiver<NumId>
 }
 
 impl StreamSessionManager {
     pub fn new(local_hosts: HashMap<String, SocketAddrV4>) -> Self {
+        let (follow_up_tx, follow_up_rx) = mpsc::unbounded_channel();
         Self {
             sources_retrieval: HashMap::new(),
             sources_distribution: HashMap::new(),
             sinks: HashMap::new(),
-            local_hosts
+            local_hosts,
+            follow_up_tx,
+            follow_up_rx
         }
     }
 
@@ -59,13 +64,13 @@ impl StreamSessionManager {
 
     pub fn host_installed(&self, host_name: &str) -> bool { self.local_hosts.contains_key(host_name) }
 
-    pub fn new_source_retrieval(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Message>) {
-        assert!(self.sources_retrieval.insert(host_name, StreamSource::new(outbound_channel, 5)).is_none());
+    pub fn new_source_retrieval(&mut self, host_name: String) {
+        assert!(self.sources_retrieval.insert(host_name, StreamSource::new(self.follow_up_tx.clone(), 5)).is_none());
     }
 
-    pub async fn new_source_distribution(&mut self, host_name: String, outbound_channel: mpsc::UnboundedSender<Message>, id: NumId, hop_count: u16) {
+    pub async fn new_source_distribution(&mut self, host_name: String, id: NumId, hop_count: u16) {
         let file = ChunkedFileHandler::new(&host_name).await;
-        assert!(self.sources_distribution.insert(host_name, StreamSourceDistribution::new(StreamSource::new(outbound_channel, 5), id, hop_count, file).await).is_none());
+        assert!(self.sources_distribution.insert(host_name, StreamSourceDistribution::new(StreamSource::new(self.follow_up_tx.clone(), 5), id, hop_count, file).await).is_none());
     }
 
     pub fn new_sink_retrieval(&mut self, host_name: String) {
@@ -76,13 +81,9 @@ impl StreamSessionManager {
         assert!(self.sinks.insert(host_name, StreamSink::Distribution(DistributionStreamSink::new())).is_none());
     }
 
-    pub fn push_resource(&mut self, message: Message) {
-        match message.metadata() {
-            MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name }) => self.sources_retrieval.get_mut(host_name).unwrap().push_resource(message),
-            MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::DistributionRequest(_), host_name }) => self.sources_distribution.get_mut(host_name).unwrap().stream_source.push_resource(message),
-            _ => panic!()
-        }
-    }
+    pub fn push_resource_retrieval(&mut self, host_name: &str, id: NumId) { self.sources_retrieval.get_mut(host_name).unwrap().push_resource(id) }
+
+    pub fn push_resource_distribution(&mut self, host_name: &str, id: NumId) { self.sources_distribution.get_mut(host_name).unwrap().stream_source.push_resource(id) }
 
     pub fn finalize_resource_retrieval(&mut self, host_name: &str, id: &NumId) {
         self.sources_retrieval.get_mut(host_name).unwrap().finalize_resource(id);
@@ -126,54 +127,52 @@ impl StreamSessionManager {
         let source = self.sources_distribution.get(host_name).unwrap();
         (source.hop_count, source.id)
     }
+
+    pub fn follow_up_rx(&mut self) -> &mut mpsc::UnboundedReceiver<NumId> { &mut self.follow_up_rx }
 }
 struct StreamSource {
     active_dests: HashSet<Peer>,
     resource_queue: VecDeque<NumId>,
     abort_handlers: HashMap<NumId, AbortHandle>,
-    outbound_channel: mpsc::UnboundedSender<Message>,
-    cached_size_max: usize
+    cached_size_max: usize,
+    follow_up_tx: mpsc::UnboundedSender<NumId>
 }
 
 impl StreamSource {
-    fn new(outbound_channel: mpsc::UnboundedSender<Message>, cached_size_max: usize) -> Self {
+    fn new(follow_up_tx: mpsc::UnboundedSender<NumId>, cached_size_max: usize) -> Self {
         assert!(cached_size_max >= 1);
         Self {
             active_dests: HashSet::new(),
             resource_queue: VecDeque::new(),
             abort_handlers: HashMap::new(),
-            outbound_channel,
+            follow_up_tx,
             cached_size_max
         }
     }
 
-    fn push_resource(&mut self, message: Message) {
-        let id = message.id();
-        if self.abort_handlers.contains_key(&id) {
-            warn!(id = %message.id(), "ActiveSessionInfo: Attempted to insert duplicate request");
-            return;
-        }
+    fn push_resource(&mut self, id: NumId) {
+        assert!(!self.abort_handlers.contains_key(&id));
         if self.resource_queue.len() == self.cached_size_max {
             self.abort_handlers.remove(&self.resource_queue.pop_front().unwrap()).unwrap().abort();
         }
         self.resource_queue.push_back(id);
-        let abort_handle = self.start_follow_ups(message);
+        let abort_handle = self.start_follow_ups(id);
         self.abort_handlers.insert(id, abort_handle);
     }
 
-    fn start_follow_ups(&self, message: Message) -> AbortHandle {
-        let outbound_channel = self.outbound_channel.clone();
+    fn start_follow_ups(&self, id: NumId) -> AbortHandle {
+        let outbound_channel = self.follow_up_tx.clone();
         tokio::spawn(async move {
             let num_retries = SRP_TTL_SECONDS.as_secs() / 2;
             for _ in 0..num_retries {
                 sleep(Duration::from_secs(2)).await;
-                result_early_return!(outbound_channel.send(message.clone()));
+                result_early_return!(outbound_channel.send(id));
             }
         }).abort_handle()
     }
 
     fn finalize_resource(&mut self, id: &NumId) {
-        let  abort_handler = option_early_return!(self.abort_handlers.remove(id));
+        let abort_handler = option_early_return!(self.abort_handlers.remove(id));
         abort_handler.abort();
         let index = self.resource_queue.iter().enumerate().filter(|(_, curr_id) | *curr_id == id).last().unwrap().0;
         debug!(id = %self.resource_queue.remove(index).unwrap(), "Popped from queue");

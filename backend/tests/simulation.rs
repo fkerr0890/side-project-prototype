@@ -24,7 +24,7 @@ async fn basic() {
         .with_max_level(Level::DEBUG).init();
     // console_subscriber::init();
 
-    let regenerate: bool = true;
+    let regenerate: bool = false;
     if regenerate {
         fs::remove_dir_all("../peer_info").await.unwrap();
         fs::create_dir("../peer_info").await.unwrap();
