@@ -1,6 +1,6 @@
-use std::{sync::mpsc, fmt::Display};
+use std::fmt::Display;
 
-use ring::{aead::{self, BoundKey, AES_256_GCM}, agreement, digest, hkdf::{self, KeyType, HKDF_SHA256}, rand::SystemRandom};
+use ring::{aead, agreement, digest, hkdf, rand::{SecureRandom, SystemRandom}};
 
 use crate::{lock, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
@@ -10,7 +10,7 @@ const INITIAL_SALT: [u8; 20] = [
     ];
 pub struct KeyStore {
     private_keys: TransientCollection<ArcMap<NumId, agreement::EphemeralPrivateKey>>,
-    symmetric_keys: TransientCollection<ArcMap<NumId, KeySet>>,
+    symmetric_keys: TransientCollection<ArcMap<NumId, aead::LessSafeKey>>,
     rng: SystemRandom
 }
 impl Default for KeyStore {
@@ -48,15 +48,17 @@ impl KeyStore {
     pub fn transform<'a>(&'a mut self, peer_id: NumId, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
         self.symmetric_keys.set_timer(peer_id, TimerOptions::new(), "Crypto:SymmetricKeysRenew");
         let mut symmetric_keys = lock!(self.symmetric_keys.collection().map());
-        let (aad, key_set) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_id).ok_or(Error::NoKey)?);
+        let (aad, key) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_id).ok_or(Error::NoKey)?);
         match mode {
             Direction::Encode => {
-                key_set.sealing_key.seal_in_place_append_tag(aad, payload)?;
-                key_set.nonce_rx.recv().map(|nonce| nonce.as_ref().to_vec()).map_err(|e| Error::Generic(e.to_string()))
+                let nonce_bytes = self.random_nonce_bytes()?;
+                let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)?;
+                key.seal_in_place_append_tag(nonce, aad, payload)?;
+                Ok(nonce_bytes)
             },
             Direction::Decode(nonce_bytes) => {
                 let nonce = aead::Nonce::try_assume_unique_for_key(nonce_bytes)?;
-                let res = key_set.opening_key.open_in_place(nonce, aad, payload)?.to_vec();
+                let res = key.open_in_place(nonce, aad, payload)?.to_vec();
                 Ok(res)
             }
         }
@@ -70,39 +72,23 @@ impl KeyStore {
         let Some(my_private_key) = self.private_keys.pop(&peer_id) else { return Ok(()) };
         let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_public_key);
         let symmetric_key = agreement::agree_ephemeral(my_private_key, &peer_public_key, |key_material| {
-            hkdf::Salt::new(HKDF_SHA256, &INITIAL_SALT).extract(key_material)
+            hkdf::Salt::new(hkdf::HKDF_SHA256, &INITIAL_SALT).extract(key_material)
         })?;
-        let mut symmetric_key_bytes = vec![0u8; HKDF_SHA256.len()];
-        let mut initial_nonce = vec![0u8; HKDF_SHA256.len()];
-        symmetric_key.expand(&[b"sym"], HKDF_SHA256).unwrap().fill(&mut symmetric_key_bytes).unwrap();
-        symmetric_key.expand(&[b"nonce_0"], HKDF_SHA256).unwrap().fill(&mut initial_nonce).unwrap();
-        initial_nonce.truncate(16);
-        let initial_value = u128::from_be_bytes(initial_nonce.try_into().unwrap());
-        let opening_key = aead::LessSafeKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap());
-        let (nonce_tx, nonce_rx) = mpsc::channel();
-        let sealing_key = aead::SealingKey::new(aead::UnboundKey::new(&AES_256_GCM, &symmetric_key_bytes).unwrap(), CurrentNonce(initial_value, nonce_tx));
-        let key_set = KeySet { opening_key, sealing_key, nonce_rx };
-        lock!(self.symmetric_keys.collection().map()).insert(peer_id, key_set);
+        let mut symmetric_key_bytes = vec![0u8; hkdf::KeyType::len(&hkdf::HKDF_SHA256)];
+        symmetric_key.expand(&[b"sym"], hkdf::HKDF_SHA256).unwrap().fill(&mut symmetric_key_bytes).unwrap();
+        let symmetric_key = aead::LessSafeKey::new(aead::UnboundKey::new(&aead::AES_256_GCM, &symmetric_key_bytes).unwrap());
+        lock!(self.symmetric_keys.collection().map()).insert(peer_id, symmetric_key);
         Ok(())
     }
 
     pub fn agreement_exists(&self, peer_id: &NumId) -> bool {
         self.symmetric_keys.contains_key(peer_id)
     }
-}
 
-#[derive(Debug)]
-struct KeySet { opening_key: aead::LessSafeKey, sealing_key: aead::SealingKey<CurrentNonce>, nonce_rx: mpsc::Receiver<aead::Nonce> }
-
-struct CurrentNonce(u128, mpsc::Sender<aead::Nonce>);
-impl aead::NonceSequence for CurrentNonce {
-    fn advance(&mut self) -> Result<aead::Nonce, ring::error::Unspecified> {
-        self.0 = self.0.checked_add(1).ok_or(ring::error::Unspecified)?;
-        let bytes = self.0.to_be_bytes();
-        let nonce = aead::Nonce::try_assume_unique_for_key(&bytes[bytes.len() - aead::NONCE_LEN..])?;
-        let nonce_copy = aead::Nonce::try_assume_unique_for_key(&bytes[bytes.len() - aead::NONCE_LEN..])?;
-        self.1.send(nonce_copy).ok();
-        Ok(nonce)
+    fn random_nonce_bytes(&self) -> Result<Vec<u8>, ring::error::Unspecified> {
+        let mut bytes = vec![0u8; aead::NONCE_LEN];
+        self.rng.fill(&mut bytes)?;
+        Ok(bytes)
     }
 }
 
