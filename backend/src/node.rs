@@ -41,7 +41,7 @@ impl Node {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
         if is_start {
-            local_hosts.insert(String::from("chucknorris.tar"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
+            local_hosts.insert(String::from("Apple Cover Letter.pdf"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
 
         let myself = Peer::new(endpoint_pair, id);
@@ -73,11 +73,11 @@ impl Node {
                 report_trigger.recv().await;
                 let node_info = NodeInfo::new(lock!(peer_ops).peers_and_scores(), is_start, is_end, port, id.0);
                 fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
-                // if is_start {
-                //     info!("Starting distribution");
-                //     let dmessage = Message::new(Peer::default(), NumId(Uuid::new_v4().as_u128()), None, MetadataKind::Distribute(DistributeMetadata::new(3, String::from("chucknorris.tar"))), MessageDirection::Request);
-                //     outbound_channel_tx_clone.send(dmessage).unwrap();
-                // }
+                if is_start {
+                    info!("Starting distribution");
+                    let dmessage = Message::new(Peer::default(), NumId(Uuid::new_v4().as_u128()), None, MetadataKind::Distribute(DistributeMetadata::new(1, String::from("Apple Cover Letter.pdf"))), MessageDirection::Request);
+                    outbound_channel_tx_clone.send(dmessage).unwrap();
+                }
             });
         }
 

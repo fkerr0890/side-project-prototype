@@ -1,8 +1,8 @@
-use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::{Arc, Mutex}};
+use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
 use ring::aead;
 use tokio::{select, sync::mpsc, time::sleep};
 use tracing::{debug, field, info, instrument, trace, warn};
-use crate::{crypto::{Direction, KeyStore}, http::SerdeHttpResponse, lock, message::{DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
 
@@ -21,7 +21,8 @@ pub struct MessageStaging {
     outbound_channel_rx: mpsc::UnboundedReceiver<Message>,
     to_http_handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>>,
     from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
-    cached_stream_messages: TransientCollection<ArcMap<NumId, Message>>
+    cached_stream_messages: TransientCollection<ArcMap<NumId, Message>>,
+    event_manager: TimelineEventManager
 }
 
 impl MessageStaging {
@@ -53,7 +54,8 @@ impl MessageStaging {
             stream_session_manager: StreamSessionManager::new(local_hosts),
             to_http_handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             from_http_handlers,
-            cached_stream_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new())
+            cached_stream_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            event_manager: TimelineEventManager::new(StepPrecision::Sec)
         }
     }
 
@@ -62,7 +64,8 @@ impl MessageStaging {
             message = self.from_inbound_gateway.recv() => message?,
             message = self.outbound_channel_rx.recv() => return Some(self.process_user_message(message?).await),
             message = self.from_http_handlers.recv() => return Some(self.handle_http_request(message?).await),
-            id = self.stream_session_manager.follow_up_rx().recv() => return Some(self.process_follow_up(id?).await)
+            id = self.stream_session_manager.follow_up_rx().recv() => return Some(self.process_follow_up(id?).await),
+            action = self.event_manager.step() => return Some(self.process_timebound_action(action).await)
         };
         if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes.1) {
             return Some(self.handle_key_agreement(message, sender_addr).await);
@@ -162,6 +165,17 @@ impl MessageStaging {
         self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
     }
 
+    async fn process_timebound_action(&mut self, action: Option<TimeboundAction>) {
+        match option_early_return!(action) {
+            TimeboundAction::LockDestsDistribution(host_name, id) => {
+                info!(myself = %self.outbound_gateway.myself.id, sinks = ?self.stream_session_manager.get_all_destinations_source_distribution());
+                self.stream_session_manager.finalize_all_resources_distribution(&host_name);
+                self.stream_session_manager.lock_dests_distribution(&host_name);
+                self.send_distribution_request(id, host_name).await;
+            }
+        }
+    }
+
     #[instrument(level = "trace", skip_all, fields(peers = field::Empty))]
     async fn process_outbound_heartbeat(&mut self, message: Message) {
         if message.dest() != Peer::default() {
@@ -251,42 +265,54 @@ impl MessageStaging {
         let (message, tx) = from_http_handler;
         let (id, host_name) = (message.id(), message.metadata().host_name().clone());
         self.to_http_handlers.insert(id, tx, "Staging:ToHttpHandlers");
-        let message = if self.stream_session_manager.source_active_retrieval(&host_name) {
+        if self.stream_session_manager.source_active_retrieval(&host_name) {
             self.stream_session_manager.push_resource_retrieval(&host_name, id);
-            option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(&host_name), message, true).await)
+            let message = option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(&host_name), message, true).await);
+            self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
         } else {
             self.stream_session_manager.new_source_retrieval(host_name.clone());
             self.stream_session_manager.push_resource_retrieval(&host_name, id);
+            self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
             let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name.clone(), SearchMetadataKind::Retrieval));
             self.send_outbound_message(search_message).await;
-            message
         };
-        self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
     async fn handle_distribution_request(&mut self, id: NumId, metadata: DistributeMetadata) {
         if !self.stream_session_manager.host_installed(&metadata.host_name) {
-            warn!("Blocked distribution request, reason: I do not host this app");
+            warn!(myself = %self.outbound_gateway.myself.id, "Blocked distribution request, reason: I do not host this app");
             return;
         }
         if self.stream_session_manager.source_active_distribution(&metadata.host_name) {
             return;
         }
+        info!(myself = ?self.outbound_gateway.myself, "new source at");
         self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), id, metadata.hop_count).await;
-        let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name, SearchMetadataKind::Distribution));
+        let file = self.stream_session_manager.file_mut(&metadata.host_name);
+        let (_, chunk) = result_early_return!(file.next_chunk_and_id(None).await);
+        file.set_sent_id(id);
+        self.stream_session_manager.push_resource_distribution(&metadata.host_name, id);
+        let initial_message = Message::new(Peer::default(), id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), metadata.host_name.clone())), MessageDirection::OneHop);
+        self.cached_stream_messages.insert(id, initial_message, "Staging:CachedStreamMessages");
+        let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name.clone(), SearchMetadataKind::Distribution));
+        self.breadcrumb_service.remove_breadcrumb(&id);
         self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DISTRIBUTION_TTL_SECONDS));
         self.send_request(search_message).await;
+        self.event_manager.put_event(TimeboundAction::LockDestsDistribution(metadata.host_name, id), Duration::from_secs(5));
     }
 
-    async fn send_distribution_request(&mut self, received_id: Option<NumId>, host_name: String) {
-        if let Some(received_id) = received_id {
-            self.stream_session_manager.finalize_resource_distribution(&host_name, &received_id);
+    #[instrument(level = "trace", skip_all, fields(%received_id))]
+    async fn send_distribution_request(&mut self, received_id: NumId, host_name: String) {
+        self.cached_stream_messages.pop(&received_id);
+        self.stream_session_manager.set_dests_remaining_distribution(&host_name);
+        let dests = self.stream_session_manager.get_destinations_source_distribution(&host_name);
+        if dests.is_empty() {
+            return;
         }
         let file = self.stream_session_manager.file_mut(&host_name);
-        let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(received_id).await);
+        let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(Some(received_id)).await);
         self.stream_session_manager.push_resource_distribution(&host_name, new_id);
-        let dests = self.stream_session_manager.get_destinations_source_distribution(&host_name);
         let message = Message::new(Peer::default(), new_id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), host_name)), MessageDirection::OneHop);
         let message = option_early_return!(self.send_checked(dests, message, true).await);
         self.cached_stream_messages.insert(new_id, message, "Staging:CachedStreamMessages");
@@ -329,28 +355,19 @@ impl MessageStaging {
     #[instrument(level = "trace", skip_all, fields(id = %message.id()))]
     async fn execute_final_action(&mut self, message: Message) {
         let (sender, id) = (message.only_sender(), message.id());
-        let sender = if let Some(sender) = sender { sender } else { Sender::new(self.outbound_gateway.myself.endpoint_pair.private_endpoint, self.outbound_gateway.myself.id) };
+        let sender = if let Some(sender) = sender { Peer::from(sender) } else { self.outbound_gateway.myself };
         match message.into_metadata() {
             MetadataKind::Search(metadata) => {
                 let SearchMetadata { origin, host_name, kind } = metadata;
-                let sender = if sender.socket == origin.endpoint_pair.private_endpoint && sender.id == origin.id { Peer::from(sender) } else { origin };
+                let sender = if sender.endpoint_pair.private_endpoint == origin.endpoint_pair.private_endpoint && sender.id == origin.id { sender } else { origin };
                 match kind {
                     SearchMetadataKind::Retrieval => {
                         if !self.stream_session_manager.add_destination_source_retrieval(&host_name, sender) { return; }
-                        let Some(request) = self.cached_stream_messages.pop(&id) else {
-                            debug!("Cached stream retrieval message unavailable, checking for pending outbound message");
-                            let mut cached_outbound_messages = lock!(self.cached_outbound_messages.collection().map());
-                            let cached_messages = option_early_return!(cached_outbound_messages.get_mut(&sender.id));
-                            let cached_message = option_early_return!(cached_messages.iter_mut().find(|m| m.0.id() == id));
-                            cached_message.1.push(sender);
-                            return;
-                        };
-                        let request = option_early_return!(self.send_checked(vec![sender], request, true).await);
-                        self.cached_stream_messages.insert(id, request, "Staging:CachedStreamMessages");
+                        self.send_initial_stream_message(id, sender).await;
                     },
                     SearchMetadataKind::Distribution => {
-                        if !self.stream_session_manager.add_destination_source_distribution(&host_name, Peer::from(sender)) { return; }
-                        self.send_distribution_request(None, host_name).await;
+                        if !self.stream_session_manager.add_destination_source_distribution(&host_name, sender) { warn!(myself = ?self.outbound_gateway.myself, "aha"); return; }
+                        self.send_initial_stream_message(id, sender).await;
                     }
                 };
             },
@@ -373,7 +390,7 @@ impl MessageStaging {
                         if !self.stream_session_manager.sink_active_retrieval(&metadata.host_name) {
                             self.stream_session_manager.new_sink_retrieval(metadata.host_name.clone())
                         }
-                        self.stream_session_manager.add_destination_sink(&metadata.host_name, Peer::from(sender));
+                        self.stream_session_manager.add_destination_sink(&metadata.host_name, sender);
                         self.stream_session_manager.retrieval_response_action(payload, metadata.host_name, id).await
                     },
                     StreamPayloadKind::Response(payload) => {
@@ -389,14 +406,20 @@ impl MessageStaging {
                     },
                     StreamPayloadKind::DistributionResponse(response) => {
                         return match response {
-                            DistributionResponse::Continue => self.send_distribution_request(Some(id), metadata.host_name).await,
+                            DistributionResponse::Continue => {
+                                if !self.stream_session_manager.finalize_resource_distribution(&metadata.host_name, &id, sender.id) || !self.stream_session_manager.dests_locked_distribution(&metadata.host_name) {
+                                    return;
+                                }
+                                self.send_distribution_request(id, metadata.host_name).await
+                            },
                             DistributionResponse::InstallError => panic!(),
                             DistributionResponse::InstallOk => {
-                                self.stream_session_manager.finalize_resource_distribution(&metadata.host_name, &id);
+                                self.stream_session_manager.finalize_resource_distribution(&metadata.host_name, &id, sender.id);
+                                self.cached_stream_messages.pop(&id);
                                 let (mut hop_count, distribution_id) = self.stream_session_manager.curr_hop_count_and_distribution_id(&metadata.host_name);
                                 hop_count -= 1;
                                 if hop_count <= 0 {
-                                    info!(host_name = metadata.host_name, "Distribution finished");
+                                    info!(myself = %self.outbound_gateway.myself.id, host_name = metadata.host_name, "Distribution finished");
                                     return;
                                 }
                                 let distribution_message = Message::new(
@@ -405,16 +428,30 @@ impl MessageStaging {
                                     None,
                                     MetadataKind::Distribute(DistributeMetadata::new(hop_count, metadata.host_name)),
                                     MessageDirection::Request);
+                                info!(myself = %self.outbound_gateway.myself.id, %distribution_id, "Next distribution");
                                 self.send_request(distribution_message).await;
                             }
                         }
                     }
                 };
-                self.send_checked(vec![Peer::from(sender)], response, true).await;
+                self.send_checked(vec![sender], response, true).await;
             },
             MetadataKind::Distribute(metadata) => self.handle_distribution_request(id, metadata).await,
             _ => {}
         }
+    }
+
+    async fn send_initial_stream_message(&mut self, id: NumId, sender: Peer) {
+        let Some(request) = self.cached_stream_messages.pop(&id) else {
+            debug!("Cached stream retrieval message unavailable, checking for pending outbound message");
+            let mut cached_outbound_messages = lock!(self.cached_outbound_messages.collection().map());
+            let cached_messages = option_early_return!(cached_outbound_messages.get_mut(&sender.id));
+            let cached_message = option_early_return!(cached_messages.iter_mut().find(|m| m.0.id() == id));
+            cached_message.1.push(sender);
+            return;
+        };
+        let request = option_early_return!(self.send_checked(vec![sender], request, true).await);
+        self.cached_stream_messages.insert(id, request, "Staging:CachedStreamMessages");
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
@@ -453,7 +490,7 @@ impl MessageStaging {
         };
         result_early_return!(self.key_store.agree(peer_id, public_key));
         if let Some(cached_messages) = cached_messages {
-            debug!("Sending cached outbound messages");
+            trace!("Sending cached outbound messages");
             for (message, remaining_dests) in cached_messages {
                 let (to_be_chunked, is_stream_request) = message.to_be_chunked();
                 let message = option_early_return!(self.send_checked(remaining_dests, message, to_be_chunked).await);

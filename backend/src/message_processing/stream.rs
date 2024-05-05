@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
 use tracing::debug;
 
-use crate::{http::{self, SerdeHttpRequest}, message::{MessageDirection, Message, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, option_early_return, result_early_return};
+use crate::{http::{self, SerdeHttpRequest}, message::{Message, MessageDirection, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, node::EndpointPair, option_early_return, result_early_return};
 
 use super::{distribute::ChunkedFileHandler, SRP_TTL_SECONDS};
 
@@ -42,7 +42,7 @@ impl StreamSessionManager {
     
     pub fn get_all_destinations_source_retrieval(&self) -> Vec<Peer> { self.sources_retrieval.values().flat_map(|s| s.active_dests.clone()).collect() }
 
-    pub fn get_destinations_source_distribution(&self, host_name: &str) -> HashSet<Peer> { self.sources_distribution.get(host_name).unwrap().stream_source.active_dests.clone() }
+    pub fn get_destinations_source_distribution(&self, host_name: &str) -> Vec<Peer> { self.sources_distribution.get(host_name).unwrap().dests_remaining.iter().map(|d| Peer::new(*d.1, *d.0)).collect() }
 
     pub fn get_all_destinations_source_distribution(&self) -> Vec<Peer> { self.sources_distribution.values().flat_map(|s| s.stream_source.active_dests.clone()).collect() }
 
@@ -55,7 +55,7 @@ impl StreamSessionManager {
     }
 
     pub fn add_destination_source_distribution(&mut self, host_name: &str, dest: Peer) -> bool {
-        self.sources_distribution.get_mut(host_name).unwrap().stream_source.active_dests.insert(dest)
+        self.sources_distribution.get_mut(host_name).unwrap().add_destination(dest)
     }
 
     pub fn add_destination_sink(&mut self, host_name: &str, dest: Peer) -> bool {
@@ -81,17 +81,25 @@ impl StreamSessionManager {
         assert!(self.sinks.insert(host_name, StreamSink::Distribution(DistributionStreamSink::new())).is_none());
     }
 
-    pub fn push_resource_retrieval(&mut self, host_name: &str, id: NumId) { self.sources_retrieval.get_mut(host_name).unwrap().push_resource(id) }
+    pub fn push_resource_retrieval(&mut self, host_name: &str, id: NumId) { self.sources_retrieval.get_mut(host_name).unwrap().push_resource(id); }
 
-    pub fn push_resource_distribution(&mut self, host_name: &str, id: NumId) { self.sources_distribution.get_mut(host_name).unwrap().stream_source.push_resource(id) }
+    pub fn push_resource_distribution(&mut self, host_name: &str, id: NumId) { self.sources_distribution.get_mut(host_name).unwrap().push_resource(id); }
+
+    pub fn set_dests_remaining_distribution(&mut self, host_name: &str) { self.sources_distribution.get_mut(host_name).unwrap().set_dests_remaining() }
 
     pub fn finalize_resource_retrieval(&mut self, host_name: &str, id: &NumId) {
         self.sources_retrieval.get_mut(host_name).unwrap().finalize_resource(id);
     }
 
-    pub fn finalize_resource_distribution(&mut self, host_name: &str, id: &NumId) {
-        self.sources_distribution.get_mut(host_name).unwrap().stream_source.finalize_resource(id);
+    pub fn finalize_resource_distribution(&mut self, host_name: &str, id: &NumId, sender_id: NumId) -> bool {
+        self.sources_distribution.get_mut(host_name).unwrap().finalize_resource(id, sender_id)
     }
+
+    pub fn finalize_all_resources_distribution(&mut self, host_name: &str) { self.sources_distribution.get_mut(host_name).unwrap().stream_source.finalize_all_resources() }
+
+    pub fn lock_dests_distribution(&mut self, host_name: &str) { self.sources_distribution.get_mut(host_name).unwrap().dests_locked = true }
+
+    pub fn dests_locked_distribution(&self, host_name: &str) -> bool { self.sources_distribution.get(host_name).unwrap().dests_locked }
 
     pub async fn retrieval_response_action(&self, request: SerdeHttpRequest, host_name: String, id: NumId) -> Message {
         let socket = self.local_hosts.get(&host_name).unwrap();
@@ -166,6 +174,7 @@ impl StreamSource {
             let num_retries = SRP_TTL_SECONDS.as_secs() / 2;
             for _ in 0..num_retries {
                 sleep(Duration::from_secs(2)).await;
+                debug!(%id, "Sending follow up");
                 result_early_return!(outbound_channel.send(id));
             }
         }).abort_handle()
@@ -175,7 +184,15 @@ impl StreamSource {
         let abort_handler = option_early_return!(self.abort_handlers.remove(id));
         abort_handler.abort();
         let index = self.resource_queue.iter().enumerate().filter(|(_, curr_id) | *curr_id == id).last().unwrap().0;
-        debug!(id = %self.resource_queue.remove(index).unwrap(), "Popped from queue");
+        let id = self.resource_queue.remove(index).unwrap();
+        debug!(%id, "Popped from queue");
+    }
+
+    fn finalize_all_resources(&mut self) {
+        for id in self.resource_queue.drain(..) {
+            // TODO: None unwrapped
+            self.abort_handlers.remove(&id).unwrap().abort();
+        }
     }
 }
 
@@ -183,12 +200,35 @@ struct StreamSourceDistribution {
     stream_source: StreamSource,
     id: NumId,
     hop_count: u16,
-    file: ChunkedFileHandler
+    file: ChunkedFileHandler,
+    dests_remaining: HashMap<NumId, EndpointPair>,
+    dests_locked: bool
 }
 
 impl StreamSourceDistribution {
     async fn new(stream_source: StreamSource, id: NumId, hop_count: u16, file: ChunkedFileHandler) -> Self {
-        Self { stream_source, id, hop_count, file }
+        Self { stream_source, id, hop_count, file, dests_remaining: HashMap::with_capacity(0), dests_locked: false }
+    }
+
+    fn add_destination(&mut self, dest: Peer) -> bool {
+        if self.dests_locked {
+            return false;
+        }
+        self.stream_source.active_dests.insert(dest)
+    }
+
+    fn set_dests_remaining(&mut self) { self.dests_remaining = HashMap::from_iter(self.stream_source.active_dests.iter().map(|d| (d.id, d.endpoint_pair))); }
+
+    fn push_resource(&mut self, id: NumId) { self.stream_source.push_resource(id); }
+
+    fn finalize_resource(&mut self, id: &NumId, sender_id: NumId) -> bool {
+        self.dests_remaining.remove(&sender_id);
+        debug!(dests_remaining = ?self.dests_remaining);
+        if self.dests_remaining.len() > 0 {
+            return false;
+        }
+        self.stream_source.finalize_resource(id);
+        true
     }
 }
 

@@ -10,3 +10,4 @@ pub mod http;
 pub mod node;
 pub mod crypto;
 pub mod utils;
+pub mod event;
