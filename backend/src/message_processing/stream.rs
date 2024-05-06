@@ -223,7 +223,7 @@ impl StreamSourceDistribution {
     fn finalize_resource(&mut self, id: &NumId, sender_id: NumId) -> bool {
         self.dests_remaining.remove(&sender_id);
         debug!(dests_remaining = ?self.dests_remaining);
-        if self.dests_remaining.len() > 0 {
+        if !self.dests_remaining.is_empty() {
             return false;
         }
         self.stream_source.finalize_resource(id);
@@ -255,8 +255,10 @@ impl DistributionStreamSink {
             self.chunks.push(payload);
             DistributionResponse::Continue
         }
-        else {
-            if fs::write("C:/Users/fredk/Downloads/p2p-dump.tar.gz", self.chunks.concat()).await.is_ok() { DistributionResponse::InstallOk } else { DistributionResponse::InstallError }
+        else if fs::write("C:/Users/fredk/Downloads/p2p-dump.tar.gz", self.chunks.concat()).await.is_ok() {
+            DistributionResponse::InstallOk
+        } else {
+            DistributionResponse::InstallError
         }
     }
 }

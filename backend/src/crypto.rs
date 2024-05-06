@@ -35,7 +35,7 @@ impl KeyStore {
         if self.symmetric_keys.contains_key(&peer_id) {
             return None
         }
-        let is_new_key = self.private_keys.set_timer(peer_id, TimerOptions::new(), "Crypto:PrivateKeys");
+        let is_new_key = self.private_keys.set_timer(peer_id, TimerOptions::default(), "Crypto:PrivateKeys");
         let mut private_keys = lock!(self.private_keys.collection().map());
         if is_new_key {
             let my_private_key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).unwrap();
@@ -49,7 +49,7 @@ impl KeyStore {
     }
 
     pub fn transform<'a>(&'a mut self, peer_id: NumId, payload: &'a mut Vec<u8>, mode: Direction) -> Result<Vec<u8>, Error> {
-        self.symmetric_keys.set_timer(peer_id, TimerOptions::new(), "Crypto:SymmetricKeysRenew");
+        self.symmetric_keys.set_timer(peer_id, TimerOptions::default(), "Crypto:SymmetricKeysRenew");
         let mut symmetric_keys = lock!(self.symmetric_keys.collection().map());
         let (aad, key) = (aead::Aad::from("test".as_bytes().to_vec()), symmetric_keys.get_mut(&peer_id).ok_or(Error::NoKey)?);
         match mode {
@@ -68,7 +68,7 @@ impl KeyStore {
     }
 
     pub fn agree(&mut self, peer_id: NumId, peer_public_key: Vec<u8>) -> Result<(), Error> {
-        if !self.symmetric_keys.set_timer(peer_id, TimerOptions::new(), "Crypto:SymmetricKeys") {
+        if !self.symmetric_keys.set_timer(peer_id, TimerOptions::default(), "Crypto:SymmetricKeys") {
             return Ok(())
         }
         assert!(!peer_public_key.is_empty());

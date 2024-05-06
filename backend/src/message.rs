@@ -112,7 +112,7 @@ impl Message {
     }
     
     pub fn dest(&self) -> Peer { self.dest }
-    pub fn only_sender(&self) -> Option<Sender> { assert!(self.senders.len() <= 1); self.senders.last().copied() }
+    pub fn only_sender(&self) -> Option<Sender> { self.senders.last().copied() }
     pub fn clear_senders(&mut self) { self.senders = Vec::with_capacity(0); }
     pub fn id(&self) -> NumId { self.id }
     pub fn metadata(&self) -> &MetadataKind { &self.metadata }
@@ -125,7 +125,7 @@ impl Message {
     pub fn set_direction(&mut self, direction: MessageDirection) { self.direction = direction}
 
     pub fn check_expiry(&self) -> bool {
-        let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(&option_early_return!(&self.expiry, false)).unwrap().into();
+        let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(option_early_return!(&self.expiry, false)).unwrap().into();
         expiry <= Utc::now()
     }
 

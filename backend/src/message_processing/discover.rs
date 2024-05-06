@@ -3,7 +3,7 @@ use std::net::SocketAddrV4;
 use tokio::sync::mpsc;
 use tracing::{instrument, warn};
 
-use crate::{lock, message::{DiscoverMetadata, DpMessageKind, Message, MessageDirection, MetadataKind, NumId}, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{lock, message::{DiscoverMetadata, DpMessageKind, Message, MessageDirection, MetadataKind, NumId, Peer}, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 use super::DPP_TTL_MILLIS;
 
@@ -19,7 +19,8 @@ impl DiscoverPeerProcessor {
     }
 
     #[instrument(level = "trace", skip(self))]
-    pub fn continue_propagating(&self, metadata: &mut DiscoverMetadata) -> bool {
+    pub fn continue_propagating(&self, metadata: &mut DiscoverMetadata, myself: Peer) -> bool {
+        metadata.peer_list.push(myself);
         metadata.hop_count.0 -= 1;
         metadata.hop_count.0 > 0
     }
@@ -39,7 +40,7 @@ impl DiscoverPeerProcessor {
 
     pub fn set_staging_early_return(&mut self, outbound: mpsc::UnboundedSender<Message>, id: NumId) {
         let mut message_staging_clone = self.message_staging.collection().clone();
-        self.message_staging.set_timer_with_send_action(id, TimerOptions::new(), move || { Self::send_final_response_static(&mut message_staging_clone, id, &outbound); }, "Discover:MessageStaging");
+        self.message_staging.set_timer_with_send_action(id, TimerOptions::default(), move || { Self::send_final_response_static(&mut message_staging_clone, id, &outbound); }, "Discover:MessageStaging");
     }
 
     #[instrument(level = "trace", skip_all, fields(hop_count = ?metadata.hop_count))]

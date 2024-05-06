@@ -150,12 +150,12 @@ impl BreadcrumbService {
     pub fn try_add_breadcrumb(&mut self, id: NumId, early_return_context: Option<EarlyReturnContext>, dest: Option<Sender>, ttl: Option<Duration>) -> bool {
         let is_new_key = if let Some(context) = early_return_context {
             let EarlyReturnContext(tx, message) = context;
-            self.breadcrumbs.set_timer_with_send_action(id, TimerOptions::new().with_ttl(ttl), move || {
+            self.breadcrumbs.set_timer_with_send_action(id, TimerOptions::default().with_ttl(ttl), move || {
                 result_early_return!(tx.send(message));
             }, "BreadcrumbService")
         }
         else {
-            self.breadcrumbs.set_timer(id, TimerOptions::new().with_ttl(ttl), "BreadcrumbService")
+            self.breadcrumbs.set_timer(id, TimerOptions::default().with_ttl(ttl), "BreadcrumbService")
         };
         if is_new_key {
             lock!(self.breadcrumbs.collection().map()).insert(id, dest);

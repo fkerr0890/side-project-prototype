@@ -2,14 +2,16 @@ use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::
 use ring::aead;
 use tokio::{select, sync::mpsc, time::sleep};
 use tracing::{debug, field, info, instrument, trace, warn};
-use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
+
+type CachedOutboundMessages = Vec<(Message, Vec<Peer>)>;
 
 pub struct MessageStaging {
     from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
     message_staging: TransientCollection<ArcMap<NumId, HashMap<usize, InboundMessage>>>,
-    cached_outbound_messages: TransientCollection<ArcMap<NumId, Vec<(Message, Vec<Peer>)>>>,
+    cached_outbound_messages: TransientCollection<ArcMap<NumId, CachedOutboundMessages>>,
     unconfirmed_peers: TransientCollection<ArcMap<NumId, EndpointPair>>,
     outbound_gateway: OutboundGateway,
     key_store: KeyStore,
@@ -63,7 +65,7 @@ impl MessageStaging {
         let (sender_addr, message_bytes) = select! {
             message = self.from_inbound_gateway.recv() => message?,
             message = self.outbound_channel_rx.recv() => return Some(self.process_user_message(message?).await),
-            message = self.from_http_handlers.recv() => return Some(self.handle_http_request(message?).await),
+            message = self.from_http_handlers.recv() => return Some(self.initial_retrieval_request(message?).await),
             id = self.stream_session_manager.follow_up_rx().recv() => return Some(self.process_follow_up(id?).await),
             action = self.event_manager.step() => return Some(self.process_timebound_action(action).await)
         };
@@ -101,7 +103,7 @@ impl MessageStaging {
         }
         let id = inbound_message.separate_parts().id();
         let staged_messages_len = {
-            self.message_staging.set_timer(id, TimerOptions::new(), "Stage:MessageStaging");
+            self.message_staging.set_timer(id, TimerOptions::default(), "Stage:MessageStaging");
             let mut message_staging = lock!(self.message_staging.collection().map());
             let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
             staged_messages.insert(index, inbound_message);
@@ -146,7 +148,7 @@ impl MessageStaging {
             }
         }
         if let MetadataKind::Distribute(metadata) = message.metadata() {
-            return self.handle_distribution_request(message.id(), metadata.clone()).await;
+            return self.initial_distribution_request(message.id(), metadata.clone()).await;
         }
         self.send_response(message).await;
     }
@@ -168,7 +170,7 @@ impl MessageStaging {
     async fn process_timebound_action(&mut self, action: Option<TimeboundAction>) {
         match option_early_return!(action) {
             TimeboundAction::LockDestsDistribution(host_name, id) => {
-                info!(myself = %self.outbound_gateway.myself.id, sinks = ?self.stream_session_manager.get_all_destinations_source_distribution());
+                // info!(myself = %self.outbound_gateway.myself.id, sinks = ?self.stream_session_manager.get_all_destinations_source_distribution());
                 self.stream_session_manager.finalize_all_resources_distribution(&host_name);
                 self.stream_session_manager.lock_dests_distribution(&host_name);
                 self.send_distribution_request(id, host_name).await;
@@ -248,7 +250,7 @@ impl MessageStaging {
 
     #[instrument(level = "trace", skip_all, fields(id = %message.id(), ?remaining_dests))]
     fn insert_cached_outbound_message(&mut self, message: Message, remaining_dests: Vec<Peer>) {
-        self.cached_outbound_messages.set_timer(message.dest().id, TimerOptions::new(), "Stage:MessageCaching");
+        self.cached_outbound_messages.set_timer(message.dest().id, TimerOptions::default(), "Stage:MessageCaching");
         let mut message_caching = lock!(self.cached_outbound_messages.collection().map());
         let cached_messages = message_caching.entry(message.dest().id).or_default();
         cached_messages.push((message, remaining_dests));
@@ -261,7 +263,7 @@ impl MessageStaging {
     }
 
     #[instrument(level = "trace", skip_all, fields(id = %from_http_handler.0.id(), host_name = from_http_handler.0.metadata().host_name(), myself = %self.outbound_gateway.myself.id))]
-    async fn handle_http_request(&mut self, from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>)) {
+    async fn initial_retrieval_request(&mut self, from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>)) {
         let (message, tx) = from_http_handler;
         let (id, host_name) = (message.id(), message.metadata().host_name().clone());
         self.to_http_handlers.insert(id, tx, "Staging:ToHttpHandlers");
@@ -279,7 +281,7 @@ impl MessageStaging {
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
-    async fn handle_distribution_request(&mut self, id: NumId, metadata: DistributeMetadata) {
+    async fn initial_distribution_request(&mut self, id: NumId, metadata: DistributeMetadata) {
         if !self.stream_session_manager.host_installed(&metadata.host_name) {
             warn!(myself = %self.outbound_gateway.myself.id, "Blocked distribution request, reason: I do not host this app");
             return;
@@ -323,18 +325,9 @@ impl MessageStaging {
             return PropagationDirection::Reverse;
         }
         let (origin, early_return_context, ttl, direction) = match message.metadata_mut() {
-            MetadataKind::Search(metadata) => {
-                if search::continue_propagating(self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()) {
-                    (metadata.origin, None, None, PropagationDirection::Forward)
-                } else {
-                    let prev_origin = metadata.origin;
-                    metadata.origin = self.outbound_gateway.myself;
-                    (prev_origin, None, None, PropagationDirection::Reverse)
-                }
-            },
+            MetadataKind::Search(metadata) => search::logic(self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()),
             MetadataKind::Discover(metadata) => {
-                metadata.peer_list.push(self.outbound_gateway.myself);                
-                if self.discover_peer_processor.continue_propagating(metadata) {
+                if self.discover_peer_processor.continue_propagating(metadata, self.outbound_gateway.myself) {
                     (metadata.origin, Some(EarlyReturnContext(self.outbound_channel_tx.clone(), message.clone())), Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
                 } else {
                     metadata.kind = DpMessageKind::Response;
@@ -357,87 +350,90 @@ impl MessageStaging {
         let (sender, id) = (message.only_sender(), message.id());
         let sender = if let Some(sender) = sender { Peer::from(sender) } else { self.outbound_gateway.myself };
         match message.into_metadata() {
-            MetadataKind::Search(metadata) => {
-                let SearchMetadata { origin, host_name, kind } = metadata;
-                let sender = if sender.endpoint_pair.private_endpoint == origin.endpoint_pair.private_endpoint && sender.id == origin.id { sender } else { origin };
-                match kind {
-                    SearchMetadataKind::Retrieval => {
-                        if !self.stream_session_manager.add_destination_source_retrieval(&host_name, sender) { return; }
-                        self.send_initial_stream_message(id, sender).await;
-                    },
-                    SearchMetadataKind::Distribution => {
-                        if !self.stream_session_manager.add_destination_source_distribution(&host_name, sender) { warn!(myself = ?self.outbound_gateway.myself, "aha"); return; }
-                        self.send_initial_stream_message(id, sender).await;
-                    }
-                };
+            MetadataKind::Search(metadata) => self.final_action_search(metadata, sender, id).await,
+            MetadataKind::Discover(metadata) => self.final_action_discover(metadata, id),
+            MetadataKind::Stream(metadata) => self.final_action_stream(metadata, sender, id).await,
+            MetadataKind::Distribute(metadata) => self.initial_distribution_request(id, metadata).await,
+            _ => {}
+        }
+    }
+
+    async fn final_action_search(&mut self, metadata: SearchMetadata, sender: Peer, id: NumId) {
+        let SearchMetadata { origin, host_name, kind } = metadata;
+        let sender = if sender.endpoint_pair.private_endpoint == origin.endpoint_pair.private_endpoint && sender.id == origin.id { sender } else { origin };
+        match kind {
+            SearchMetadataKind::Retrieval => if !self.stream_session_manager.add_destination_source_retrieval(&host_name, sender) { return },
+            SearchMetadataKind::Distribution => if !self.stream_session_manager.add_destination_source_distribution(&host_name, sender) { return }
+        };
+        self.send_initial_stream_message(id, sender).await;
+    }
+
+    fn final_action_discover(&mut self, metadata: DiscoverMetadata, id: NumId) {
+        if metadata.peer_list.len() == metadata.hop_count.1 as usize {
+            for peer in metadata.peer_list.iter() {
+                self.add_new_peer(*peer);
+            }
+            return;
+        }
+        let peer_len_curr_max = self.discover_peer_processor.peer_len_curr_max(&id);
+        if peer_len_curr_max == 0 {
+            self.discover_peer_processor.set_staging_early_return(self.outbound_channel_tx.clone(), id);
+        }
+        self.discover_peer_processor.stage_message(id, metadata, peer_len_curr_max);
+    }
+
+    async fn final_action_stream(&mut self, metadata: StreamMetadata, sender: Peer, id: NumId) {
+        let response = match metadata.payload {
+            StreamPayloadKind::Request(payload) => {
+                if !self.stream_session_manager.sink_active_retrieval(&metadata.host_name) {
+                    self.stream_session_manager.new_sink_retrieval(metadata.host_name.clone())
+                }
+                self.stream_session_manager.add_destination_sink(&metadata.host_name, sender);
+                self.stream_session_manager.retrieval_response_action(payload, metadata.host_name, id).await
             },
-            MetadataKind::Discover(metadata) => {
-                if metadata.peer_list.len() == metadata.hop_count.1 as usize {
-                    for peer in metadata.peer_list.iter() {
-                        self.add_new_peer(*peer);
-                    }
+            StreamPayloadKind::Response(payload) => {
+                self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
+                self.cached_stream_messages.pop(&id);
+                return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
+            },
+            StreamPayloadKind::DistributionRequest(bytes) => {
+                if !self.stream_session_manager.sink_active_distribution(&metadata.host_name) {
+                    self.stream_session_manager.new_sink_distribution(metadata.host_name.clone());
+                }
+                self.stream_session_manager.distribution_response_action(bytes, metadata.host_name, id).await
+            },
+            StreamPayloadKind::DistributionResponse(response) => return self.handle_distribution_response(response, metadata.host_name, id, sender.id).await
+        };
+        self.send_checked(vec![sender], response, true).await;
+    }
+
+    async fn handle_distribution_response(&mut self, response: DistributionResponse, host_name: String, id: NumId, sender_id: NumId) {
+        match response {
+            DistributionResponse::Continue => {
+                if !self.stream_session_manager.finalize_resource_distribution(&host_name, &id, sender_id) || !self.stream_session_manager.dests_locked_distribution(&host_name) {
                     return;
                 }
-                let peer_len_curr_max = self.discover_peer_processor.peer_len_curr_max(&id);
-                if peer_len_curr_max == 0 {
-                    self.discover_peer_processor.set_staging_early_return(self.outbound_channel_tx.clone(), id);
+                self.send_distribution_request(id, host_name).await
+            },
+            DistributionResponse::InstallError => panic!(),
+            DistributionResponse::InstallOk => {
+                self.stream_session_manager.finalize_resource_distribution(&host_name, &id, sender_id);
+                self.cached_stream_messages.pop(&id);
+                let (mut hop_count, distribution_id) = self.stream_session_manager.curr_hop_count_and_distribution_id(&host_name);
+                hop_count -= 1;
+                if hop_count == 0 {
+                    info!(myself = %self.outbound_gateway.myself.id, host_name, "Distribution finished");
+                    return;
                 }
-                self.discover_peer_processor.stage_message(id, metadata, peer_len_curr_max);
-            },
-            MetadataKind::Stream(metadata) => {
-                let response = match metadata.payload {
-                    StreamPayloadKind::Request(payload) => {
-                        if !self.stream_session_manager.sink_active_retrieval(&metadata.host_name) {
-                            self.stream_session_manager.new_sink_retrieval(metadata.host_name.clone())
-                        }
-                        self.stream_session_manager.add_destination_sink(&metadata.host_name, sender);
-                        self.stream_session_manager.retrieval_response_action(payload, metadata.host_name, id).await
-                    },
-                    StreamPayloadKind::Response(payload) => {
-                        self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
-                        self.cached_stream_messages.pop(&id);
-                        return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
-                    },
-                    StreamPayloadKind::DistributionRequest(bytes) => {
-                        if !self.stream_session_manager.sink_active_distribution(&metadata.host_name) {
-                            self.stream_session_manager.new_sink_distribution(metadata.host_name.clone());
-                        }
-                        self.stream_session_manager.distribution_response_action(bytes, metadata.host_name, id).await
-                    },
-                    StreamPayloadKind::DistributionResponse(response) => {
-                        return match response {
-                            DistributionResponse::Continue => {
-                                if !self.stream_session_manager.finalize_resource_distribution(&metadata.host_name, &id, sender.id) || !self.stream_session_manager.dests_locked_distribution(&metadata.host_name) {
-                                    return;
-                                }
-                                self.send_distribution_request(id, metadata.host_name).await
-                            },
-                            DistributionResponse::InstallError => panic!(),
-                            DistributionResponse::InstallOk => {
-                                self.stream_session_manager.finalize_resource_distribution(&metadata.host_name, &id, sender.id);
-                                self.cached_stream_messages.pop(&id);
-                                let (mut hop_count, distribution_id) = self.stream_session_manager.curr_hop_count_and_distribution_id(&metadata.host_name);
-                                hop_count -= 1;
-                                if hop_count <= 0 {
-                                    info!(myself = %self.outbound_gateway.myself.id, host_name = metadata.host_name, "Distribution finished");
-                                    return;
-                                }
-                                let distribution_message = Message::new(
-                                    Peer::default(),
-                                    distribution_id,
-                                    None,
-                                    MetadataKind::Distribute(DistributeMetadata::new(hop_count, metadata.host_name)),
-                                    MessageDirection::Request);
-                                info!(myself = %self.outbound_gateway.myself.id, %distribution_id, "Next distribution");
-                                self.send_request(distribution_message).await;
-                            }
-                        }
-                    }
-                };
-                self.send_checked(vec![sender], response, true).await;
-            },
-            MetadataKind::Distribute(metadata) => self.handle_distribution_request(id, metadata).await,
-            _ => {}
+                let distribution_message = Message::new(
+                    Peer::default(),
+                    distribution_id,
+                    None,
+                    MetadataKind::Distribute(DistributeMetadata::new(hop_count, host_name)),
+                    MessageDirection::Request);
+                info!(myself = %self.outbound_gateway.myself.id, %distribution_id, "Next distribution");
+                self.send_request(distribution_message).await;
+            }
         }
     }
 
