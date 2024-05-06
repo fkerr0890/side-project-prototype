@@ -110,7 +110,7 @@ impl MessageStaging {
             staged_messages.len()
         };
         if staged_messages_len == num_chunks {
-            let messages = option_early_return!(self.message_staging.pop(&id), None);
+            let messages = self.message_staging.pop(&id)?;
             let messages: Vec<InboundMessage> = messages.into_values().collect();
             return Some(self.reassemble_message(messages))
         }
@@ -292,8 +292,7 @@ impl MessageStaging {
         info!(myself = ?self.outbound_gateway.myself, "new source at");
         self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), id, metadata.hop_count).await;
         let file = self.stream_session_manager.file_mut(&metadata.host_name);
-        let (_, chunk) = result_early_return!(file.next_chunk_and_id(None).await);
-        file.set_sent_id(id);
+        let (_, chunk) = result_early_return!(file.next_chunk_and_id(NumId(option_early_return!(u128::checked_sub(id.0, 1)))).await);
         self.stream_session_manager.push_resource_distribution(&metadata.host_name, id);
         let initial_message = Message::new(Peer::default(), id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), metadata.host_name.clone())), MessageDirection::OneHop);
         self.cached_stream_messages.insert(id, initial_message, "Staging:CachedStreamMessages");
@@ -313,7 +312,7 @@ impl MessageStaging {
             return;
         }
         let file = self.stream_session_manager.file_mut(&host_name);
-        let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(Some(received_id)).await);
+        let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(received_id).await);
         self.stream_session_manager.push_resource_distribution(&host_name, new_id);
         let message = Message::new(Peer::default(), new_id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), host_name)), MessageDirection::OneHop);
         let message = option_early_return!(self.send_checked(dests, message, true).await);
@@ -400,7 +399,7 @@ impl MessageStaging {
                 if !self.stream_session_manager.sink_active_distribution(&metadata.host_name) {
                     self.stream_session_manager.new_sink_distribution(metadata.host_name.clone());
                 }
-                self.stream_session_manager.distribution_response_action(bytes, metadata.host_name, id).await
+                option_early_return!(self.stream_session_manager.distribution_response_action(bytes, metadata.host_name, id).await)
             },
             StreamPayloadKind::DistributionResponse(response) => return self.handle_distribution_response(response, metadata.host_name, id, sender.id).await
         };

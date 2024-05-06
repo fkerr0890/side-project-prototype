@@ -113,18 +113,18 @@ impl StreamSessionManager {
         )
     }
 
-    pub async fn distribution_response_action(&mut self, bytes: Vec<u8>, host_name: String, id: NumId) -> Message {
-        let result = self.sinks.get_mut(&host_name).unwrap().unwrap_distribution().stage_message(bytes).await;
+    pub async fn distribution_response_action(&mut self, bytes: Vec<u8>, host_name: String, id: NumId) -> Option<Message> {
+        let result = self.sinks.get_mut(&host_name).unwrap().unwrap_distribution().stage_message(bytes, id).await?;
         if let DistributionResponse::InstallOk = result {
             self.local_hosts.insert(host_name.clone(), SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3000));
         }
-        Message::new(
+        Some(Message::new(
             Peer::default(),
             id,
             None,
             MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionResponse(result), host_name)),
             MessageDirection::OneHop
-        )
+        ))
     }
 
     pub fn file_mut(&mut self, host_name: &str) -> &mut ChunkedFileHandler { &mut self.sources_distribution.get_mut(host_name).unwrap().file }
@@ -242,16 +242,21 @@ impl StreamSink {
 }
 
 struct DistributionStreamSink {
-    chunks: Vec<Vec<u8>>
+    chunks: Vec<Vec<u8>>,
+    prev_id: Option<NumId>
 }
 
 impl DistributionStreamSink {
     fn new() -> Self {
-        Self { chunks: Vec::new() }
+        Self { chunks: Vec::new(), prev_id: None }
     }
 
-    async fn stage_message(&mut self, payload: Vec<u8>) -> DistributionResponse {
-        if !payload.is_empty() {
+    async fn stage_message(&mut self, payload: Vec<u8>, id: NumId) -> Option<DistributionResponse> {
+        if self.prev_id.is_some_and(|prev_id| id.0 <= prev_id.0 && id.0 != 0) {
+            return None
+        }
+        self.prev_id = Some(id);
+        Some(if !payload.is_empty() {
             self.chunks.push(payload);
             DistributionResponse::Continue
         }
@@ -259,7 +264,7 @@ impl DistributionStreamSink {
             DistributionResponse::InstallOk
         } else {
             DistributionResponse::InstallError
-        }
+        })
     }
 }
 
