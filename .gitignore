@@ -3,4 +3,4 @@ test.bat
 .vscode/launch.json
 side-project-prototype.code-workspace
 peer_info*
-crypto-test/target
+crypto-test

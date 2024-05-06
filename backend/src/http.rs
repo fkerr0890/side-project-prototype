@@ -153,7 +153,7 @@ impl ServerContext {
     }
 }
 
-async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
+pub async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
     let request_version = request.version();
     let mut request = match SerdeHttpRequest::from_hyper_request(request).await {
         Ok(request) => request,

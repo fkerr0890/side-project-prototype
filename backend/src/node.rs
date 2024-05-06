@@ -1,11 +1,12 @@
 use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::Arc};
 
 use serde::{Serialize, Deserialize};
-use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
-use tracing::{error, info};
+use tokio::{fs, net::UdpSocket, select, sync::mpsc, time::sleep};
+use tokio_util::{task::TaskTracker, sync::CancellationToken};
+use tracing::{debug, error, info, trace};
 use uuid::Uuid;
 
-use crate::{http::{self, ServerContext}, lock, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::{stage::MessageStaging, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, peer, result_early_return};
+use crate::{http::{self, SerdeHttpResponse, ServerContext}, lock, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::{stage::MessageStaging, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, peer, result_early_return};
 
 pub struct Node {
     nat_kind: NatKind
@@ -32,9 +33,8 @@ impl Node {
         (EndpointPair::new(public_endpoint, private_endpoint), socket)
     }
 
-    pub async fn listen(&self, is_start: bool, is_end: bool, report_trigger: Option<mpsc::Receiver<()>>, introducer: Option<Peer>, id: NumId, initial_peers: Vec<(String, NumId)>, endpoint_pair: EndpointPair, socket: Arc<UdpSocket>) {
+    pub async fn listen(&mut self, is_start: bool, is_end: bool, report_trigger: Option<mpsc::Receiver<()>>, introducer: Option<Peer>, id: NumId, initial_peers: Vec<(String, NumId)>, endpoint_pair: EndpointPair, socket: Arc<UdpSocket>, server_context: ServerContext, http_handler_rx: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>, ct: Option<CancellationToken>) {
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
-        let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
     
         let mut local_hosts = HashMap::new();
         if is_end {
@@ -63,7 +63,7 @@ impl Node {
             outbound_channel_tx_clone.send(message).unwrap();
         }
         else {
-            println!("No introducer");
+            debug!("No introducer");
         }
 
         let peer_ops = message_staging.peer_ops().clone();
@@ -81,14 +81,26 @@ impl Node {
             });
         }
 
+        let task_tracker = TaskTracker::new();
         for _ in 0..225 {
             let mut inbound_gateway = InboundGateway::new(&socket, to_staging.clone());
-            tokio::spawn(async move {
+            let ct_clone = ct.clone();
+            task_tracker.spawn(async move {
                 loop {
-                    inbound_gateway.receive().await;
+                    if let Some(ct) = &ct_clone {
+                        select! {
+                            _ = inbound_gateway.receive() => {},
+                            _ = ct.cancelled() => break
+                        }
+                    }
+                    else {
+                        inbound_gateway.receive().await;
+                    }
                 }
+                trace!("Inbound closed");
             });
         }
+        task_tracker.close();
 
         tokio::spawn(async move {
             loop {
@@ -103,14 +115,24 @@ impl Node {
             }
         });
         
+
         if is_start {
-            println!("Tcp listening");
-            let server_context = ServerContext::new(http_handler_tx);
-            http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
+            if let Some(ct) = ct {
+                select! {
+                    _ = http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context) => {},
+                    _ = ct.cancelled() => {}
+                }
+            }
+            else {
+                http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;
+            }
         }
-        else {
+        else if let Some(ct) = ct {
+            ct.cancelled().await;
+        } else {
             future::pending::<()>().await;
         }
+        task_tracker.wait().await;
     }
 
     pub fn read_node_info(value: NodeInfo) -> (u16, NumId, Vec<(String, NumId)>, bool, bool) {

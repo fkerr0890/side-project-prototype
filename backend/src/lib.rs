@@ -11,3 +11,4 @@ pub mod node;
 pub mod crypto;
 pub mod utils;
 pub mod event;
+pub mod test_utils;
