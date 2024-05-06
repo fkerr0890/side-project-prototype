@@ -190,7 +190,6 @@ impl StreamSource {
 
     fn finalize_all_resources(&mut self) {
         for id in self.resource_queue.drain(..) {
-            // TODO: None unwrapped
             self.abort_handlers.remove(&id).unwrap().abort();
         }
     }

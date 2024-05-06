@@ -21,10 +21,13 @@ impl Default for KeyStore {
 
 impl KeyStore {
     pub fn new() -> Self {
+        let rng = SystemRandom::new();
+        let mut bytes = vec![0u8; aead::NONCE_LEN];
+        rng.fill(&mut bytes).ok();
         Self {
             private_keys: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             symmetric_keys: TransientCollection::new(ACTIVE_SESSION_TTL_SECONDS, true, ArcMap::new()),
-            rng: SystemRandom::new()
+            rng
         }
     }
 
