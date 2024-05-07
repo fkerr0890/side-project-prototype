@@ -20,5 +20,6 @@ async fn main() {
     let (private_ip, private_port, public_ip, peer_ip, peer_port, is_start) = (args[1].clone(), args[2].clone(), args[3].clone(), args[4].clone(), args[5].clone(), args[6].parse::<bool>().unwrap());
     let (endpoint_pair, socket) = Node::get_socket(private_ip, private_port, &public_ip).await;
     let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
-    Node::new().listen(is_start, !is_start, None, None, NumId(Uuid::new_v4().as_u128()), vec![(peer_ip + ":" + &peer_port, NumId(Uuid::new_v4().as_u128()))], endpoint_pair, socket, ServerContext::new(http_handler_tx), http_handler_rx, None).await
+    let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
+    Node::new().listen(is_start, !is_start, None, None, NumId(Uuid::new_v4().as_u128()), vec![(peer_ip + ":" + &peer_port, NumId(Uuid::new_v4().as_u128()))], endpoint_pair, socket, ServerContext::new(http_handler_tx), http_handler_rx, client_api_tx, client_api_rx).await
 }

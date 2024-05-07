@@ -19,8 +19,8 @@ pub struct MessageStaging {
     breadcrumb_service: BreadcrumbService,
     discover_peer_processor: DiscoverPeerProcessor,
     stream_session_manager: StreamSessionManager,
-    outbound_channel_tx: mpsc::UnboundedSender<Message>,
-    outbound_channel_rx: mpsc::UnboundedReceiver<Message>,
+    client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
+    client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
     to_http_handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>>,
     from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
     cached_stream_messages: TransientCollection<ArcMap<NumId, Message>>,
@@ -32,11 +32,12 @@ impl MessageStaging {
         from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
         outbound_gateway: OutboundGateway,
         discover_peer_processor: DiscoverPeerProcessor,
+        client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
+        client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
         from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
         local_hosts: HashMap<String, SocketAddrV4>,
         intial_peers: Vec<Peer>) -> Self
     {
-        let (outbound_channel_tx, outbound_channel_rx) = mpsc::unbounded_channel();
         let mut peer_ops = PeerOps::new();
         for peer in intial_peers {
             peer_ops.add_initial_peer(peer)
@@ -50,8 +51,8 @@ impl MessageStaging {
             key_store: KeyStore::new(),
             peer_ops: Arc::new(Mutex::new(peer_ops)),
             breadcrumb_service: BreadcrumbService::new(SRP_TTL_SECONDS),
-            outbound_channel_tx,
-            outbound_channel_rx,
+            client_api_tx,
+            client_api_rx,
             discover_peer_processor,
             stream_session_manager: StreamSessionManager::new(local_hosts),
             to_http_handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
@@ -64,7 +65,7 @@ impl MessageStaging {
     pub async fn receive(&mut self) -> EmptyOption {
         let (sender_addr, message_bytes) = select! {
             message = self.from_inbound_gateway.recv() => message?,
-            message = self.outbound_channel_rx.recv() => return Some(self.process_user_message(message?).await),
+            message = self.client_api_rx.recv() => return Some(self.process_client_request(message?).await),
             message = self.from_http_handlers.recv() => return Some(self.initial_retrieval_request(message?).await),
             id = self.stream_session_manager.follow_up_rx().recv() => return Some(self.process_follow_up(id?).await),
             action = self.event_manager.step() => return Some(self.process_timebound_action(action).await)
@@ -127,30 +128,34 @@ impl MessageStaging {
         message
     }
 
-    #[instrument(level = "trace", skip_all, fields(dest = %message.dest().id, id = %message.id(), metadata = ?message.metadata(), myself = %self.outbound_gateway.myself.id))]
-    async fn process_user_message(&mut self, mut message: Message) {
-        let id = message.id();
-        if let MetadataKind::Heartbeat = message.metadata() {
-            return self.process_outbound_heartbeat(message).await;
-        }
-        if let MetadataKind::Discover(metadata) = message.metadata_mut() {
-            if let DpMessageKind::INeedSome = metadata.kind {
-                let introducer = metadata.peer_list.pop().unwrap();
-                self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DPP_TTL_MILLIS * 2));
-                metadata.kind = DpMessageKind::Request;
-                return { self.send_checked(vec![introducer], message, false).await; }
-            }
-            if let DpMessageKind::IveGotSome = metadata.kind {
-                for peer in metadata.peer_list.iter() {
-                    self.add_new_peer(*peer);
+    async fn process_client_request(&mut self, request: ClientApiRequest) {
+        match request {
+            ClientApiRequest::Message(mut message) => {
+                let id = message.id();
+                if let MetadataKind::Heartbeat = message.metadata() {
+                    return self.process_outbound_heartbeat(message).await;
                 }
-                return;
-            }
+                if let MetadataKind::Discover(metadata) = message.metadata_mut() {
+                    if let DpMessageKind::INeedSome = metadata.kind {
+                        let introducer = metadata.peer_list.pop().unwrap();
+                        self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DPP_TTL_MILLIS * 2));
+                        metadata.kind = DpMessageKind::Request;
+                        return { self.send_checked(vec![introducer], message, false).await; }
+                    }
+                    if let DpMessageKind::IveGotSome = metadata.kind {
+                        for peer in metadata.peer_list.iter() {
+                            self.add_new_peer(*peer);
+                        }
+                        return;
+                    }
+                }
+                if let MetadataKind::Distribute(metadata) = message.metadata() {
+                    return self.initial_distribution_request(message.id(), metadata.clone()).await;
+                }
+                self.send_response(message).await;
+            },
+            ClientApiRequest::ClearActiveSessions => self.stream_session_manager.clear_all_sources_sinks()
         }
-        if let MetadataKind::Distribute(metadata) = message.metadata() {
-            return self.initial_distribution_request(message.id(), metadata.clone()).await;
-        }
-        self.send_response(message).await;
     }
 
     async fn process_follow_up(&mut self, id: NumId) {
@@ -291,7 +296,7 @@ impl MessageStaging {
         }
         info!(myself = ?self.outbound_gateway.myself, "new source at");
         self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), id, metadata.hop_count).await;
-        let file = self.stream_session_manager.file_mut(&metadata.host_name);
+        let file = option_early_return!(self.stream_session_manager.file_mut(&metadata.host_name));
         let (_, chunk) = result_early_return!(file.next_chunk_and_id(NumId(option_early_return!(u128::checked_sub(id.0, 1)))).await);
         self.stream_session_manager.push_resource_distribution(&metadata.host_name, id);
         let initial_message = Message::new(Peer::default(), id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), metadata.host_name.clone())), MessageDirection::OneHop);
@@ -311,7 +316,7 @@ impl MessageStaging {
         if dests.is_empty() {
             return;
         }
-        let file = self.stream_session_manager.file_mut(&host_name);
+        let file = option_early_return!(self.stream_session_manager.file_mut(&host_name));
         let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(received_id).await);
         self.stream_session_manager.push_resource_distribution(&host_name, new_id);
         let message = Message::new(Peer::default(), new_id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), host_name)), MessageDirection::OneHop);
@@ -327,7 +332,7 @@ impl MessageStaging {
             MetadataKind::Search(metadata) => search::logic(self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()),
             MetadataKind::Discover(metadata) => {
                 if self.discover_peer_processor.continue_propagating(metadata, self.outbound_gateway.myself) {
-                    (metadata.origin, Some(EarlyReturnContext(self.outbound_channel_tx.clone(), message.clone())), Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
+                    (metadata.origin, Some(EarlyReturnContext(self.client_api_tx.clone(), message.clone())), Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
                 } else {
                     metadata.kind = DpMessageKind::Response;
                     (metadata.origin, None, Some(DPP_TTL_MILLIS), PropagationDirection::Reverse)
@@ -376,7 +381,7 @@ impl MessageStaging {
         }
         let peer_len_curr_max = self.discover_peer_processor.peer_len_curr_max(&id);
         if peer_len_curr_max == 0 {
-            self.discover_peer_processor.set_staging_early_return(self.outbound_channel_tx.clone(), id);
+            self.discover_peer_processor.set_staging_early_return(self.client_api_tx.clone(), id);
         }
         self.discover_peer_processor.stage_message(id, metadata, peer_len_curr_max);
     }
@@ -388,7 +393,7 @@ impl MessageStaging {
                     self.stream_session_manager.new_sink_retrieval(metadata.host_name.clone())
                 }
                 self.stream_session_manager.add_destination_sink(&metadata.host_name, sender);
-                self.stream_session_manager.retrieval_response_action(payload, metadata.host_name, id).await
+                option_early_return!(self.stream_session_manager.retrieval_response_action(payload, metadata.host_name, id).await)
             },
             StreamPayloadKind::Response(payload) => {
                 self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
@@ -418,7 +423,7 @@ impl MessageStaging {
             DistributionResponse::InstallOk => {
                 self.stream_session_manager.finalize_resource_distribution(&host_name, &id, sender_id);
                 self.cached_stream_messages.pop(&id);
-                let (mut hop_count, distribution_id) = self.stream_session_manager.curr_hop_count_and_distribution_id(&host_name);
+                let (mut hop_count, distribution_id) = option_early_return!(self.stream_session_manager.curr_hop_count_and_distribution_id(&host_name));
                 hop_count -= 1;
                 if hop_count == 0 {
                     info!(myself = %self.outbound_gateway.myself.id, host_name, "Distribution finished");
@@ -459,10 +464,10 @@ impl MessageStaging {
         // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
         self.unconfirmed_peers.insert(peer.id, peer.endpoint_pair, "Stage:UnconfirmedPeers");
         let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
-        let outbound_channel = self.outbound_channel_tx.clone();
+        let outbound_channel = self.client_api_tx.clone();
         tokio::spawn(async move {
             while unconfirmed_peers.contains_key(&peer.id) {
-                result_early_return!(outbound_channel.send(Message::new_heartbeat(peer)));
+                result_early_return!(outbound_channel.send(ClientApiRequest::Message(Message::new_heartbeat(peer))));
                 sleep(HEARTBEAT_INTERVAL_SECONDS).await;
             }
         });
@@ -496,7 +501,7 @@ impl MessageStaging {
         }
     }
 
-    pub fn outbound_channel_tx(&self) -> &mpsc::UnboundedSender<Message> { &self.outbound_channel_tx }
+    pub fn client_api_tx(&self) -> &mpsc::UnboundedSender<ClientApiRequest> { &self.client_api_tx }
     pub fn peer_ops(&self) -> &Arc<Mutex<PeerOps>> { &self.peer_ops }
 }
 
@@ -506,4 +511,9 @@ pub enum PropagationDirection {
     Reverse,
     Stop,
     Final
+}
+
+pub enum ClientApiRequest {
+    ClearActiveSessions,
+    Message(Message)
 }

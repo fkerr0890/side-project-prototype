@@ -13,9 +13,9 @@ pub fn logic(myself: Peer, metadata: &mut SearchMetadata, local_hosts: &HashMap<
         SearchMetadataKind::Distribution => myself.id != metadata.origin.id && !local_hosts.contains_key(&metadata.host_name)
     };
     if !should_stop {
-        debug!(?myself, "Stopped propagating search request");
         (metadata.origin, None, None, PropagationDirection::Forward)
     } else {
+        debug!(?myself, "Stopped propagating search request");
         let prev_origin = metadata.origin;
         metadata.origin = myself;
         (prev_origin, None, None, PropagationDirection::Reverse)

@@ -1,9 +1,8 @@
 use std::{collections::HashSet, net::SocketAddrV4, panic, process, sync::Arc, time::Duration};
 
-use crate::{http::ServerContext, message::{NumId, Peer}, message_processing::{DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}, MAX_TIME};
+use crate::{http::ServerContext, message::{NumId, Peer}, message_processing::{stage::ClientApiRequest, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}, MAX_TIME};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, Level};
 use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
@@ -43,7 +42,8 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
         let is_end = host_indices.contains(&i);
         let is_start = start == i;
         let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move { Node::new().listen(is_start, is_end, Some(rx), introducer, id, Vec::with_capacity(0), endpoint_pair, socket, ServerContext::new(http_handler_tx), http_handler_rx, None).await });
+        let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move { Node::new().listen(is_start, is_end, Some(rx), introducer, id, Vec::with_capacity(0), endpoint_pair, socket, ServerContext::new(http_handler_tx), http_handler_rx, client_api_tx, client_api_rx).await });
         sleep(DPP_TTL_MILLIS*6).await;
         println!();
     }
@@ -54,11 +54,10 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
     }
 }
 
-pub async fn load_nodes_from_file() -> (ServerContext, CancellationToken, TaskTracker) {
+pub async fn load_nodes_from_file() -> (ServerContext, Vec<mpsc::UnboundedSender<ClientApiRequest>>) {
     let mut paths = fs::read_dir("../peer_info").await.unwrap();
     let mut server_context = None;
-    let ct = CancellationToken::new();
-    let task_tracker = TaskTracker::new();
+    let mut client_api_txs = Vec::new();
     while let Some(path) = paths.next_entry().await.unwrap() {
         let node_info: NodeInfo = serde_json::from_slice(&fs::read(path.path()).await.unwrap()).unwrap();
         let (port, id, peers, is_start, is_end) = Node::read_node_info(node_info);
@@ -66,15 +65,16 @@ pub async fn load_nodes_from_file() -> (ServerContext, CancellationToken, TaskTr
         let endpoint_pair = EndpointPair::new(SocketAddrV4::new("127.0.0.1".parse().unwrap(), port), SocketAddrV4::new("127.0.0.1".parse().unwrap(), port));
         let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
         let context = ServerContext::new(http_handler_tx);
+        let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
+        client_api_txs.push(client_api_tx.clone());
         if is_start {
             server_context = Some(context.clone());
         }
-        let ct_clone = ct.clone();
-        task_tracker.spawn(async move { Node::new().listen(is_start, is_end, None, None, id, peers, endpoint_pair, socket, context, http_handler_rx, Some(ct_clone)).await });
+        tokio::spawn(async move { Node::new().listen(is_start, is_end, None, None, id, peers, endpoint_pair, socket, context, http_handler_rx, client_api_tx, client_api_rx).await });
     }
-    task_tracker.close();
+    sleep(Duration::from_secs(1)).await;
     debug!("Setup complete");
-    (server_context.unwrap(), ct, task_tracker)
+    (server_context.unwrap(), client_api_txs)
 }
 
 pub fn measure_lock_time() {

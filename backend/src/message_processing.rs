@@ -7,6 +7,7 @@ use tracing::{error, info};
 use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirectionAgreement, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 pub use self::discover::DiscoverPeerProcessor;
+use self::stage::ClientApiRequest;
 
 pub const SEARCH_TIMEOUT_SECONDS: Duration = Duration::from_secs(30);
 pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(500);
@@ -151,7 +152,7 @@ impl BreadcrumbService {
         let is_new_key = if let Some(context) = early_return_context {
             let EarlyReturnContext(tx, message) = context;
             self.breadcrumbs.set_timer_with_send_action(id, TimerOptions::default().with_ttl(ttl), move || {
-                result_early_return!(tx.send(message));
+                result_early_return!(tx.send(ClientApiRequest::Message(message)));
             }, "BreadcrumbService")
         }
         else {
@@ -172,4 +173,4 @@ impl BreadcrumbService {
     }
 }
 
-pub struct EarlyReturnContext(mpsc::UnboundedSender<Message>, Message);
+pub struct EarlyReturnContext(mpsc::UnboundedSender<ClientApiRequest>, Message);

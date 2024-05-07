@@ -5,7 +5,7 @@ use tracing::{instrument, warn};
 
 use crate::{lock, message::{DiscoverMetadata, DpMessageKind, Message, MessageDirection, MetadataKind, NumId, Peer}, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
-use super::DPP_TTL_MILLIS;
+use super::{stage::ClientApiRequest, DPP_TTL_MILLIS};
 
 pub struct DiscoverPeerProcessor {
     message_staging: TransientCollection<ArcMap<NumId, DiscoverMetadata>>
@@ -38,7 +38,7 @@ impl DiscoverPeerProcessor {
         }
     }
 
-    pub fn set_staging_early_return(&mut self, outbound: mpsc::UnboundedSender<Message>, id: NumId) {
+    pub fn set_staging_early_return(&mut self, outbound: mpsc::UnboundedSender<ClientApiRequest>, id: NumId) {
         let mut message_staging_clone = self.message_staging.collection().clone();
         self.message_staging.set_timer_with_send_action(id, TimerOptions::default(), move || { Self::send_final_response_static(&mut message_staging_clone, id, &outbound); }, "Discover:MessageStaging");
     }
@@ -51,10 +51,10 @@ impl DiscoverPeerProcessor {
     }
 
     #[instrument(level = "trace", skip(message_staging))]
-    fn send_final_response_static(message_staging: &mut ArcMap<NumId, DiscoverMetadata>, id: NumId, outbound: &mpsc::UnboundedSender<Message>) {
+    fn send_final_response_static(message_staging: &mut ArcMap<NumId, DiscoverMetadata>, id: NumId, outbound: &mpsc::UnboundedSender<ClientApiRequest>) {
         if let Some(mut staged_metadata) = message_staging.pop(&id) {
             staged_metadata.kind = DpMessageKind::IveGotSome;
-            result_early_return!(outbound.send(Message::new(staged_metadata.origin, id, None, MetadataKind::Discover(staged_metadata), MessageDirection::Response)));
+            result_early_return!(outbound.send(ClientApiRequest::Message(Message::new(staged_metadata.origin, id, None, MetadataKind::Discover(staged_metadata), MessageDirection::Response))));
         }
     }
 }

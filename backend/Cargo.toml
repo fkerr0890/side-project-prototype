@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "~1", features = ["full"] }
-tokio-util = { version = "~0", features = ["rt"] }
 priority-queue = "~1"
 stun = "~0"
 uuid = { version = "~1", features = ["v4"] }

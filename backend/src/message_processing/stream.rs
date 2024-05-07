@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{http::{self, SerdeHttpRequest}, message::{Message, MessageDirection, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, node::EndpointPair, option_early_return, result_early_return};
 
@@ -38,28 +38,28 @@ impl StreamSessionManager {
 
     pub fn sink_active_distribution(&self, host_name: &str) -> bool { matches!(self.sinks.get(host_name), Some(StreamSink::Distribution(_))) }
 
-    pub fn get_destinations_source_retrieval(&self, host_name: &str) -> HashSet<Peer> { self.sources_retrieval.get(host_name).unwrap().active_dests.clone() }
+    pub fn get_destinations_source_retrieval(&self, host_name: &str) -> HashSet<Peer> { option_early_return!(self.sources_retrieval.get(host_name), HashSet::with_capacity(0)).active_dests.clone() }
     
     pub fn get_all_destinations_source_retrieval(&self) -> Vec<Peer> { self.sources_retrieval.values().flat_map(|s| s.active_dests.clone()).collect() }
 
-    pub fn get_destinations_source_distribution(&self, host_name: &str) -> Vec<Peer> { self.sources_distribution.get(host_name).unwrap().dests_remaining.iter().map(|d| Peer::new(*d.1, *d.0)).collect() }
+    pub fn get_destinations_source_distribution(&self, host_name: &str) -> Vec<Peer> { option_early_return!(self.sources_distribution.get(host_name), Vec::with_capacity(0)).dests_remaining.iter().map(|d| Peer::new(*d.1, *d.0)).collect() }
 
     pub fn get_all_destinations_source_distribution(&self) -> Vec<Peer> { self.sources_distribution.values().flat_map(|s| s.stream_source.active_dests.clone()).collect() }
 
-    pub fn get_destinations_sink(&mut self, host_name: &str) -> HashSet<Peer> { self.sinks.get_mut(host_name).unwrap().unwrap_retrieval().clone() }
+    pub fn get_destinations_sink(&mut self, host_name: &str) -> HashSet<Peer> { option_early_return!(self.sinks.get_mut(host_name), HashSet::with_capacity(0)).unwrap_retrieval().clone() }
 
     pub fn get_all_destinations_sink(&mut self) -> Vec<Peer> { self.sinks.values().filter_map(|s| if let StreamSink::Retrieval(dests) = s { Some(dests.clone()) } else { None }).flatten().collect() }
 
     pub fn add_destination_source_retrieval(&mut self, host_name: &str, dest: Peer) -> bool {
-        self.sources_retrieval.get_mut(host_name).unwrap().active_dests.insert(dest)
+        option_early_return!(self.sources_retrieval.get_mut(host_name), false).active_dests.insert(dest)
     }
 
     pub fn add_destination_source_distribution(&mut self, host_name: &str, dest: Peer) -> bool {
-        self.sources_distribution.get_mut(host_name).unwrap().add_destination(dest)
+        option_early_return!(self.sources_distribution.get_mut(host_name), false).add_destination(dest)
     }
 
     pub fn add_destination_sink(&mut self, host_name: &str, dest: Peer) -> bool {
-        self.sinks.get_mut(host_name).unwrap().unwrap_retrieval().insert(dest)
+        option_early_return!(self.sinks.get_mut(host_name), false).unwrap_retrieval().insert(dest)
     }
 
     pub fn host_installed(&self, host_name: &str) -> bool { self.local_hosts.contains_key(host_name) }
@@ -81,40 +81,42 @@ impl StreamSessionManager {
         assert!(self.sinks.insert(host_name, StreamSink::Distribution(DistributionStreamSink::new())).is_none());
     }
 
-    pub fn push_resource_retrieval(&mut self, host_name: &str, id: NumId) { self.sources_retrieval.get_mut(host_name).unwrap().push_resource(id); }
+    pub fn push_resource_retrieval(&mut self, host_name: &str, id: NumId) { option_early_return!(self.sources_retrieval.get_mut(host_name)).push_resource(id); }
 
-    pub fn push_resource_distribution(&mut self, host_name: &str, id: NumId) { self.sources_distribution.get_mut(host_name).unwrap().push_resource(id); }
+    pub fn push_resource_distribution(&mut self, host_name: &str, id: NumId) { option_early_return!(self.sources_distribution.get_mut(host_name)).push_resource(id); }
 
-    pub fn set_dests_remaining_distribution(&mut self, host_name: &str) { self.sources_distribution.get_mut(host_name).unwrap().set_dests_remaining() }
+    pub fn set_dests_remaining_distribution(&mut self, host_name: &str) { option_early_return!(self.sources_distribution.get_mut(host_name)).set_dests_remaining() }
 
     pub fn finalize_resource_retrieval(&mut self, host_name: &str, id: &NumId) {
-        self.sources_retrieval.get_mut(host_name).unwrap().finalize_resource(id);
+        option_early_return!(self.sources_retrieval.get_mut(host_name)).finalize_resource(id);
     }
 
     pub fn finalize_resource_distribution(&mut self, host_name: &str, id: &NumId, sender_id: NumId) -> bool {
-        self.sources_distribution.get_mut(host_name).unwrap().finalize_resource(id, sender_id)
+        option_early_return!(self.sources_distribution.get_mut(host_name), false).finalize_resource(id, sender_id)
     }
 
-    pub fn finalize_all_resources_distribution(&mut self, host_name: &str) { self.sources_distribution.get_mut(host_name).unwrap().stream_source.finalize_all_resources() }
+    pub fn finalize_all_resources_retrieval(&mut self, host_name: &str) { option_early_return!(self.sources_retrieval.get_mut(host_name)).finalize_all_resources() }
 
-    pub fn lock_dests_distribution(&mut self, host_name: &str) { self.sources_distribution.get_mut(host_name).unwrap().dests_locked = true }
+    pub fn finalize_all_resources_distribution(&mut self, host_name: &str) { option_early_return!(self.sources_distribution.get_mut(host_name)).stream_source.finalize_all_resources() }
 
-    pub fn dests_locked_distribution(&self, host_name: &str) -> bool { self.sources_distribution.get(host_name).unwrap().dests_locked }
+    pub fn lock_dests_distribution(&mut self, host_name: &str) { option_early_return!(self.sources_distribution.get_mut(host_name)).dests_locked = true }
 
-    pub async fn retrieval_response_action(&self, request: SerdeHttpRequest, host_name: String, id: NumId) -> Message {
-        let socket = self.local_hosts.get(&host_name).unwrap();
+    pub fn dests_locked_distribution(&self, host_name: &str) -> bool { option_early_return!(self.sources_distribution.get(host_name), false).dests_locked }
+
+    pub async fn retrieval_response_action(&self, request: SerdeHttpRequest, host_name: String, id: NumId) -> Option<Message> {
+        let socket = self.local_hosts.get(&host_name)?;
         let response = http::make_request(request, &socket.to_string()).await;
-        Message::new(
+        Some(Message::new(
             Peer::default(),
             id,
             None,
             MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::Response(response), host_name)),
             MessageDirection::OneHop
-        )
+        ))
     }
 
     pub async fn distribution_response_action(&mut self, bytes: Vec<u8>, host_name: String, id: NumId) -> Option<Message> {
-        let result = self.sinks.get_mut(&host_name).unwrap().unwrap_distribution().stage_message(bytes, id).await?;
+        let result = self.sinks.get_mut(&host_name)?.unwrap_distribution().stage_message(bytes, id).await?;
         if let DistributionResponse::InstallOk = result {
             self.local_hosts.insert(host_name.clone(), SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 3000));
         }
@@ -127,13 +129,20 @@ impl StreamSessionManager {
         ))
     }
 
-    pub fn file_mut(&mut self, host_name: &str) -> &mut ChunkedFileHandler { &mut self.sources_distribution.get_mut(host_name).unwrap().file }
+    pub fn clear_all_sources_sinks(&mut self) {
+        self.sources_retrieval.drain().for_each(|(_, mut stream_source)| stream_source.finalize_all_resources());
+        self.sources_retrieval = HashMap::new();
+        self.sources_distribution.drain().for_each(|(_, mut source)| source.stream_source.finalize_all_resources());
+        self.sources_distribution = HashMap::new();
+    }
+
+    pub fn file_mut(&mut self, host_name: &str) -> Option<&mut ChunkedFileHandler> { Some(&mut self.sources_distribution.get_mut(host_name)?.file) }
     
     pub fn local_hosts(&self) -> &HashMap<String, SocketAddrV4> { &self.local_hosts }
 
-    pub fn curr_hop_count_and_distribution_id(&self, host_name: &str) -> (u16, NumId) {
-        let source = self.sources_distribution.get(host_name).unwrap();
-        (source.hop_count, source.id)
+    pub fn curr_hop_count_and_distribution_id(&self, host_name: &str) -> Option<(u16, NumId)> {
+        let source = self.sources_distribution.get(host_name)?;
+        Some((source.hop_count, source.id))
     }
 
     pub fn follow_up_rx(&mut self) -> &mut mpsc::UnboundedReceiver<NumId> { &mut self.follow_up_rx }
