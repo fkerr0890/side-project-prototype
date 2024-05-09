@@ -249,6 +249,29 @@ macro_rules! result_early_return {
 }
 
 #[macro_export]
+// macro_rules! time {
+//     ($block:block, $aggregate:literal) => {
+//         {
+//             let now = std::time::Instant::now();
+//             let output = $block;
+//             let duration = now.elapsed();
+//             if $aggregate {
+//                 let mut data = $crate::MAX_TIME.lock().unwrap();
+//                 if data.0 < duration {
+//                     data.0 = duration;
+//                     data.3 = format!(" at {} {}", file!(), line!()); 
+//                 }
+//                 data.1 += duration;
+//                 data.2 += 1;
+//             }
+//             else {
+//                 println!("Time elapsed: {:.2?} at {} {}", duration, file!(), line!());
+//             }
+//             output
+//         }
+//     }
+// }
+
 macro_rules! time {
     ($block:block) => {
         {

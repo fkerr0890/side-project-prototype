@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{http::{self, SerdeHttpRequest}, message::{Message, MessageDirection, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, node::EndpointPair, option_early_return, result_early_return};
 

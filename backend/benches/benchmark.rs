@@ -3,7 +3,7 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use hyper::{Body, Request};
 use p2p::{http::{self, ServerContext}, message_processing::stage::ClientApiRequest, test_utils};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::{sync::mpsc::UnboundedSender, time::sleep};
 use tracing::Level;
 
 fn bench_http(c: &mut Criterion) {
@@ -16,10 +16,12 @@ fn bench_http(c: &mut Criterion) {
 async fn send_request(arg: &(ServerContext, Vec<UnboundedSender<ClientApiRequest>>)) {
     let (server_context, txs) = arg;
     let request = Request::get("/~example").body(Body::empty()).unwrap();
-    println!("{:?}", http::handle_request(server_context.clone(), request).await.unwrap());
+    http::handle_request(server_context.clone(), request).await.unwrap();
+    sleep(Duration::from_millis(1000)).await;
     for tx in txs {
         tx.send(ClientApiRequest::ClearActiveSessions).unwrap();
     }
+    sleep(Duration::from_millis(200)).await;
 }
 
 criterion_group! {

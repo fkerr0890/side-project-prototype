@@ -106,13 +106,12 @@ impl Node {
             }
         });
 
-        tokio::spawn(async move {
-            loop {
-                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
-                result_early_return!(client_api_tx.send(ClientApiRequest::Message(Message::new_heartbeat(Peer::default()))));
-            }
-        });
-        
+        // tokio::spawn(async move {
+        //     loop {
+        //         sleep(HEARTBEAT_INTERVAL_SECONDS).await;
+        //         result_early_return!(client_api_tx.send(ClientApiRequest::Message(Message::new_heartbeat(Peer::default()))));
+        //     }
+        // });        
 
         if is_start {
             http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;

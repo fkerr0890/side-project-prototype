@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::
 use ring::aead;
 use tokio::{select, sync::mpsc, time::sleep};
 use tracing::{debug, field, info, instrument, trace, warn};
-use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, time, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
 
@@ -154,7 +154,10 @@ impl MessageStaging {
                 }
                 self.send_response(message).await;
             },
-            ClientApiRequest::ClearActiveSessions => self.stream_session_manager.clear_all_sources_sinks()
+            ClientApiRequest::ClearActiveSessions => time!({
+                self.stream_session_manager.clear_all_sources_sinks();
+                self.key_store.clear();
+            })
         }
     }
 
@@ -398,6 +401,7 @@ impl MessageStaging {
             StreamPayloadKind::Response(payload) => {
                 self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
                 self.cached_stream_messages.pop(&id);
+                warn!("Done");
                 return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
             },
             StreamPayloadKind::DistributionRequest(bytes) => {

@@ -93,6 +93,11 @@ impl KeyStore {
         self.rng.fill(&mut bytes)?;
         Ok(bytes)
     }
+
+    pub fn clear(&self) {
+        lock!(self.symmetric_keys.collection().map()).clear();
+        lock!(self.private_keys.collection().map()).clear();
+    }
 }
 
 pub fn digest_parts(parts: Vec<&[u8]>) -> Vec<u8> {
