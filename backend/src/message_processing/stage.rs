@@ -88,7 +88,7 @@ impl MessageStaging {
         let (peer_id_bytes, nonce) = suffix.split_at(suffix.len() - aead::NONCE_LEN);
         let peer_id = NumId(u128::from_be_bytes(peer_id_bytes.try_into().unwrap()));
         let mut message_bytes = message_bytes.to_vec();
-        message_bytes = self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)).unwrap();
+        message_bytes = self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)).expect(&format!("no key from {sender_addr} at {:?}", self.outbound_gateway.myself));
         let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
         if inbound_message.separate_parts().sender().socket != sender_addr {
             warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
@@ -331,8 +331,9 @@ impl MessageStaging {
         if let MessageDirection::Response = message.direction() {
             return PropagationDirection::Reverse;
         }
+        let id = message.id();
         let (origin, early_return_context, ttl, direction) = match message.metadata_mut() {
-            MetadataKind::Search(metadata) => search::logic(self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()),
+            MetadataKind::Search(metadata) => search::logic(id, self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()),
             MetadataKind::Discover(metadata) => {
                 if self.discover_peer_processor.continue_propagating(metadata, self.outbound_gateway.myself) {
                     (metadata.origin, Some(EarlyReturnContext(self.client_api_tx.clone(), message.clone())), Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
@@ -401,7 +402,6 @@ impl MessageStaging {
             StreamPayloadKind::Response(payload) => {
                 self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
                 self.cached_stream_messages.pop(&id);
-                warn!("Done");
                 return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
             },
             StreamPayloadKind::DistributionRequest(bytes) => {

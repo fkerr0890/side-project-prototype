@@ -81,6 +81,6 @@ pub fn measure_lock_time() {
     tokio::spawn(async move {
         sleep(Duration::from_secs(15)).await;
         let (max, sum, count, ref at) = *MAX_TIME.lock().unwrap();
-        println!("Max: {:.2?}, Avg: {:.2?},{}", max, sum / count, at);
+        println!("Max: {:.2?}, Avg: {:.2?},{}", max, if count > 0 { sum / count } else { Duration::ZERO }, at);
     });
 }
