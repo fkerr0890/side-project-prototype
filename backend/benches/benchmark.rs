@@ -2,15 +2,30 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use hyper::{Body, Request};
-use p2p::{http::{self, ServerContext}, test_utils};
+use p2p::{http::{self, ServerContext}, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::stage::ClientApiRequest, test_utils};
+use rand::seq::IteratorRandom;
 use tracing::Level;
+use uuid::Uuid;
 
 fn bench_retrieval(c: &mut Criterion) {
     test_utils::setup(Level::INFO);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let (server_context, _) = runtime.block_on(test_utils::load_nodes_from_file());
     runtime.block_on(send_request(&server_context));
-    c.bench_with_input(BenchmarkId::new("bench_http", "shitty"), &server_context, |b, p| b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| { send_request(p) }));
+    c.bench_with_input(BenchmarkId::new("bench_http", "shitty"), &server_context, |b, p| b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| send_request(p) ));
+}
+
+fn bench_distribution(c: &mut Criterion) {
+    test_utils::setup(Level::INFO);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (_, txs) = runtime.block_on(test_utils::load_nodes_from_file());
+    let start_tx = txs.iter().choose(&mut rand::thread_rng()).unwrap();
+    start_tx.send(ClientApiRequest::AddHost(String::from("Apple Cover Letter.pdf"))).unwrap();
+    c.bench_with_input(BenchmarkId::new("bench_distribution", "shitty"), &start_tx, |b, p| b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
+        let dmessage = Message::new(Peer::default(), NumId(Uuid::new_v4().as_u128()), None, MetadataKind::Distribute(DistributeMetadata::new(1, String::from("Apple Cover Letter.pdf"))), MessageDirection::Request);
+        //TODO: Fix
+        p.send(ClientApiRequest::Message(dmessage)).unwrap();
+    }));
 }
 
 async fn send_request(server_context: &ServerContext) {

@@ -2,10 +2,9 @@ use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
-use tracing::{debug, error, info};
-use uuid::Uuid;
+use tracing::{debug, error};
 
-use crate::{http::{self, SerdeHttpResponse, ServerContext}, lock, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::{stage::{ClientApiRequest, MessageStaging}, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, peer, result_early_return};
+use crate::{http::{self, SerdeHttpResponse, ServerContext}, lock, message::{Message, NumId, Peer}, message_processing::{stage::{ClientApiRequest, MessageStaging}, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, peer, result_early_return};
 
 pub struct Node {
     nat_kind: NatKind
@@ -50,9 +49,6 @@ impl Node {
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }
-        if is_start {
-            local_hosts.insert(String::from("Apple Cover Letter.pdf"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
-        }
 
         let myself = Peer::new(endpoint_pair, id);
 
@@ -78,16 +74,11 @@ impl Node {
 
         let peer_ops = message_staging.peer_ops().clone();
         if let Some(mut report_trigger) = report_trigger {
-            let (port, id, client_api_tx_clone) = (endpoint_pair.public_endpoint.port(), id, message_staging.client_api_tx().clone());
+            let (port, id) = (endpoint_pair.public_endpoint.port(), id);
             tokio::spawn(async move {
                 report_trigger.recv().await;
                 let node_info = NodeInfo::new(lock!(peer_ops).peers_and_scores(), is_start, is_end, port, id.0);
                 fs::write(format!("../peer_info/{}.json", node_info.name), serde_json::to_vec(&node_info).unwrap()).await.unwrap();
-                // if is_start {
-                //     info!("Starting distribution");
-                //     let dmessage = Message::new(Peer::default(), NumId(Uuid::new_v4().as_u128()), None, MetadataKind::Distribute(DistributeMetadata::new(1, String::from("Apple Cover Letter.pdf"))), MessageDirection::Request);
-                //     client_api_tx_clone.send(dmessage).unwrap();
-                // }
             });
         }
 

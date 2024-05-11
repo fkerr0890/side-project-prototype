@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use tokio::{fs::File, io::AsyncReadExt};
-use tracing::debug;
+use tracing::info;
 
 use crate::message::NumId;
 
@@ -22,7 +22,7 @@ impl ChunkedFileHandler {
         let mut buffer = [0; 1024];
         let n = self.file.read(&mut buffer).await.unwrap();
         self.bytes_read += n;
-        debug!(bytes_read = self.bytes_read, "Distribution");
+        info!(bytes_read = self.bytes_read, "Distribution");
         let id = NumId(u128::overflowing_add(received_id.0 , 1).0);
         self.sent_id = Some(id);
         Ok((id, if n == 0 { Vec::with_capacity(0) } else { buffer[..n].to_vec() }))

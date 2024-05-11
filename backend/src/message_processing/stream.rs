@@ -140,6 +140,8 @@ impl StreamSessionManager {
     
     pub fn local_hosts(&self) -> &HashMap<String, SocketAddrV4> { &self.local_hosts }
 
+    pub fn add_local_host(&mut self, host_name: String, endpoint: SocketAddrV4) { self.local_hosts.insert(host_name, endpoint); }
+
     pub fn curr_hop_count_and_distribution_id(&self, host_name: &str) -> Option<(u16, NumId)> {
         let source = self.sources_distribution.get(host_name)?;
         Some((source.hop_count, source.id))
