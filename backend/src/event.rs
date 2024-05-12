@@ -49,4 +49,5 @@ pub enum StepPrecision {
 pub enum TimeboundAction {
     LockDestsDistribution(String, NumId),
     SendHeartbeats,
+    RemoveCachedStreamMessage(NumId)
 }

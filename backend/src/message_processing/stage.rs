@@ -23,7 +23,7 @@ pub struct MessageStaging {
     client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
     to_http_handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>>,
     from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
-    cached_stream_messages: TransientCollection<ArcMap<NumId, Message>>,
+    cached_stream_messages: HashMap<NumId, Message>,
     event_manager: TimelineEventManager
 }
 
@@ -57,7 +57,7 @@ impl MessageStaging {
             stream_session_manager: StreamSessionManager::new(local_hosts),
             to_http_handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             from_http_handlers,
-            cached_stream_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            cached_stream_messages: HashMap::new(),
             event_manager: TimelineEventManager::new(StepPrecision::Sec)
         };
         ret.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
@@ -176,7 +176,7 @@ impl MessageStaging {
     }
 
     async fn process_follow_up(&mut self, id: NumId) {
-        let message = option_early_return!(self.cached_stream_messages.pop(&id));
+        let message = option_early_return!(self.cached_stream_messages.remove(&id));
         let message = if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name}) = message.metadata() {
             option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await)
         }
@@ -186,7 +186,7 @@ impl MessageStaging {
         else {
             panic!()
         };
-        self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
+        self.insert_cached_stream_message(id, message);
     }
 
     async fn process_timebound_action(&mut self, action: Option<TimeboundAction>) {
@@ -197,8 +197,14 @@ impl MessageStaging {
                 self.stream_session_manager.lock_dests_distribution(&host_name);
                 self.send_distribution_request(id, host_name).await;
             },
-            TimeboundAction::SendHeartbeats => self.send_heartbeats().await
+            TimeboundAction::SendHeartbeats => self.send_heartbeats().await,
+            TimeboundAction::RemoveCachedStreamMessage(id) => { self.cached_stream_messages.remove(&id); }
         }
+    }
+
+    fn insert_cached_stream_message(&mut self, id: NumId, message: Message) {
+        self.event_manager.put_event(TimeboundAction::RemoveCachedStreamMessage(id), SRP_TTL_SECONDS);
+        self.cached_stream_messages.insert(id, message);
     }
 
     #[instrument(level = "trace", skip_all, fields(peers = field::Empty))]
@@ -292,11 +298,11 @@ impl MessageStaging {
         if self.stream_session_manager.source_active_retrieval(&host_name) {
             self.stream_session_manager.push_resource_retrieval(&host_name, id);
             let message = option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(&host_name), message, true).await);
-            self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
+            self.insert_cached_stream_message(id, message);
         } else {
             self.stream_session_manager.new_source_retrieval(host_name.clone());
             self.stream_session_manager.push_resource_retrieval(&host_name, id);
-            self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
+            self.insert_cached_stream_message(id, message);
             let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name, SearchMetadataKind::Retrieval));
             self.send_outbound_message(search_message).await;
         };
@@ -317,7 +323,7 @@ impl MessageStaging {
         let (_, chunk) = result_early_return!(file.next_chunk_and_id(NumId(option_early_return!(u128::checked_sub(id.0, 1)))).await);
         self.stream_session_manager.push_resource_distribution(&metadata.host_name, id);
         let initial_message = Message::new(Peer::default(), id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), metadata.host_name.clone())), MessageDirection::OneHop);
-        self.cached_stream_messages.insert(id, initial_message, "Staging:CachedStreamMessages");
+        self.insert_cached_stream_message(id, initial_message);
         let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name.clone(), SearchMetadataKind::Distribution));
         self.breadcrumb_service.remove_breadcrumb(&id);
         self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DISTRIBUTION_TTL_SECONDS));
@@ -327,7 +333,7 @@ impl MessageStaging {
 
     #[instrument(level = "trace", skip_all, fields(%received_id))]
     async fn send_distribution_request(&mut self, received_id: NumId, host_name: String) {
-        self.cached_stream_messages.pop(&received_id);
+        self.cached_stream_messages.remove(&received_id);
         self.stream_session_manager.set_dests_remaining_distribution(&host_name);
         let dests = self.stream_session_manager.get_destinations_source_distribution(&host_name);
         if dests.is_empty() {
@@ -338,7 +344,7 @@ impl MessageStaging {
         self.stream_session_manager.push_resource_distribution(&host_name, new_id);
         let message = Message::new(Peer::default(), new_id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), host_name)), MessageDirection::OneHop);
         let message = option_early_return!(self.send_checked(dests, message, true).await);
-        self.cached_stream_messages.insert(new_id, message, "Staging:CachedStreamMessages");
+        self.insert_cached_stream_message(new_id, message);
     }
 
     fn get_direction(&mut self, message: &mut Message) -> PropagationDirection {
@@ -415,7 +421,7 @@ impl MessageStaging {
             },
             StreamPayloadKind::Response(payload) => {
                 self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
-                self.cached_stream_messages.pop(&id);
+                self.cached_stream_messages.remove(&id);
                 return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
             },
             StreamPayloadKind::DistributionRequest(bytes) => {
@@ -440,7 +446,7 @@ impl MessageStaging {
             DistributionResponse::InstallError => panic!(),
             DistributionResponse::InstallOk => {
                 self.stream_session_manager.finalize_resource_distribution(&host_name, &id, sender_id);
-                self.cached_stream_messages.pop(&id);
+                self.cached_stream_messages.remove(&id);
                 let (mut hop_count, distribution_id) = option_early_return!(self.stream_session_manager.curr_hop_count_and_distribution_id(&host_name));
                 hop_count -= 1;
                 if hop_count == 0 {
@@ -460,7 +466,7 @@ impl MessageStaging {
     }
 
     async fn send_initial_stream_message(&mut self, id: NumId, sender: Peer) {
-        let Some(request) = self.cached_stream_messages.pop(&id) else {
+        let Some(request) = self.cached_stream_messages.remove(&id) else {
             debug!("Cached stream retrieval message unavailable, checking for pending outbound message");
             let mut cached_outbound_messages = lock!(self.cached_outbound_messages.collection().map());
             let cached_messages = option_early_return!(cached_outbound_messages.get_mut(&sender.id));
@@ -469,7 +475,7 @@ impl MessageStaging {
             return;
         };
         let request = option_early_return!(self.send_checked(vec![sender], request, true).await);
-        self.cached_stream_messages.insert(id, request, "Staging:CachedStreamMessages");
+        self.insert_cached_stream_message(id, request);
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
@@ -505,7 +511,7 @@ impl MessageStaging {
                 let (to_be_chunked, is_stream_request) = message.to_be_chunked();
                 let message = option_early_return!(self.send_checked(remaining_dests, message, to_be_chunked).await);
                 if is_stream_request {
-                    self.cached_stream_messages.insert(message.id(), message, "Staging:CachedStreamMessages");
+                    self.insert_cached_stream_message(message.id(), message);
                 }
             }
         }
