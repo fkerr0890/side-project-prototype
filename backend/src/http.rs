@@ -3,7 +3,7 @@ use std::{collections::HashMap, str::FromStr, convert::Infallible, net::SocketAd
 use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, header::{HeaderName, HeaderValue}, service::{make_service_fn, service_fn}, Server, Client, Method, Uri};
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, Level};
+use tracing::{debug, error, Level};
 use uuid::Uuid;
 
 use crate::{message::{Message, MessageDirection, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, time};
@@ -66,16 +66,17 @@ impl SerdeHttpResponse {
     }
 
     fn into_hyper_response(self) -> Response<Body> {
-        let mut response = Response::new(Body::from(self.body));
-        *response.status_mut() = match StatusCode::from_u16(self.status_code) {
+        let Self { body, status_code, version, headers } = self;
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = match StatusCode::from_u16(status_code) {
             Ok(status_code) => status_code,
-            Err(e) => return construct_error_response(e.to_string(), self.version.clone()).into_hyper_response()
+            Err(e) => return construct_error_response(e.to_string(), version).into_hyper_response()
         };
-        *response.version_mut() = string_to_version(self.version.clone());
-        *response.headers_mut() = match reconstruct_header_map(self.headers) {
+        *response.headers_mut() = match reconstruct_header_map(headers) {
             Ok(headers) => headers,
-            Err(e) => return construct_error_response(e.to_string(), self.version).into_hyper_response()
+            Err(e) => return construct_error_response(e.to_string(), version).into_hyper_response()
         };
+        *response.version_mut() = string_to_version(version);
         response
     }
 
@@ -156,9 +157,9 @@ impl ServerContext {
 }
 
 pub async fn handle_request(context: ServerContext, request: Request<Body>, testing: bool) -> Result<Response<Body>, Infallible> {
-    let epoch_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
-    let timestamp = u128::from_str(request.headers().get("timestamp").unwrap().to_str().unwrap()).unwrap();
-    info!(elapsed = epoch_now - timestamp, "Request latency millis");
+    // let epoch_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    // let timestamp = u128::from_str(request.headers().get("timestamp").unwrap().to_str().unwrap()).unwrap();
+    // debug!(elapsed = epoch_now - timestamp, "Request latency millis");
     time!({
     let request_version = request.version();
     let mut request = match time!( { SerdeHttpRequest::from_hyper_request(request, testing).await }, Some(Level::DEBUG)) {
@@ -187,7 +188,7 @@ pub async fn handle_request(context: ServerContext, request: Request<Body>, test
         }
     };
     Ok(response.into_hyper_response())
-    }, Some(Level::INFO))
+    }, Some(Level::DEBUG))
 }
 
 pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
@@ -215,7 +216,7 @@ pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpR
         Ok(response) => response,
         Err(e) => construct_error_response(e, request_version)
     }
-    }, Some(Level::INFO))
+    }, Some(Level::DEBUG))
 }
 
 pub fn construct_error_response(error: String, request_version: String) -> SerdeHttpResponse {

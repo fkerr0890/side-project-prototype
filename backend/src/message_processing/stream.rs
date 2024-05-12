@@ -48,7 +48,7 @@ impl StreamSessionManager {
 
     pub fn get_destinations_sink(&mut self, host_name: &str) -> HashSet<Peer> { option_early_return!(self.sinks.get_mut(host_name), HashSet::with_capacity(0)).unwrap_retrieval().clone() }
 
-    pub fn get_all_destinations_sink(&mut self) -> Vec<Peer> { self.sinks.values().filter_map(|s| if let StreamSink::Retrieval(dests) = s { Some(dests.clone()) } else { None }).flatten().collect() }
+    pub fn get_all_destinations_sink(&self) -> Vec<Peer> { self.sinks.values().filter_map(|s| if let StreamSink::Retrieval(dests) = s { Some(dests.clone()) } else { None }).flatten().collect() }
 
     pub fn add_destination_source_retrieval(&mut self, host_name: &str, dest: Peer) -> bool {
         option_early_return!(self.sources_retrieval.get_mut(host_name), false).active_dests.insert(dest)

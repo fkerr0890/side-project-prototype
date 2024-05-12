@@ -1,8 +1,8 @@
 use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
 use ring::aead;
-use tokio::{select, sync::mpsc, time::sleep};
+use tokio::{select, sync::mpsc};
 use tracing::{debug, field, info, instrument, trace, warn};
-use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, node::EndpointPair, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
 
@@ -12,7 +12,7 @@ pub struct MessageStaging {
     from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
     message_staging: TransientCollection<ArcMap<NumId, HashMap<usize, InboundMessage>>>,
     cached_outbound_messages: TransientCollection<ArcMap<NumId, CachedOutboundMessages>>,
-    unconfirmed_peers: TransientCollection<ArcMap<NumId, EndpointPair>>,
+    unconfirmed_peers: HashMap<NumId, Peer>,
     outbound_gateway: OutboundGateway,
     key_store: KeyStore,
     peer_ops: Arc<Mutex<PeerOps>>,
@@ -42,11 +42,11 @@ impl MessageStaging {
         for peer in intial_peers {
             peer_ops.add_initial_peer(peer)
         }
-        Self {
+        let mut ret = Self {
             from_inbound_gateway,
             message_staging: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             cached_outbound_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
-            unconfirmed_peers: TransientCollection::new(HEARTBEAT_INTERVAL_SECONDS*2, false, ArcMap::new()),
+            unconfirmed_peers: HashMap::new(),
             outbound_gateway,
             key_store: KeyStore::new(),
             peer_ops: Arc::new(Mutex::new(peer_ops)),
@@ -59,7 +59,9 @@ impl MessageStaging {
             from_http_handlers,
             cached_stream_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
             event_manager: TimelineEventManager::new(StepPrecision::Sec)
-        }
+        };
+        ret.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
+        ret
     }
 
     pub async fn receive(&mut self) -> EmptyOption {
@@ -94,9 +96,9 @@ impl MessageStaging {
             warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
             return None;
         }
-        if let Some(endpoint_pair) = self.unconfirmed_peers.pop(&inbound_message.separate_parts().sender().id) {
+        if let Some(peer) = self.unconfirmed_peers.remove(&inbound_message.separate_parts().sender().id) {
             // println!("Confirmed peer {}", inbound_message.separate_parts().sender().id());
-            self.add_new_peer(Peer::new(endpoint_pair, inbound_message.separate_parts().sender().id));
+            self.add_new_peer(peer);
         }
         let (index, num_chunks) = inbound_message.separate_parts().position();
         if num_chunks == 1 {
@@ -132,25 +134,10 @@ impl MessageStaging {
         match request {
             ClientApiRequest::Message(mut message) => {
                 let id = message.id();
-                if let MetadataKind::Heartbeat = message.metadata() {
-                    return self.process_outbound_heartbeat(message).await;
-                }
-                if let MetadataKind::Discover(metadata) = message.metadata_mut() {
-                    if let DpMessageKind::INeedSome = metadata.kind {
-                        let introducer = metadata.peer_list.pop().unwrap();
-                        self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DPP_TTL_MILLIS * 2));
-                        metadata.kind = DpMessageKind::Request;
-                        return { self.send_checked(vec![introducer], message, false).await; }
-                    }
-                    if let DpMessageKind::IveGotSome = metadata.kind {
-                        for peer in metadata.peer_list.iter() {
-                            self.add_new_peer(*peer);
-                        }
-                        return;
-                    }
-                }
-                if let MetadataKind::Distribute(metadata) = message.metadata() {
-                    return self.initial_distribution_request(message.id(), metadata.clone()).await;
+                match message.metadata_mut() {
+                    MetadataKind::Discover(metadata) => if let (true, introducer) = self.client_discover_logic(metadata, id) { return self.send_discover_peer_message(introducer, message).await; },
+                    MetadataKind::Distribute(metadata) => return self.initial_distribution_request(id, metadata.clone()).await,
+                    _ => {}
                 }
                 self.send_response(message).await;
             },
@@ -161,6 +148,30 @@ impl MessageStaging {
             ClientApiRequest::AddHost(host_name) => {
                 self.stream_session_manager.add_local_host(String::from(host_name), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
             }
+        }
+    }
+
+    fn client_discover_logic(&mut self, metadata: &mut DiscoverMetadata, id: NumId) -> (bool, Option<Peer>) {
+        match metadata.kind {
+            DpMessageKind::INeedSome => {
+                let introducer = metadata.peer_list.pop().unwrap();
+                self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DPP_TTL_MILLIS * 2));
+                metadata.kind = DpMessageKind::Request;
+                (true, Some(introducer))
+            },
+            DpMessageKind::IveGotSome => {
+                for peer in metadata.peer_list.iter() {
+                    self.add_new_peer(*peer);
+                }
+                (true, None)
+            },
+            _ => (false, None)
+        }
+    }
+
+    async fn send_discover_peer_message(&mut self, introducer: Option<Peer>, message: Message) { 
+        if let Some(introducer) = introducer {
+            self.send_checked(vec![introducer], message, false).await;
         }
     }
 
@@ -185,22 +196,22 @@ impl MessageStaging {
                 self.stream_session_manager.finalize_all_resources_distribution(&host_name);
                 self.stream_session_manager.lock_dests_distribution(&host_name);
                 self.send_distribution_request(id, host_name).await;
-            }
+            },
+            TimeboundAction::SendHeartbeats => self.send_heartbeats().await
         }
     }
 
     #[instrument(level = "trace", skip_all, fields(peers = field::Empty))]
-    async fn process_outbound_heartbeat(&mut self, message: Message) {
-        if message.dest() != Peer::default() {
-            return { self.send_checked(vec![message.dest()], message, true).await; }
-        }
+    async fn send_heartbeats(&mut self) {
         let mut peers: HashSet<Peer> = HashSet::from_iter(lock!(self.peer_ops).peers().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_source_retrieval().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_source_distribution().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_sink().into_iter());
+        peers.extend(self.unconfirmed_peers.values());
         peers.remove(&self.outbound_gateway.myself);
         tracing::Span::current().record("peers", format!("{:?}", peers));
-        self.send_checked(peers, message, true).await;
+        self.send_checked(peers, Message::new_heartbeat(Peer::default()), true).await;
+        self.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
     }
 
     #[instrument(level = "trace", skip_all, fields(id = %message.id(), metadata = ?message.metadata(), direction = ?message.direction(), myself = %self.outbound_gateway.myself.id, new_direction = field::Empty))]
@@ -286,7 +297,7 @@ impl MessageStaging {
             self.stream_session_manager.new_source_retrieval(host_name.clone());
             self.stream_session_manager.push_resource_retrieval(&host_name, id);
             self.cached_stream_messages.insert(id, message, "Staging:CachedStreamMessages");
-            let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name.clone(), SearchMetadataKind::Retrieval));
+            let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, host_name, SearchMetadataKind::Retrieval));
             self.send_outbound_message(search_message).await;
         };
     }
@@ -469,15 +480,7 @@ impl MessageStaging {
             return;
         }
         // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
-        self.unconfirmed_peers.insert(peer.id, peer.endpoint_pair, "Stage:UnconfirmedPeers");
-        let unconfirmed_peers = self.unconfirmed_peers.collection().clone();
-        let outbound_channel = self.client_api_tx.clone();
-        tokio::spawn(async move {
-            while unconfirmed_peers.contains_key(&peer.id) {
-                result_early_return!(outbound_channel.send(ClientApiRequest::Message(Message::new_heartbeat(peer))));
-                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
-            }
-        });
+        self.unconfirmed_peers.insert(peer.id, peer);
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]

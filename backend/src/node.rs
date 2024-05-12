@@ -1,10 +1,10 @@
 use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::Arc};
 
 use serde::{Serialize, Deserialize};
-use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
+use tokio::{fs, net::UdpSocket, sync::mpsc};
 use tracing::{debug, error};
 
-use crate::{http::{self, SerdeHttpResponse, ServerContext}, lock, message::{Message, NumId, Peer}, message_processing::{stage::{ClientApiRequest, MessageStaging}, DiscoverPeerProcessor, InboundGateway, OutboundGateway, HEARTBEAT_INTERVAL_SECONDS}, option_early_return, peer, result_early_return};
+use crate::{http::{self, SerdeHttpResponse, ServerContext}, lock, message::{Message, NumId, Peer}, message_processing::{stage::{ClientApiRequest, MessageStaging}, DiscoverPeerProcessor, InboundGateway, OutboundGateway}, option_early_return, peer};
 
 pub struct Node {
     nat_kind: NatKind
@@ -61,12 +61,10 @@ impl Node {
         }
 
         let mut message_staging = MessageStaging::new(from_gateway, OutboundGateway::new(socket.clone(), myself), DiscoverPeerProcessor::new(), client_api_tx, client_api_rx, http_handler_rx, local_hosts, peers);
-        let client_api_tx = message_staging.client_api_tx().clone();
-        let client_api_tx_clone = message_staging.client_api_tx().clone();
 
         if let Some(introducer) = introducer {
             let message = Message::new_discover_peer_request(myself, introducer, peer::MAX_PEERS);
-            client_api_tx_clone.send(ClientApiRequest::Message(message)).unwrap();
+            message_staging.client_api_tx().send(ClientApiRequest::Message(message)).unwrap();
         }
         else {
             debug!("No introducer");
@@ -96,13 +94,6 @@ impl Node {
                 option_early_return!(message_staging.receive().await, error!("Staging channel closed"));
             }
         });
-
-        tokio::spawn(async move {
-            loop {
-                sleep(HEARTBEAT_INTERVAL_SECONDS).await;
-                result_early_return!(client_api_tx.send(ClientApiRequest::Message(Message::new_heartbeat(Peer::default()))));
-            }
-        });        
 
         if is_start {
             http::tcp_listen(SocketAddr::from(([127,0,0,1], 8080)), server_context).await;

@@ -47,5 +47,6 @@ pub enum StepPrecision {
 }
 
 pub enum TimeboundAction {
-    LockDestsDistribution(String, NumId)
+    LockDestsDistribution(String, NumId),
+    SendHeartbeats,
 }

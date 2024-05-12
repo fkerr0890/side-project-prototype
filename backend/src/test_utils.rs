@@ -54,8 +54,8 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
     }
 }
 
-pub async fn load_nodes_from_file() -> (ServerContext, Vec<mpsc::UnboundedSender<ClientApiRequest>>) {
-    let mut paths = fs::read_dir("../peer_info").await.unwrap();
+pub async fn load_nodes_from_file(directory: &str) -> (ServerContext, Vec<mpsc::UnboundedSender<ClientApiRequest>>) {
+    let mut paths = fs::read_dir(format!("../{directory}")).await.unwrap();
     let mut server_context = None;
     let mut client_api_txs = Vec::new();
     while let Some(path) = paths.next_entry().await.unwrap() {
