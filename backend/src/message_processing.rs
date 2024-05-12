@@ -1,16 +1,15 @@
-use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
 
 use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info};
 
-use crate::{crypto::{Direction, KeyStore}, lock, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirectionAgreement, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirectionAgreement, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return};
 
 pub use self::discover::DiscoverPeerProcessor;
-use self::stage::ClientApiRequest;
 
 pub const SEARCH_TIMEOUT_SECONDS: Duration = Duration::from_secs(30);
-pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(500);
+pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(1000);
 pub const SRP_TTL_SECONDS: Duration = Duration::from_secs(30);
 pub const ACTIVE_SESSION_TTL_SECONDS: Duration = Duration::from_secs(600);
 pub const HEARTBEAT_INTERVAL_SECONDS: Duration = Duration::from_secs(10);
@@ -133,44 +132,26 @@ impl OutboundGateway {
     }
 }
 
-#[derive(Clone)]
-pub enum ToBeEncrypted {
-    True(Arc<Mutex<KeyStore>>),
-    False
-}
-
 pub struct BreadcrumbService {
-    breadcrumbs: TransientCollection<ArcMap<NumId, Option<Sender>>>,
+    breadcrumbs: HashMap<NumId, Option<Sender>>,
 }
 
 impl BreadcrumbService {
-    pub fn new(ttl: Duration) -> Self { Self { breadcrumbs: TransientCollection::new(ttl, false, ArcMap::new()) } }
+    pub fn new() -> Self { Self { breadcrumbs: HashMap::new() } }
 
-    pub fn clone(&self, ttl: Duration) -> Self { Self { breadcrumbs: TransientCollection::from_existing(&self.breadcrumbs, ttl) } }
-
-    pub fn try_add_breadcrumb(&mut self, id: NumId, early_return_context: Option<EarlyReturnContext>, dest: Option<Sender>, ttl: Option<Duration>) -> bool {
-        let is_new_key = if let Some(context) = early_return_context {
-            let EarlyReturnContext(tx, message) = context;
-            self.breadcrumbs.set_timer_with_send_action(id, TimerOptions::default().with_ttl(ttl), move || {
-                result_early_return!(tx.send(ClientApiRequest::Message(message)));
-            }, "BreadcrumbService")
+    pub fn try_add_breadcrumb(&mut self, id: NumId, dest: Option<Sender>) -> bool {
+        if !self.breadcrumbs.contains_key(&id) {
+            self.breadcrumbs.insert(id, dest);
+            return true;
         }
-        else {
-            self.breadcrumbs.set_timer(id, TimerOptions::default().with_ttl(ttl), "BreadcrumbService")
-        };
-        if is_new_key {
-            lock!(self.breadcrumbs.collection().map()).insert(id, dest);
-        }
-        is_new_key
+        false
     }
 
     pub fn get_dest(&self, id: &NumId) -> Option<Option<Sender>> {
-        lock!(self.breadcrumbs.collection().map()).get(id).copied()
+        self.breadcrumbs.get(id).copied()
     }
 
     pub fn remove_breadcrumb(&mut self, id: &NumId) {
-        self.breadcrumbs.pop(id);
+        self.breadcrumbs.remove(id);
     }
 }
-
-pub struct EarlyReturnContext(mpsc::UnboundedSender<ClientApiRequest>, Message);

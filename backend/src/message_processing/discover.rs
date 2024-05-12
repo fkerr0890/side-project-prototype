@@ -50,7 +50,7 @@ impl DiscoverPeerProcessor {
         }
     }
 
-    #[instrument(level = "trace", skip(message_staging))]
+    #[instrument(level = "trace", skip(message_staging, outbound))]
     fn send_final_response_static(message_staging: &mut ArcMap<NumId, DiscoverMetadata>, id: NumId, outbound: &mpsc::UnboundedSender<ClientApiRequest>) {
         if let Some(mut staged_metadata) = message_staging.pop(&id) {
             staged_metadata.kind = DpMessageKind::IveGotSome;

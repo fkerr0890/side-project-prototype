@@ -2,16 +2,17 @@ use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::
 use ring::aead;
 use tokio::{select, sync::mpsc};
 use tracing::{debug, field, info, instrument, trace, warn};
-use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
+use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return};
 
-use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EarlyReturnContext, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
+use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
 
 type CachedOutboundMessages = Vec<(Message, Vec<Peer>)>;
 
 pub struct MessageStaging {
     from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
-    message_staging: TransientCollection<ArcMap<NumId, HashMap<usize, InboundMessage>>>,
-    cached_outbound_messages: TransientCollection<ArcMap<NumId, CachedOutboundMessages>>,
+    message_staging: HashMap<NumId, HashMap<usize, InboundMessage>>,
+    cached_outbound_messages: HashMap<NumId, CachedOutboundMessages>,
+    // TODO: Add remove action
     unconfirmed_peers: HashMap<NumId, Peer>,
     outbound_gateway: OutboundGateway,
     key_store: KeyStore,
@@ -21,7 +22,7 @@ pub struct MessageStaging {
     stream_session_manager: StreamSessionManager,
     client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
     client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
-    to_http_handlers: TransientCollection<ArcMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>>,
+    to_http_handlers: HashMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>,
     from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
     cached_stream_messages: HashMap<NumId, Message>,
     event_manager: TimelineEventManager
@@ -44,18 +45,18 @@ impl MessageStaging {
         }
         let mut ret = Self {
             from_inbound_gateway,
-            message_staging: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
-            cached_outbound_messages: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            message_staging: HashMap::new(),
+            cached_outbound_messages: HashMap::new(),
             unconfirmed_peers: HashMap::new(),
             outbound_gateway,
             key_store: KeyStore::new(),
             peer_ops: Arc::new(Mutex::new(peer_ops)),
-            breadcrumb_service: BreadcrumbService::new(SRP_TTL_SECONDS),
+            breadcrumb_service: BreadcrumbService::new(),
             client_api_tx,
             client_api_rx,
             discover_peer_processor,
             stream_session_manager: StreamSessionManager::new(local_hosts),
-            to_http_handlers: TransientCollection::new(SRP_TTL_SECONDS, false, ArcMap::new()),
+            to_http_handlers: HashMap::new(),
             from_http_handlers,
             cached_stream_messages: HashMap::new(),
             event_manager: TimelineEventManager::new(StepPrecision::Sec)
@@ -106,14 +107,15 @@ impl MessageStaging {
         }
         let id = inbound_message.separate_parts().id();
         let staged_messages_len = {
-            self.message_staging.set_timer(id, TimerOptions::default(), "Stage:MessageStaging");
-            let mut message_staging = lock!(self.message_staging.collection().map());
-            let staged_messages= message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
+            if !self.message_staging.contains_key(&id) {
+                self.event_manager.put_event(TimeboundAction::RemoveStagedMessage(id), SRP_TTL_SECONDS);
+            }
+            let staged_messages = self.message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
             staged_messages.insert(index, inbound_message);
             staged_messages.len()
         };
         if staged_messages_len == num_chunks {
-            let messages = self.message_staging.pop(&id)?;
+            let messages = self.message_staging.remove(&id)?;
             let messages: Vec<InboundMessage> = messages.into_values().collect();
             return Some(self.reassemble_message(messages))
         }
@@ -130,6 +132,7 @@ impl MessageStaging {
         message
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn process_client_request(&mut self, request: ClientApiRequest) {
         match request {
             ClientApiRequest::Message(mut message) => {
@@ -155,7 +158,7 @@ impl MessageStaging {
         match metadata.kind {
             DpMessageKind::INeedSome => {
                 let introducer = metadata.peer_list.pop().unwrap();
-                self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DPP_TTL_MILLIS * 2));
+                self.try_add_breadcrumb(id, None, None, Some(DPP_TTL_MILLIS * 2));
                 metadata.kind = DpMessageKind::Request;
                 (true, Some(introducer))
             },
@@ -177,28 +180,42 @@ impl MessageStaging {
 
     async fn process_follow_up(&mut self, id: NumId) {
         let message = option_early_return!(self.cached_stream_messages.remove(&id));
-        let message = if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name}) = message.metadata() {
-            option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await)
-        }
-        else if let MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::DistributionRequest(_), host_name }) = message.metadata() {
-            option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_distribution(host_name), message, true).await)
-        }
-        else {
-            panic!()
+        let message = match message.metadata() {
+            MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::Request(_), host_name}) => option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true).await),
+            MetadataKind::Stream(StreamMetadata { payload: StreamPayloadKind::DistributionRequest(_), host_name }) => option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_distribution(host_name), message, true).await),
+            _ => panic!()
         };
-        self.insert_cached_stream_message(id, message);
+        self.cached_stream_messages.insert(id, message);
     }
 
-    async fn process_timebound_action(&mut self, action: Option<TimeboundAction>) {
-        match option_early_return!(action) {
-            TimeboundAction::LockDestsDistribution(host_name, id) => {
-                // info!(myself = %self.outbound_gateway.myself.id, sinks = ?self.stream_session_manager.get_all_destinations_source_distribution());
-                self.stream_session_manager.finalize_all_resources_distribution(&host_name);
-                self.stream_session_manager.lock_dests_distribution(&host_name);
-                self.send_distribution_request(id, host_name).await;
-            },
-            TimeboundAction::SendHeartbeats => self.send_heartbeats().await,
-            TimeboundAction::RemoveCachedStreamMessage(id) => { self.cached_stream_messages.remove(&id); }
+    #[instrument(level = "trace", skip(self))]
+    async fn process_timebound_action(&mut self, actions: Option<Vec<TimeboundAction>>) {
+        let actions = option_early_return!(actions);
+        for action in actions {
+            match action {
+                TimeboundAction::LockDestsDistribution(host_name, id) => {
+                    // info!(myself = %self.outbound_gateway.myself.id, sinks = ?self.stream_session_manager.get_all_destinations_source_distribution());
+                    self.stream_session_manager.finalize_all_resources_distribution(&host_name);
+                    self.stream_session_manager.lock_dests_distribution(&host_name);
+                    self.send_distribution_request(id, host_name).await;
+                },
+                TimeboundAction::SendHeartbeats => self.send_heartbeats().await,
+                TimeboundAction::RemoveCachedStreamMessage(id) => { self.cached_stream_messages.remove(&id); },
+                TimeboundAction::RemoveStagedMessage(id) => { self.message_staging.remove(&id); },
+                TimeboundAction::RemoveHttpHandlerTx(id) => { self.to_http_handlers.remove(&id); },
+                TimeboundAction::RemoveCachedOutboundMessages(peer_id) => { self.cached_outbound_messages.remove(&peer_id); },
+                TimeboundAction::RemoveBreadcrumb(id, early_return_message) => {
+                    if let Some(message) = early_return_message {
+                        self.event_manager.put_event(action, wait_time)
+                        self.send_response(message).await;
+                    }
+                    else {
+                        self.breadcrumb_service.remove_breadcrumb(&id);
+                    }
+                },
+                TimeboundAction::RemovePrivateKey(peer_id) => self.key_store.remove_private_key(&peer_id),
+                TimeboundAction::RemoveSymmetricKey(peer_id) => self.key_store.remove_symmetric_key(&peer_id)
+            }
         }
     }
 
@@ -213,6 +230,7 @@ impl MessageStaging {
         peers.extend(self.stream_session_manager.get_all_destinations_source_retrieval().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_source_distribution().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_sink().into_iter());
+        debug!(?self.unconfirmed_peers);
         peers.extend(self.unconfirmed_peers.values());
         peers.remove(&self.outbound_gateway.myself);
         tracing::Span::current().record("peers", format!("{:?}", peers));
@@ -244,6 +262,7 @@ impl MessageStaging {
         let dest = option_early_return!(self.breadcrumb_service.get_dest(&message.id()));
         message.set_direction(MessageDirection::Response);
         if let Some(dest) = dest {
+            let id = message.id();
             self.send_checked(vec![Peer::from(dest)], message, false).await;
         }
         else {
@@ -278,15 +297,17 @@ impl MessageStaging {
 
     #[instrument(level = "trace", skip_all, fields(id = %message.id(), ?remaining_dests))]
     fn insert_cached_outbound_message(&mut self, message: Message, remaining_dests: Vec<Peer>) {
-        self.cached_outbound_messages.set_timer(message.dest().id, TimerOptions::default(), "Stage:MessageCaching");
-        let mut message_caching = lock!(self.cached_outbound_messages.collection().map());
-        let cached_messages = message_caching.entry(message.dest().id).or_default();
-        cached_messages.push((message, remaining_dests));
+        let peer_id = message.dest().id;
+        if !self.cached_outbound_messages.contains_key(&peer_id) {
+            self.event_manager.put_event(TimeboundAction::RemoveCachedOutboundMessages(peer_id), SRP_TTL_SECONDS)
+        }
+        let outbound_messages = self.cached_outbound_messages.entry(peer_id).or_default();
+        outbound_messages.push((message, remaining_dests));
     }
 
     #[instrument(level = "trace", skip(self))]
     async fn send_agreement(&mut self, dest: Peer, direction: MessageDirectionAgreement) {
-        let public_key = option_early_return!(self.key_store.public_key(dest.id));
+        let public_key = option_early_return!(self.key_store.public_key(dest.id, &mut self.event_manager));
         self.outbound_gateway.send_agreement(dest, public_key, direction).await;
     }
 
@@ -294,7 +315,8 @@ impl MessageStaging {
     async fn initial_retrieval_request(&mut self, from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>)) {
         let (message, tx) = from_http_handler;
         let (id, host_name) = (message.id(), message.metadata().host_name().clone());
-        self.to_http_handlers.insert(id, tx, "Staging:ToHttpHandlers");
+        self.event_manager.put_event(TimeboundAction::RemoveHttpHandlerTx(id), SRP_TTL_SECONDS);
+        self.to_http_handlers.insert(id, tx);
         if self.stream_session_manager.source_active_retrieval(&host_name) {
             self.stream_session_manager.push_resource_retrieval(&host_name, id);
             let message = option_early_return!(self.send_checked(self.stream_session_manager.get_destinations_source_retrieval(&host_name), message, true).await);
@@ -326,7 +348,7 @@ impl MessageStaging {
         self.insert_cached_stream_message(id, initial_message);
         let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name.clone(), SearchMetadataKind::Distribution));
         self.breadcrumb_service.remove_breadcrumb(&id);
-        self.breadcrumb_service.try_add_breadcrumb(id, None, None, Some(DISTRIBUTION_TTL_SECONDS));
+        self.try_add_breadcrumb(id, None, None, Some(DISTRIBUTION_TTL_SECONDS));
         self.send_request(search_message).await;
         self.event_manager.put_event(TimeboundAction::LockDestsDistribution(metadata.host_name, id), Duration::from_secs(5));
     }
@@ -352,11 +374,11 @@ impl MessageStaging {
             return PropagationDirection::Reverse;
         }
         let id = message.id();
-        let (origin, early_return_context, ttl, direction) = match message.metadata_mut() {
+        let (origin, early_return_message, ttl, direction) = match message.metadata_mut() {
             MetadataKind::Search(metadata) => search::logic(id, self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()),
             MetadataKind::Discover(metadata) => {
                 if self.discover_peer_processor.continue_propagating(metadata, self.outbound_gateway.myself) {
-                    (metadata.origin, Some(EarlyReturnContext(self.client_api_tx.clone(), message.clone())), Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
+                    (metadata.origin, Some(message.clone()), Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
                 } else {
                     metadata.kind = DpMessageKind::Response;
                     (metadata.origin, None, Some(DPP_TTL_MILLIS), PropagationDirection::Reverse)
@@ -365,12 +387,20 @@ impl MessageStaging {
             _ => return PropagationDirection::Final
         };
 
-        if !self.breadcrumb_service.try_add_breadcrumb(message.id(), early_return_context, message.only_sender(), ttl) {
+        if !self.try_add_breadcrumb(message.id(), message.only_sender(), early_return_message, ttl) {
             return PropagationDirection::Stop;
         }
 
         self.send_nat_heartbeats(origin);
         direction
+    }
+
+    fn try_add_breadcrumb(&mut self, id: NumId, dest: Option<Sender>, early_return_message: Option<Message>, ttl: Option<Duration>) -> bool {
+        if !self.breadcrumb_service.try_add_breadcrumb(id, dest) {
+            return false;
+        }
+        self.event_manager.put_event(TimeboundAction::RemoveBreadcrumb(id, early_return_message), ttl.unwrap_or(SRP_TTL_SECONDS));
+        true
     }
 
     #[instrument(level = "trace", skip_all, fields(id = %message.id()))]
@@ -422,7 +452,7 @@ impl MessageStaging {
             StreamPayloadKind::Response(payload) => {
                 self.stream_session_manager.finalize_resource_retrieval(&metadata.host_name, &id);
                 self.cached_stream_messages.remove(&id);
-                return option_early_return!(self.to_http_handlers.pop(&id)).send(payload).unwrap();
+                return option_early_return!(self.to_http_handlers.remove(&id)).send(payload).unwrap();
             },
             StreamPayloadKind::DistributionRequest(bytes) => {
                 if !self.stream_session_manager.sink_active_distribution(&metadata.host_name) {
@@ -468,14 +498,13 @@ impl MessageStaging {
     async fn send_initial_stream_message(&mut self, id: NumId, sender: Peer) {
         let Some(request) = self.cached_stream_messages.remove(&id) else {
             debug!("Cached stream retrieval message unavailable, checking for pending outbound message");
-            let mut cached_outbound_messages = lock!(self.cached_outbound_messages.collection().map());
-            let cached_messages = option_early_return!(cached_outbound_messages.get_mut(&sender.id));
-            let cached_message = option_early_return!(cached_messages.iter_mut().find(|m| m.0.id() == id));
+            let outbound_messages = option_early_return!(self.cached_outbound_messages.get_mut(&sender.id));
+            let cached_message = option_early_return!(outbound_messages.iter_mut().find(|m| m.0.id() == id));
             cached_message.1.push(sender);
             return;
         };
         let request = option_early_return!(self.send_checked(vec![sender], request, true).await);
-        self.insert_cached_stream_message(id, request);
+        self.cached_stream_messages.insert(id, request);
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
@@ -494,7 +523,7 @@ impl MessageStaging {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
         let mut peers = lock!(self.peer_ops);
         peers.add_peer(peer, DiscoverPeerProcessor::get_score(self.outbound_gateway.myself.endpoint_pair.public_endpoint, peer_endpoint));
-        info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
+        // info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
     }
 
     #[instrument(level = "trace", skip_all, fields(message.peer_id))]
@@ -502,16 +531,16 @@ impl MessageStaging {
         let KeyAgreementMessage { public_key, peer_id, direction } = message;
         let cached_messages = match direction {
             MessageDirectionAgreement::Request => { self.send_agreement(Peer::from(Sender::new(sender, peer_id)), MessageDirectionAgreement::Response).await; None },
-            MessageDirectionAgreement::Response => self.cached_outbound_messages.pop(&peer_id)
+            MessageDirectionAgreement::Response => self.cached_outbound_messages.remove(&peer_id)
         };
-        result_early_return!(self.key_store.agree(peer_id, public_key));
+        result_early_return!(self.key_store.agree(peer_id, public_key, &mut self.event_manager));
         if let Some(cached_messages) = cached_messages {
             trace!("Sending cached outbound messages");
             for (message, remaining_dests) in cached_messages {
                 let (to_be_chunked, is_stream_request) = message.to_be_chunked();
                 let message = option_early_return!(self.send_checked(remaining_dests, message, to_be_chunked).await);
                 if is_stream_request {
-                    self.insert_cached_stream_message(message.id(), message);
+                    self.cached_stream_messages.insert(message.id(), message);
                 }
             }
         }
@@ -529,6 +558,7 @@ pub enum PropagationDirection {
     Final
 }
 
+#[derive(Debug)]
 pub enum ClientApiRequest {
     ClearActiveSessions,
     AddHost(String),
