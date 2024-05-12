@@ -250,22 +250,28 @@ macro_rules! result_early_return {
 
 #[macro_export]
 macro_rules! time {
-    ($block:block, $aggregate:literal) => {
+    ($block:block, $level:expr) => {
         {
             let now = std::time::Instant::now();
             let output = $block;
             let duration = now.elapsed();
-            if $aggregate {
+            if let Some(level) = $level {
+                match level {
+                    tracing::Level::TRACE => tracing::trace!("Time elapsed: {:.2?} at {}:{}", duration, file!(), line!()),
+                    tracing::Level::DEBUG => tracing::debug!("Time elapsed: {:.2?} at {}:{}", duration, file!(), line!()),
+                    tracing::Level::INFO => tracing::info!("Time elapsed: {:.2?} at {}:{}", duration, file!(), line!()),
+                    tracing::Level::WARN => tracing::warn!("Time elapsed: {:.2?} at {}:{}", duration, file!(), line!()),
+                    tracing::Level::ERROR => tracing::error!("Time elapsed: {:.2?} at {}:{}", duration, file!(), line!()),
+                }
+            }
+            else {
                 let mut data = $crate::MAX_TIME.lock().unwrap();
                 if data.0 < duration {
                     data.0 = duration;
-                    data.3 = format!(" at {} {}", file!(), line!()); 
+                    data.3 = format!(" at {}:{}", file!(), line!()); 
                 }
                 data.1 += duration;
                 data.2 += 1;
-            }
-            else {
-                println!("Time elapsed: {:.2?} at {} {}", duration, file!(), line!());
             }
             output
         }
@@ -275,6 +281,6 @@ macro_rules! time {
 #[macro_export]
 macro_rules! lock {
     ($expr:expr) => {
-        $crate::time!({ $expr.lock().unwrap() }, true)
+        $crate::time!({ $expr.lock().unwrap() }, None)
     };
 }

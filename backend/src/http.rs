@@ -3,10 +3,10 @@ use std::{collections::HashMap, str::FromStr, convert::Infallible, net::SocketAd
 use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, header::{HeaderName, HeaderValue}, service::{make_service_fn, service_fn}, Server, Client, Method, Uri};
 use serde::{Serialize, Deserialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, info, Level};
 use uuid::Uuid;
 
-use crate::message::{MessageDirection, Message, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind};
+use crate::{message::{Message, MessageDirection, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, time};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -14,18 +14,20 @@ pub struct SerdeHttpRequest {
     uri: String,
     version: String,
     headers: HashMap<String, Vec<String>>,
-    body: Vec<u8>
+    body: Vec<u8>,
+    for_testing: bool
 }
 
 impl SerdeHttpRequest {
-    async fn from_hyper_request(request: Request<Body>) -> Result<Self, String> {
+    async fn from_hyper_request(request: Request<Body>, for_testing: bool) -> Result<Self, String> {
         let (parts, body) = request.into_parts();
         Ok(Self {
             method: parts.method.to_string(),
             uri: parts.uri.to_string(),
             version: version_to_string(parts.version),
             headers: drain_headers(parts.headers)?,
-            body: body::to_bytes(body).await.map_err(|e| { e.to_string() })?.to_vec()
+            body: body::to_bytes(body).await.map_err(|e| { e.to_string() })?.to_vec(),
+            for_testing
         })
     }
 
@@ -153,9 +155,13 @@ impl ServerContext {
     }
 }
 
-pub async fn handle_request(context: ServerContext, request: Request<Body>) -> Result<Response<Body>, Infallible> {
+pub async fn handle_request(context: ServerContext, request: Request<Body>, testing: bool) -> Result<Response<Body>, Infallible> {
+    let epoch_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let timestamp = u128::from_str(request.headers().get("timestamp").unwrap().to_str().unwrap()).unwrap();
+    info!(elapsed = epoch_now - timestamp, "Request latency millis");
+    time!({
     let request_version = request.version();
-    let mut request = match SerdeHttpRequest::from_hyper_request(request).await {
+    let mut request = match time!( { SerdeHttpRequest::from_hyper_request(request, testing).await }, Some(Level::DEBUG)) {
         Ok(request) => request,
         Err(e) => return Ok(construct_hyper_error_response(e, request_version, 400))
     };
@@ -181,6 +187,7 @@ pub async fn handle_request(context: ServerContext, request: Request<Body>) -> R
         }
     };
     Ok(response.into_hyper_response())
+    }, Some(Level::INFO))
 }
 
 pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
@@ -188,7 +195,7 @@ pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
     let make_service = make_service_fn(move |_| {
         let context = context.clone();
         let service = service_fn(move |req| {
-            handle_request(context.clone(), req)
+            handle_request(context.clone(), req, false)
         });
         async move { Ok::<_, Infallible>(service) }
     });
@@ -197,14 +204,18 @@ pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
 
 pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpResponse {
     let client = Client::new();
-    let request_version = request.version.clone();
+    let (request_version, for_testing) = (request.version.clone(), request.for_testing);
     let hyper_request = match request.into_hyper_request(String::from("http://") + socket) { Ok(request) => request, Err(e) => return construct_error_response(e.to_string(), request_version) };
     debug!("{:?}", hyper_request);
-    let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => return construct_error_response(e.to_string(), request_version) };
+    if for_testing { 
+        return SerdeHttpResponse::builder(200, request_version).body(vec![128u8; 1023])
+    }
+    time!({ let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => return construct_error_response(e.to_string(), request_version) };
     match SerdeHttpResponse::from_hyper_response(response).await {
         Ok(response) => response,
         Err(e) => construct_error_response(e, request_version)
     }
+    }, Some(Level::INFO))
 }
 
 pub fn construct_error_response(error: String, request_version: String) -> SerdeHttpResponse {

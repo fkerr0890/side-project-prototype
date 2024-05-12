@@ -1,6 +1,6 @@
 let activeApps = new Map();
 
-function inteceptRequestAsync(requestDetails) {
+function inteceptRequest(requestDetails) {
     const parts = requestDetails.url.split('/');
     if (parts[3][0] == '~') {
         activeApps.set(requestDetails.tabId, parts[3].slice(1));
@@ -16,7 +16,13 @@ function inteceptRequestAsync(requestDetails) {
     return { redirectUrl: parts.join('/') }
 }
 
-browser.webRequest.onBeforeRequest.addListener(inteceptRequestAsync, {urls: ["<all_urls>"]}, ['blocking']);
+function addHeader(headerDetails) {
+    headerDetails.requestHeaders.push({name: 'timestamp', value: headerDetails.timeStamp.toString()});
+    return { requestHeaders: headerDetails.requestHeaders };
+}
+
+browser.webRequest.onBeforeRequest.addListener(inteceptRequest, {urls: ["<all_urls>"]}, ['blocking']);
+browser.webRequest.onBeforeSendHeaders.addListener(addHeader, {urls: ["<all_urls>"]}, ['blocking', 'requestHeaders'])
 
 browser.omnibox.onInputChanged.addListener((_text, addSuggestions) => {
     addSuggestions([{ 'content': 'https://hello.p2p/', 'description': 'Visit "hello" on the p2p network!' }]);

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use hyper::{Body, Request};
-use p2p::{http::{self, ServerContext}, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::stage::ClientApiRequest, test_utils};
+use p2p::{http::{self, ServerContext}, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::stage::ClientApiRequest, test_utils, time};
 use rand::seq::IteratorRandom;
 use tracing::Level;
 use uuid::Uuid;
@@ -11,8 +11,8 @@ fn bench_retrieval(c: &mut Criterion) {
     test_utils::setup(Level::INFO);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let (server_context, _) = runtime.block_on(test_utils::load_nodes_from_file());
-    runtime.block_on(send_request(&server_context));
-    c.bench_with_input(BenchmarkId::new("bench_http", "shitty"), &server_context, |b, p| b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| send_request(p) ));
+    time!({ runtime.block_on(send_request(&server_context)) }, Some(Level::INFO));
+    c.bench_with_input(BenchmarkId::new("bench_http", "shitty"), &server_context, |b, p| b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| black_box(send_request(p)) ));
 }
 
 fn bench_distribution(c: &mut Criterion) {
@@ -29,8 +29,8 @@ fn bench_distribution(c: &mut Criterion) {
 }
 
 async fn send_request(server_context: &ServerContext) {
-    let request = Request::get("/~example").body(Body::empty()).unwrap();
-    http::handle_request(server_context.clone(), request).await.unwrap();
+    let request = Request::get("/~example").body(Body::from(vec![128u8; 523])).unwrap();
+    http::handle_request(server_context.clone(), request, true).await.unwrap();
 }
 
 criterion_group! {
