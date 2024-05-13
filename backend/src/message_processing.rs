@@ -1,10 +1,9 @@
 use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
 
-use rand::{rngs::SmallRng, seq::SliceRandom, SeedableRng};
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info};
 
-use crate::{crypto::{Direction, KeyStore}, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirectionAgreement, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, option_early_return, result_early_return};
+use crate::{crypto::{Direction, KeyStore}, message::{InboundMessage, KeyAgreementMessage, Message, MessageDirectionAgreement, NumId, Peer, Sender, SeparateParts}, node::EndpointPair, result_early_return};
 
 pub use self::discover::DiscoverPeerProcessor;
 
@@ -58,8 +57,6 @@ pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str,
     format!("{} {} {}", send_error, file, line)
 }
 
-type MessagesErrors = (Vec<(Vec<u8>, String)>, Vec<(Vec<u8>, String)>);
-
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
     myself: Peer
@@ -90,7 +87,14 @@ impl OutboundGateway {
         let serialized = result_early_return!(bincode::serialize(&message));
         let sender = if dest.socket.ip().is_private() { self.myself.endpoint_pair.private_endpoint } else { self.myself.endpoint_pair.public_endpoint };
         let separate_parts = SeparateParts::new(Sender::new(sender, self.myself.id), message.id());
-        let chunks = option_early_return!(Self::chunked(dest, serialized, separate_parts, to_be_chunked, key_store));
+        let chunk_size = if to_be_chunked { 800 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { serialized.len() };
+        //TODO: Maybe use chunks_exact
+        let chunks = serialized.chunks(chunk_size);
+        let num_chunks = chunks.len();
+        let chunks = chunks
+            .enumerate()
+            .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store, dest, chunk, separate_parts.clone(), (i, num_chunks)))
+            .filter_map(|r| r.map_err(|e| error!(e)).ok());
         for chunk in chunks {
             result_early_return!(self.socket.send_to(&chunk, dest.socket).await);
         }
@@ -106,25 +110,9 @@ impl OutboundGateway {
         }
     }
 
-    fn chunked(dest: Sender, bytes: Vec<u8>, separate_parts: SeparateParts, to_be_chunked: bool, key_store: &mut KeyStore) -> Option<Vec<Vec<u8>>> {
-        let chunk_size = if to_be_chunked { 800 - bincode::serialized_size(&separate_parts).unwrap() as usize } else { bytes.len() };
-        let chunks = bytes.chunks(chunk_size);
-        let num_chunks = chunks.len();
-        let (mut messages, errors): MessagesErrors = chunks
-            .enumerate()
-            .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store, dest, chunk.to_vec(), separate_parts.clone(), (i, num_chunks)))
-            .map(|r| { match r { Ok(bytes) => (bytes, String::new()), Err(e) => (Vec::new(), e) } })
-            .partition(|r| !r.0.is_empty());
-        if !errors.is_empty() {
-            error!("{}", errors.into_iter().map(|e| e.1).collect::<Vec<String>>().join(", ")); return None;
-        }
-        messages.shuffle(&mut SmallRng::from_entropy());
-        Some(messages.into_iter().map(|o| o.0).collect())
-    }
-
-    fn generate_inbound_message_bytes(key_store: &mut KeyStore, dest: Sender, chunk: Vec<u8>, separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
+    fn generate_inbound_message_bytes(key_store: &mut KeyStore, dest: Sender, chunk: &[u8], separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
         let my_peer_id = separate_parts.sender().id.0;
-        let mut bytes = bincode::serialize(&InboundMessage::new(chunk, separate_parts.set_position(position))).map_err(|e| e.to_string())?;
+        let mut bytes = bincode::serialize(&InboundMessage::new(chunk.to_vec(), separate_parts.set_position(position))).map_err(|e| e.to_string())?;
         let nonce = key_store.transform(dest.id, &mut bytes, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
         bytes.extend(my_peer_id.to_be_bytes());
         bytes.extend(nonce);

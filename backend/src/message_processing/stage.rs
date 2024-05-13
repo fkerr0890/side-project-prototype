@@ -12,7 +12,6 @@ pub struct MessageStaging {
     from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
     message_staging: HashMap<NumId, HashMap<usize, InboundMessage>>,
     cached_outbound_messages: HashMap<NumId, CachedOutboundMessages>,
-    // TODO: Add remove action
     unconfirmed_peers: HashMap<NumId, Peer>,
     outbound_gateway: OutboundGateway,
     key_store: KeyStore,
@@ -227,7 +226,7 @@ impl MessageStaging {
         debug!(?self.unconfirmed_peers);
         peers.extend(self.unconfirmed_peers.values());
         peers.remove(&self.outbound_gateway.myself);
-        tracing::Span::current().record("peers", format!("{:?}", peers));
+        // tracing::Span::current().record("peers", format!("{:?}", peers));
         self.send_checked(peers, Message::new_heartbeat(Peer::default()), true).await;
         self.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
     }
@@ -235,7 +234,7 @@ impl MessageStaging {
     #[instrument(level = "trace", skip_all, fields(id = %message.id(), metadata = ?message.metadata(), direction = ?message.direction(), myself = %self.outbound_gateway.myself.id, new_direction = field::Empty))]
     async fn send_outbound_message(&mut self, mut message: Message) {
         let new_direction = self.get_direction(&mut message);
-        tracing::Span::current().record("new_direction", format!("{:?}", new_direction));
+        // tracing::Span::current().record("new_direction", format!("{:?}", new_direction));
         match new_direction {
             PropagationDirection::Forward => { self.send_request(message).await; },
             PropagationDirection::Reverse => self.send_response(message).await,
