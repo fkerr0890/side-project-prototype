@@ -44,7 +44,7 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
         let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
         let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move { Node::new().listen(is_start, is_end, Some(rx), introducer, id, Vec::with_capacity(0), endpoint_pair, socket, ServerContext::new(http_handler_tx), http_handler_rx, client_api_tx, client_api_rx).await });
-        sleep(DPP_TTL_MILLIS*6).await;
+        sleep(DPP_TTL_MILLIS*2).await;
         println!();
     }
     sleep(HEARTBEAT_INTERVAL_SECONDS * 2).await;

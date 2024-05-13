@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::
 use ring::aead;
 use tokio::{select, sync::mpsc};
 use tracing::{debug, field, info, instrument, trace, warn};
-use crate::{crypto::{Direction, KeyStore}, event::{StepPrecision, TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return};
+use crate::{crypto::{Direction, KeyStore}, event::{TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
 
@@ -59,7 +59,7 @@ impl MessageStaging {
             to_http_handlers: HashMap::new(),
             from_http_handlers,
             cached_stream_messages: HashMap::new(),
-            event_manager: TimelineEventManager::new(StepPrecision::Sec)
+            event_manager: TimelineEventManager::new(Duration::from_millis(500))
         };
         ret.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
         ret
@@ -71,7 +71,7 @@ impl MessageStaging {
             message = self.client_api_rx.recv() => return Some(self.process_client_request(message?).await),
             message = self.from_http_handlers.recv() => return Some(self.initial_retrieval_request(message?).await),
             id = self.stream_session_manager.follow_up_rx().recv() => return Some(self.process_follow_up(id?).await),
-            action = self.event_manager.step() => return Some(self.process_timebound_action(action).await)
+            action = self.event_manager.tick() => return Some(self.process_timebound_action(action).await)
         };
         if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes.1) {
             return Some(self.handle_key_agreement(message, sender_addr).await);
@@ -158,15 +158,9 @@ impl MessageStaging {
         match metadata.kind {
             DpMessageKind::INeedSome => {
                 let introducer = metadata.peer_list.pop().unwrap();
-                self.try_add_breadcrumb(id, None, None, Some(DPP_TTL_MILLIS * 2));
+                self.try_add_breadcrumb(id, None, Some(DPP_TTL_MILLIS));
                 metadata.kind = DpMessageKind::Request;
                 (true, Some(introducer))
-            },
-            DpMessageKind::IveGotSome => {
-                for peer in metadata.peer_list.iter() {
-                    self.add_new_peer(*peer);
-                }
-                (true, None)
             },
             _ => (false, None)
         }
@@ -188,9 +182,9 @@ impl MessageStaging {
         self.cached_stream_messages.insert(id, message);
     }
 
-    #[instrument(level = "trace", skip(self))]
     async fn process_timebound_action(&mut self, actions: Option<Vec<TimeboundAction>>) {
         let actions = option_early_return!(actions);
+        trace!(?actions, "process_timebound_action");
         for action in actions {
             match action {
                 TimeboundAction::LockDestsDistribution(host_name, id) => {
@@ -204,17 +198,17 @@ impl MessageStaging {
                 TimeboundAction::RemoveStagedMessage(id) => { self.message_staging.remove(&id); },
                 TimeboundAction::RemoveHttpHandlerTx(id) => { self.to_http_handlers.remove(&id); },
                 TimeboundAction::RemoveCachedOutboundMessages(peer_id) => { self.cached_outbound_messages.remove(&peer_id); },
-                TimeboundAction::RemoveBreadcrumb(id, early_return_message) => {
-                    if let Some(message) = early_return_message {
-                        self.event_manager.put_event(action, wait_time)
-                        self.send_response(message).await;
-                    }
-                    else {
-                        self.breadcrumb_service.remove_breadcrumb(&id);
-                    }
-                },
+                TimeboundAction::RemoveBreadcrumb(id) => self.breadcrumb_service.remove_breadcrumb(&id),
                 TimeboundAction::RemovePrivateKey(peer_id) => self.key_store.remove_private_key(&peer_id),
-                TimeboundAction::RemoveSymmetricKey(peer_id) => self.key_store.remove_symmetric_key(&peer_id)
+                TimeboundAction::RemoveSymmetricKey(peer_id) => self.key_store.remove_symmetric_key(&peer_id),
+                TimeboundAction::RemoveUnconfirmedPeer(peer_id) => { self.unconfirmed_peers.remove(&peer_id); }
+                TimeboundAction::SendEarlyReturnMessage(message) => { self.send_response(message).await },
+                TimeboundAction::FinalizeDiscover(id) => {
+                    let metadata = self.discover_peer_processor.new_peers(&id);
+                    for peer in metadata.peer_list {
+                        self.add_new_peer(peer);
+                    }
+                }
             }
         }
     }
@@ -259,10 +253,9 @@ impl MessageStaging {
     }
 
     async fn send_response(&mut self, mut message: Message) {
-        let dest = option_early_return!(self.breadcrumb_service.get_dest(&message.id()));
+        let dest = option_early_return!(self.breadcrumb_service.get_dest(&message.id()), warn!("Fuck"));
         message.set_direction(MessageDirection::Response);
         if let Some(dest) = dest {
-            let id = message.id();
             self.send_checked(vec![Peer::from(dest)], message, false).await;
         }
         else {
@@ -348,7 +341,7 @@ impl MessageStaging {
         self.insert_cached_stream_message(id, initial_message);
         let search_message = Message::new_search_request(id, SearchMetadata::new(self.outbound_gateway.myself, metadata.host_name.clone(), SearchMetadataKind::Distribution));
         self.breadcrumb_service.remove_breadcrumb(&id);
-        self.try_add_breadcrumb(id, None, None, Some(DISTRIBUTION_TTL_SECONDS));
+        self.try_add_breadcrumb(id, None, Some(DISTRIBUTION_TTL_SECONDS));
         self.send_request(search_message).await;
         self.event_manager.put_event(TimeboundAction::LockDestsDistribution(metadata.host_name, id), Duration::from_secs(5));
     }
@@ -374,20 +367,22 @@ impl MessageStaging {
             return PropagationDirection::Reverse;
         }
         let id = message.id();
-        let (origin, early_return_message, ttl, direction) = match message.metadata_mut() {
+        let (origin, ttl, direction) = match message.metadata_mut() {
             MetadataKind::Search(metadata) => search::logic(id, self.outbound_gateway.myself, metadata, self.stream_session_manager.local_hosts()),
             MetadataKind::Discover(metadata) => {
                 if self.discover_peer_processor.continue_propagating(metadata, self.outbound_gateway.myself) {
-                    (metadata.origin, Some(message.clone()), Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
+                    let origin = metadata.origin;
+                    self.event_manager.put_event(TimeboundAction::SendEarlyReturnMessage(message.clone()), DPP_TTL_MILLIS / 2);
+                    (origin, Some(DPP_TTL_MILLIS), PropagationDirection::Forward)
                 } else {
                     metadata.kind = DpMessageKind::Response;
-                    (metadata.origin, None, Some(DPP_TTL_MILLIS), PropagationDirection::Reverse)
+                    (metadata.origin, Some(DPP_TTL_MILLIS), PropagationDirection::Reverse)
                 }
             },
             _ => return PropagationDirection::Final
         };
 
-        if !self.try_add_breadcrumb(message.id(), message.only_sender(), early_return_message, ttl) {
+        if !self.try_add_breadcrumb(message.id(), message.only_sender(), ttl) {
             return PropagationDirection::Stop;
         }
 
@@ -395,11 +390,11 @@ impl MessageStaging {
         direction
     }
 
-    fn try_add_breadcrumb(&mut self, id: NumId, dest: Option<Sender>, early_return_message: Option<Message>, ttl: Option<Duration>) -> bool {
+    fn try_add_breadcrumb(&mut self, id: NumId, dest: Option<Sender>, ttl: Option<Duration>) -> bool {
         if !self.breadcrumb_service.try_add_breadcrumb(id, dest) {
             return false;
         }
-        self.event_manager.put_event(TimeboundAction::RemoveBreadcrumb(id, early_return_message), ttl.unwrap_or(SRP_TTL_SECONDS));
+        self.event_manager.put_event(TimeboundAction::RemoveBreadcrumb(id), ttl.unwrap_or(SRP_TTL_SECONDS));
         true
     }
 
@@ -428,14 +423,14 @@ impl MessageStaging {
 
     fn final_action_discover(&mut self, metadata: DiscoverMetadata, id: NumId) {
         if metadata.peer_list.len() == metadata.hop_count.1 as usize {
-            for peer in metadata.peer_list.iter() {
-                self.add_new_peer(*peer);
+            for peer in metadata.peer_list {
+                self.add_new_peer(peer);
             }
             return;
         }
         let peer_len_curr_max = self.discover_peer_processor.peer_len_curr_max(&id);
         if peer_len_curr_max == 0 {
-            self.discover_peer_processor.set_staging_early_return(self.client_api_tx.clone(), id);
+            self.event_manager.put_event(TimeboundAction::FinalizeDiscover(id), DPP_TTL_MILLIS);
         }
         self.discover_peer_processor.stage_message(id, metadata, peer_len_curr_max);
     }
@@ -515,6 +510,7 @@ impl MessageStaging {
             return;
         }
         // println!("Start sending nat heartbeats to peer {:?} at {:?}", peer, self.outbound_gateway.myself);
+        self.event_manager.put_event(TimeboundAction::RemoveUnconfirmedPeer(peer.id), SRP_TTL_SECONDS);
         self.unconfirmed_peers.insert(peer.id, peer);
     }
 
@@ -523,7 +519,7 @@ impl MessageStaging {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
         let mut peers = lock!(self.peer_ops);
         peers.add_peer(peer, DiscoverPeerProcessor::get_score(self.outbound_gateway.myself.endpoint_pair.public_endpoint, peer_endpoint));
-        // info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
+        info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
     }
 
     #[instrument(level = "trace", skip_all, fields(message.peer_id))]

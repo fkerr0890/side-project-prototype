@@ -1,20 +1,17 @@
-use std::net::SocketAddrV4;
+use std::{collections::HashMap, net::SocketAddrV4};
 
-use tokio::sync::mpsc;
 use tracing::{instrument, warn};
 
-use crate::{lock, message::{DiscoverMetadata, DpMessageKind, Message, MessageDirection, MetadataKind, NumId, Peer}, result_early_return, utils::{ArcCollection, ArcMap, TimerOptions, TransientCollection}};
-
-use super::{stage::ClientApiRequest, DPP_TTL_MILLIS};
+use crate::message::{DiscoverMetadata, NumId, Peer};
 
 pub struct DiscoverPeerProcessor {
-    message_staging: TransientCollection<ArcMap<NumId, DiscoverMetadata>>
+    message_staging: HashMap<NumId, DiscoverMetadata>
 }
 
 impl DiscoverPeerProcessor {
     pub fn new() -> Self {
         Self {
-            message_staging: TransientCollection::new(DPP_TTL_MILLIS * 2, false, ArcMap::new()),
+            message_staging: HashMap::new(),
         }
     }
 
@@ -30,7 +27,7 @@ impl DiscoverPeerProcessor {
     }
 
     pub fn peer_len_curr_max(&self, id: &NumId) -> usize {
-        if let Some(staged_metadata) = lock!(self.message_staging.collection().map()).get(id) {
+        if let Some(staged_metadata) = self.message_staging.get(id) {
             staged_metadata.peer_list.len()
         }
         else {
@@ -38,23 +35,14 @@ impl DiscoverPeerProcessor {
         }
     }
 
-    pub fn set_staging_early_return(&mut self, outbound: mpsc::UnboundedSender<ClientApiRequest>, id: NumId) {
-        let mut message_staging_clone = self.message_staging.collection().clone();
-        self.message_staging.set_timer_with_send_action(id, TimerOptions::default(), move || { Self::send_final_response_static(&mut message_staging_clone, id, &outbound); }, "Discover:MessageStaging");
-    }
-
     #[instrument(level = "trace", skip_all, fields(hop_count = ?metadata.hop_count))]
     pub fn stage_message(&mut self, id: NumId, metadata: DiscoverMetadata, peer_len_curr_max: usize) {
         if metadata.peer_list.len() > peer_len_curr_max {
-            lock!(self.message_staging.collection().map()).insert(id, metadata);
+            self.message_staging.insert(id, metadata);
         }
     }
 
-    #[instrument(level = "trace", skip(message_staging, outbound))]
-    fn send_final_response_static(message_staging: &mut ArcMap<NumId, DiscoverMetadata>, id: NumId, outbound: &mpsc::UnboundedSender<ClientApiRequest>) {
-        if let Some(mut staged_metadata) = message_staging.pop(&id) {
-            staged_metadata.kind = DpMessageKind::IveGotSome;
-            result_early_return!(outbound.send(ClientApiRequest::Message(Message::new(staged_metadata.origin, id, None, MetadataKind::Discover(staged_metadata), MessageDirection::Response))));
-        }
+    pub fn new_peers(&mut self, id: &NumId) -> DiscoverMetadata {
+        self.message_staging.remove(id).unwrap()
     }
 }
