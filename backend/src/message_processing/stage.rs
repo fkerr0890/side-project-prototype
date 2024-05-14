@@ -1,7 +1,8 @@
-use std::{collections::{HashMap, HashSet}, fmt::Debug, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
+use std::{fmt::Debug, net::SocketAddrV4, sync::{Arc, Mutex}, time::Duration};
 use ring::aead;
 use tokio::{select, sync::mpsc};
 use tracing::{debug, field, info, instrument, trace, warn};
+use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{crypto::{Direction, KeyStore}, event::{TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
@@ -10,9 +11,9 @@ type CachedOutboundMessages = Vec<(Message, Vec<Peer>)>;
 
 pub struct MessageStaging {
     from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
-    message_staging: HashMap<NumId, HashMap<usize, InboundMessage>>,
-    cached_outbound_messages: HashMap<NumId, CachedOutboundMessages>,
-    unconfirmed_peers: HashMap<NumId, Peer>,
+    message_staging: FxHashMap<NumId, FxHashMap<usize, InboundMessage>>,
+    cached_outbound_messages: FxHashMap<NumId, CachedOutboundMessages>,
+    unconfirmed_peers: FxHashMap<NumId, Peer>,
     outbound_gateway: OutboundGateway,
     key_store: KeyStore,
     peer_ops: Arc<Mutex<PeerOps>>,
@@ -21,9 +22,9 @@ pub struct MessageStaging {
     stream_session_manager: StreamSessionManager,
     client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
     client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
-    to_http_handlers: HashMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>,
+    to_http_handlers: FxHashMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>,
     from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
-    cached_stream_messages: HashMap<NumId, Message>,
+    cached_stream_messages: FxHashMap<NumId, Message>,
     event_manager: TimelineEventManager
 }
 
@@ -35,7 +36,7 @@ impl MessageStaging {
         client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
         client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
         from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
-        local_hosts: HashMap<String, SocketAddrV4>,
+        local_hosts: FxHashMap<String, SocketAddrV4>,
         intial_peers: Vec<Peer>) -> Self
     {
         let mut peer_ops = PeerOps::new();
@@ -44,9 +45,9 @@ impl MessageStaging {
         }
         let mut ret = Self {
             from_inbound_gateway,
-            message_staging: HashMap::new(),
-            cached_outbound_messages: HashMap::new(),
-            unconfirmed_peers: HashMap::new(),
+            message_staging: FxHashMap::default(),
+            cached_outbound_messages: FxHashMap::default(),
+            unconfirmed_peers: FxHashMap::default(),
             outbound_gateway,
             key_store: KeyStore::new(),
             peer_ops: Arc::new(Mutex::new(peer_ops)),
@@ -55,9 +56,9 @@ impl MessageStaging {
             client_api_rx,
             discover_peer_processor,
             stream_session_manager: StreamSessionManager::new(local_hosts),
-            to_http_handlers: HashMap::new(),
+            to_http_handlers: FxHashMap::default(),
             from_http_handlers,
-            cached_stream_messages: HashMap::new(),
+            cached_stream_messages: FxHashMap::default(),
             event_manager: TimelineEventManager::new(Duration::from_millis(500))
         };
         ret.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
@@ -109,7 +110,7 @@ impl MessageStaging {
             if !self.message_staging.contains_key(&id) {
                 self.event_manager.put_event(TimeboundAction::RemoveStagedMessage(id), SRP_TTL_SECONDS);
             }
-            let staged_messages = self.message_staging.entry(id).or_insert(HashMap::with_capacity(num_chunks));
+            let staged_messages = self.message_staging.entry(id).or_insert(FxHashMap::default());
             staged_messages.insert(index, inbound_message);
             staged_messages.len()
         };
@@ -219,7 +220,7 @@ impl MessageStaging {
 
     #[instrument(level = "trace", skip_all, fields(peers = field::Empty))]
     async fn send_heartbeats(&mut self) {
-        let mut peers: HashSet<Peer> = HashSet::from_iter(lock!(self.peer_ops).peers().into_iter());
+        let mut peers: FxHashSet<Peer> = FxHashSet::from_iter(lock!(self.peer_ops).peers().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_source_retrieval().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_source_distribution().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_sink().into_iter());

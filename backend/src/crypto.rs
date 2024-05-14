@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fmt::Display};
+use std::fmt::Display;
+use rustc_hash::FxHashMap;
 
 use ring::{aead, agreement, digest, hkdf, rand::{SecureRandom, SystemRandom}};
 
@@ -9,8 +10,8 @@ const INITIAL_SALT: [u8; 20] = [
     0xbe, 0xf9, 0xf5, 0x02,
     ];
 pub struct KeyStore {
-    private_keys: HashMap<NumId, agreement::EphemeralPrivateKey>,
-    symmetric_keys: HashMap<NumId, aead::LessSafeKey>,
+    private_keys: FxHashMap<NumId, agreement::EphemeralPrivateKey>,
+    symmetric_keys: FxHashMap<NumId, aead::LessSafeKey>,
     rng: SystemRandom
 }
 impl Default for KeyStore {
@@ -25,8 +26,8 @@ impl KeyStore {
         let mut bytes = vec![0u8; aead::NONCE_LEN];
         rng.fill(&mut bytes).ok();
         Self {
-            private_keys: HashMap::new(),
-            symmetric_keys: HashMap::new(),
+            private_keys: FxHashMap::default(),
+            symmetric_keys: FxHashMap::default(),
             rng
         }
     }

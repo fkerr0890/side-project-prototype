@@ -1,4 +1,5 @@
-use std::{collections::HashMap, str::FromStr, convert::Infallible, net::SocketAddr};
+use std::{str::FromStr, convert::Infallible, net::SocketAddr};
+use rustc_hash::FxHashMap;
 
 use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, header::{HeaderName, HeaderValue}, service::{make_service_fn, service_fn}, Server, Client, Method, Uri};
 use serde::{Serialize, Deserialize};
@@ -13,7 +14,7 @@ pub struct SerdeHttpRequest {
     method: String,
     uri: String,
     version: String,
-    headers: HashMap<String, Vec<String>>,
+    headers: FxHashMap<String, Vec<String>>,
     body: Vec<u8>,
     for_testing: bool
 }
@@ -51,7 +52,7 @@ pub struct SerdeHttpResponse {
     body: Vec<u8>,
     status_code: u16,
     version: String,
-    headers: HashMap<String, Vec<String>>,
+    headers: FxHashMap<String, Vec<String>>,
 }
 
 impl SerdeHttpResponse {
@@ -85,7 +86,7 @@ impl SerdeHttpResponse {
             body: Vec::with_capacity(0),
             status_code,
             version,
-            headers: HashMap::new()
+            headers: FxHashMap::default()
         }
     }
 
@@ -122,8 +123,8 @@ fn string_to_version(version: String) -> Version {
     }
 }
 
-fn drain_headers(mut header_map: HeaderMap) -> Result<HashMap<String, Vec<String>>, String> {
-    let mut headers: HashMap<String, Vec<String>> = HashMap::with_capacity(header_map.len());
+fn drain_headers(mut header_map: HeaderMap) -> Result<FxHashMap<String, Vec<String>>, String> {
+    let mut headers: FxHashMap<String, Vec<String>> = FxHashMap::default();
     let mut curr_header_name = String::new();
     for (header_name, header_value) in header_map.drain() {
         if let Some(header_name) = header_name {
@@ -135,7 +136,7 @@ fn drain_headers(mut header_map: HeaderMap) -> Result<HashMap<String, Vec<String
     Ok(headers)
 }
 
-fn reconstruct_header_map(headers: HashMap<String, Vec<String>>) -> Result<HeaderMap, String> {
+fn reconstruct_header_map(headers: FxHashMap<String, Vec<String>>) -> Result<HeaderMap, String> {
     let mut header_map = HeaderMap::new();
     for (header_name, header_values) in headers {
         for header_value in header_values {

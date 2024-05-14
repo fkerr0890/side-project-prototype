@@ -1,5 +1,6 @@
 use crate::lock;
-use std::{collections::{HashMap, HashSet, VecDeque}, fmt::Debug, hash::Hash, sync::{Arc, Mutex}, time::Duration};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::{collections::VecDeque, fmt::Debug, hash::Hash, sync::{Arc, Mutex}, time::Duration};
 
 use tokio::{sync::mpsc, task::AbortHandle, time};
 
@@ -12,7 +13,7 @@ pub trait ArcCollection {
     fn pop(&mut self, key: &Self::K) -> Option<Self::V>;
 }
 
-pub struct ArcMap<K, V>(Arc<Mutex<HashMap<K, V>>>);
+pub struct ArcMap<K, V>(Arc<Mutex<FxHashMap<K, V>>>);
 impl<K, V> Default for ArcMap<K, V> {
     fn default() -> Self {
         Self::new()
@@ -20,8 +21,8 @@ impl<K, V> Default for ArcMap<K, V> {
 }
 
 impl<K, V> ArcMap<K, V> {
-    pub fn new() -> Self { Self(Arc::new(Mutex::new(HashMap::new()))) }
-    pub fn map(&self) -> &Arc<Mutex<HashMap<K, V>>> { &self.0 }
+    pub fn new() -> Self { Self(Arc::new(Mutex::new(FxHashMap::default()))) }
+    pub fn map(&self) -> &Arc<Mutex<FxHashMap<K, V>>> { &self.0 }
 }
 impl<K: Send + Hash + Eq + Clone + Debug, V> ArcCollection for ArcMap<K, V> {
     type K = K;
@@ -38,7 +39,7 @@ impl<K, V> Clone for ArcMap<K, V> {
 }
 
 #[derive(Clone)]
-pub struct ArcSet<K: Clone>(Arc<Mutex<HashSet<K>>>);
+pub struct ArcSet<K: Clone>(Arc<Mutex<FxHashSet<K>>>);
 impl<K: Clone> Default for ArcSet<K> {
     fn default() -> Self {
         Self::new()
@@ -46,8 +47,8 @@ impl<K: Clone> Default for ArcSet<K> {
 }
 
 impl<K: Clone> ArcSet<K> {
-    pub fn new() -> Self { Self(Arc::new(Mutex::new(HashSet::new()))) }
-    pub fn set(&self) -> &Arc<Mutex<HashSet<K>>> { &self.0 }
+    pub fn new() -> Self { Self(Arc::new(Mutex::new(FxHashSet::default()))) }
+    pub fn set(&self) -> &Arc<Mutex<FxHashSet<K>>> { &self.0 }
 }
 impl<K: Send + Hash + Eq + Clone + Debug> ArcCollection for ArcSet<K> {
     type K = K;
@@ -102,7 +103,7 @@ type AbortHandles<T> = Option<Arc<Mutex<T>>>;
 pub struct TransientCollection<C: ArcCollection> {
     ttl: Duration,
     collection: C,
-    abort_handles: AbortHandles<HashMap<C::K, AbortHandle>>
+    abort_handles: AbortHandles<FxHashMap<C::K, AbortHandle>>
 }
 impl<C: ArcCollection + Clone + Send> ArcCollection for TransientCollection<C> {
     type K = C::K;
@@ -118,7 +119,7 @@ impl<C: ArcCollection + Clone + Send + 'static> TransientCollection<C> {
         Self {
             ttl,
             collection,
-            abort_handles: if extend_timer { Some(Arc::new(Mutex::new(HashMap::new()))) } else { None }
+            abort_handles: if extend_timer { Some(Arc::new(Mutex::new(FxHashMap::default()))) } else { None }
         }
     }
 

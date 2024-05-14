@@ -1,11 +1,12 @@
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
+use rustc_hash::FxHashMap;
 
 use tokio::time;
 
 use crate::message::{Message, NumId};
 
 pub struct TimelineEventManager {
-    events: HashMap<u128, Vec<TimeboundAction>>,
+    events: FxHashMap<u128, Vec<TimeboundAction>>,
     interval: time::Interval,
     now: u128
 }
@@ -14,7 +15,7 @@ impl TimelineEventManager {
     pub fn new(tick_duration: Duration) -> Self {
         Self {
             interval: time::interval(tick_duration),
-            events: HashMap::new(),
+            events: FxHashMap::default(),
             now: 0
         }
     }

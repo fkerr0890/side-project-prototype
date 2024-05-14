@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Serialize, Deserialize};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::fmt::{Debug, Display};
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
@@ -24,14 +24,14 @@ impl InboundMessage {
     pub fn payload_mut(&mut self) -> &mut Vec<u8> { &mut self.payload }
     pub fn separate_parts(&self) -> &SeparateParts { &self.separate_parts }
 
-    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, HashSet<Sender>, String) {
+    pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, FxHashSet<Sender>, String) {
         let timestamp = messages.iter().map(|m| DateTime::parse_from_rfc3339(&m.separate_parts.timestamp).unwrap()).min().unwrap();
         messages.sort_by(|a, b| a.separate_parts.position.0.cmp(&b.separate_parts.position.0));
         let (bytes, senders): (Vec<Vec<u8>>, Vec<Sender>) = messages
             .into_iter()
             .map(|m| { let parts = m.into_parts(); (parts.0, parts.1.sender) })
             .unzip();
-        (bytes.concat(), HashSet::from_iter(senders), datetime_to_timestamp(timestamp.into()))
+        (bytes.concat(), FxHashSet::from_iter(senders), datetime_to_timestamp(timestamp.into()))
     }
 }
 

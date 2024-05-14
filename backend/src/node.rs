@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::Arc};
+use std::{fmt::Display, future, net::{Ipv4Addr, SocketAddr, SocketAddrV4}, str::FromStr, sync::Arc};
+use rustc_hash::FxHashMap;
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, net::UdpSocket, sync::mpsc};
@@ -46,7 +47,7 @@ impl Node {
     ) {
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
     
-        let mut local_hosts = HashMap::new();
+        let mut local_hosts = FxHashMap::default();
         if is_end {
             local_hosts.insert(String::from("example"), SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000));
         }

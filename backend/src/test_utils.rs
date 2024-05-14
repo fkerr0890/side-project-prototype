@@ -1,4 +1,5 @@
-use std::{collections::HashSet, net::SocketAddrV4, panic, process, sync::Arc, time::Duration};
+use std::{net::SocketAddrV4, panic, process, sync::Arc, time::Duration};
+use rustc_hash::FxHashSet;
 
 use crate::{http::ServerContext, message::{NumId, Peer}, message_processing::{stage::ClientApiRequest, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}, MAX_TIME};
 use rand::{seq::IteratorRandom, Rng};
@@ -32,7 +33,7 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
     let mut introducers: Vec<(Peer, mpsc::Sender<()>)> = Vec::new();
     let mut rng = rand::thread_rng();
     let start = (0..num_nodes).choose(&mut rng).unwrap();
-    let host_indices = HashSet::<u16>::from_iter((0..num_nodes).choose_multiple(&mut rng, num_hosts).into_iter());
+    let host_indices = FxHashSet::<u16>::from_iter((0..num_nodes).choose_multiple(&mut rng, num_hosts).into_iter());
     for i in 0..num_nodes {
         let introducer = if introducers.len() > 0 { Some(introducers.get(rand::thread_rng().gen_range(0..introducers.len())).unwrap().clone().0) } else { None };
         let (tx, rx) = mpsc::channel(1);

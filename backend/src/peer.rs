@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 use serde::{Serialize, Deserialize};
 
@@ -16,7 +16,7 @@ pub enum PeerStatus {
 
 pub struct PeerOps {
     peer_queue: DoublePriorityQueue<Peer, i32>,
-    peer_ids: HashSet<NumId>
+    peer_ids: FxHashSet<NumId>
 }
 
 impl Default for PeerOps {
@@ -26,7 +26,7 @@ impl Default for PeerOps {
 }
 
 impl PeerOps {
-    pub fn new() -> Self { Self { peer_queue: DoublePriorityQueue::new(), peer_ids: HashSet::new() } }
+    pub fn new() -> Self { Self { peer_queue: DoublePriorityQueue::new(), peer_ids: FxHashSet::default() } }
 
     pub fn peers(&self) -> Vec<Peer> { self.peer_queue.iter().map(|(peer, _)| *peer).collect() }
     pub fn peers_and_scores(&self) -> Vec<(EndpointPair, i32, NumId)> { self.peer_queue.iter().map(|(peer, score)| (peer.endpoint_pair, *score, peer.id)).collect() }

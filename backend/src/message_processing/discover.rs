@@ -1,17 +1,17 @@
-use std::{collections::HashMap, net::SocketAddrV4};
-
+use std::net::SocketAddrV4;
+use rustc_hash::FxHashMap;
 use tracing::{instrument, warn};
 
 use crate::message::{DiscoverMetadata, NumId, Peer};
 
 pub struct DiscoverPeerProcessor {
-    message_staging: HashMap<NumId, DiscoverMetadata>
+    message_staging: FxHashMap<NumId, DiscoverMetadata>
 }
 
 impl DiscoverPeerProcessor {
     pub fn new() -> Self {
         Self {
-            message_staging: HashMap::new(),
+            message_staging: FxHashMap::default(),
         }
     }
 

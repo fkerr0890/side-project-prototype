@@ -1,4 +1,5 @@
-use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
+use std::{net::{SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
+use rustc_hash::FxHashMap;
 
 use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{error, info};
@@ -140,11 +141,11 @@ fn chunk_to_array(mut chunk: Vec<u8>) -> (usize, [u8; 1024]) {
 }
 
 pub struct BreadcrumbService {
-    breadcrumbs: HashMap<NumId, Option<Sender>>,
+    breadcrumbs: FxHashMap<NumId, Option<Sender>>,
 }
 
 impl BreadcrumbService {
-    pub fn new() -> Self { Self { breadcrumbs: HashMap::new() } }
+    pub fn new() -> Self { Self { breadcrumbs: FxHashMap::default() } }
 
     pub fn try_add_breadcrumb(&mut self, id: NumId, dest: Option<Sender>) -> bool {
         if !self.breadcrumbs.contains_key(&id) {

@@ -1,4 +1,5 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, net::{Ipv4Addr, SocketAddrV4}, time::Duration};
+use std::{collections::VecDeque, net::{Ipv4Addr, SocketAddrV4}, time::Duration};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use serde::{Serialize, Deserialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
@@ -9,21 +10,21 @@ use crate::{http::{self, SerdeHttpRequest}, message::{Message, MessageDirection,
 use super::{distribute::ChunkedFileHandler, SRP_TTL_SECONDS};
 
 pub struct StreamSessionManager {
-    sources_retrieval: HashMap<String, StreamSource>,
-    sources_distribution: HashMap<String, StreamSourceDistribution>,
-    sinks: HashMap<String, StreamSink>,
-    local_hosts: HashMap<String, SocketAddrV4>,
+    sources_retrieval: FxHashMap<String, StreamSource>,
+    sources_distribution: FxHashMap<String, StreamSourceDistribution>,
+    sinks: FxHashMap<String, StreamSink>,
+    local_hosts: FxHashMap<String, SocketAddrV4>,
     follow_up_tx: mpsc::UnboundedSender<NumId>,
     follow_up_rx: mpsc::UnboundedReceiver<NumId>
 }
 
 impl StreamSessionManager {
-    pub fn new(local_hosts: HashMap<String, SocketAddrV4>) -> Self {
+    pub fn new(local_hosts: FxHashMap<String, SocketAddrV4>) -> Self {
         let (follow_up_tx, follow_up_rx) = mpsc::unbounded_channel();
         Self {
-            sources_retrieval: HashMap::new(),
-            sources_distribution: HashMap::new(),
-            sinks: HashMap::new(),
+            sources_retrieval: FxHashMap::default(),
+            sources_distribution: FxHashMap::default(),
+            sinks: FxHashMap::default(),
             local_hosts,
             follow_up_tx,
             follow_up_rx
@@ -38,7 +39,7 @@ impl StreamSessionManager {
 
     pub fn sink_active_distribution(&self, host_name: &str) -> bool { matches!(self.sinks.get(host_name), Some(StreamSink::Distribution(_))) }
 
-    pub fn get_destinations_source_retrieval(&self, host_name: &str) -> HashSet<Peer> { option_early_return!(self.sources_retrieval.get(host_name), HashSet::with_capacity(0)).active_dests.clone() }
+    pub fn get_destinations_source_retrieval(&self, host_name: &str) -> FxHashSet<Peer> { option_early_return!(self.sources_retrieval.get(host_name), FxHashSet::default()).active_dests.clone() }
     
     pub fn get_all_destinations_source_retrieval(&self) -> Vec<Peer> { self.sources_retrieval.values().flat_map(|s| s.active_dests.clone()).collect() }
 
@@ -46,7 +47,7 @@ impl StreamSessionManager {
 
     pub fn get_all_destinations_source_distribution(&self) -> Vec<Peer> { self.sources_distribution.values().flat_map(|s| s.stream_source.active_dests.clone()).collect() }
 
-    pub fn get_destinations_sink(&mut self, host_name: &str) -> HashSet<Peer> { option_early_return!(self.sinks.get_mut(host_name), HashSet::with_capacity(0)).unwrap_retrieval().clone() }
+    pub fn get_destinations_sink(&mut self, host_name: &str) -> FxHashSet<Peer> { option_early_return!(self.sinks.get_mut(host_name), FxHashSet::default()).unwrap_retrieval().clone() }
 
     pub fn get_all_destinations_sink(&self) -> Vec<Peer> { self.sinks.values().filter_map(|s| if let StreamSink::Retrieval(dests) = s { Some(dests.clone()) } else { None }).flatten().collect() }
 
@@ -74,7 +75,7 @@ impl StreamSessionManager {
     }
 
     pub fn new_sink_retrieval(&mut self, host_name: String) {
-        assert!(self.sinks.insert(host_name, StreamSink::Retrieval(HashSet::new())).is_none());
+        assert!(self.sinks.insert(host_name, StreamSink::Retrieval(FxHashSet::default())).is_none());
     }
 
     pub fn new_sink_distribution(&mut self, host_name: String) {
@@ -131,14 +132,14 @@ impl StreamSessionManager {
 
     pub fn clear_all_sources_sinks(&mut self) {
         self.sources_retrieval.drain().for_each(|(_, mut stream_source)| stream_source.finalize_all_resources());
-        self.sources_retrieval = HashMap::new();
+        self.sources_retrieval = FxHashMap::default();
         self.sources_distribution.drain().for_each(|(_, mut source)| source.stream_source.finalize_all_resources());
-        self.sources_distribution = HashMap::new();
+        self.sources_distribution = FxHashMap::default();
     }
 
     pub fn file_mut(&mut self, host_name: &str) -> Option<&mut ChunkedFileHandler> { Some(&mut self.sources_distribution.get_mut(host_name)?.file) }
     
-    pub fn local_hosts(&self) -> &HashMap<String, SocketAddrV4> { &self.local_hosts }
+    pub fn local_hosts(&self) -> &FxHashMap<String, SocketAddrV4> { &self.local_hosts }
 
     pub fn add_local_host(&mut self, host_name: String, endpoint: SocketAddrV4) { self.local_hosts.insert(host_name, endpoint); }
 
@@ -150,9 +151,9 @@ impl StreamSessionManager {
     pub fn follow_up_rx(&mut self) -> &mut mpsc::UnboundedReceiver<NumId> { &mut self.follow_up_rx }
 }
 struct StreamSource {
-    active_dests: HashSet<Peer>,
+    active_dests: FxHashSet<Peer>,
     resource_queue: VecDeque<NumId>,
-    abort_handlers: HashMap<NumId, AbortHandle>,
+    abort_handlers: FxHashMap<NumId, AbortHandle>,
     cached_size_max: usize,
     follow_up_tx: mpsc::UnboundedSender<NumId>
 }
@@ -161,9 +162,9 @@ impl StreamSource {
     fn new(follow_up_tx: mpsc::UnboundedSender<NumId>, cached_size_max: usize) -> Self {
         assert!(cached_size_max >= 1);
         Self {
-            active_dests: HashSet::new(),
+            active_dests: FxHashSet::default(),
             resource_queue: VecDeque::new(),
-            abort_handlers: HashMap::new(),
+            abort_handlers: FxHashMap::default(),
             follow_up_tx,
             cached_size_max
         }
@@ -211,13 +212,13 @@ struct StreamSourceDistribution {
     id: NumId,
     hop_count: u16,
     file: ChunkedFileHandler,
-    dests_remaining: HashMap<NumId, EndpointPair>,
+    dests_remaining: FxHashMap<NumId, EndpointPair>,
     dests_locked: bool
 }
 
 impl StreamSourceDistribution {
     async fn new(stream_source: StreamSource, id: NumId, hop_count: u16, file: ChunkedFileHandler) -> Self {
-        Self { stream_source, id, hop_count, file, dests_remaining: HashMap::with_capacity(0), dests_locked: false }
+        Self { stream_source, id, hop_count, file, dests_remaining: FxHashMap::default(), dests_locked: false }
     }
 
     fn add_destination(&mut self, dest: Peer) -> bool {
@@ -227,7 +228,7 @@ impl StreamSourceDistribution {
         self.stream_source.active_dests.insert(dest)
     }
 
-    fn set_dests_remaining(&mut self) { self.dests_remaining = HashMap::from_iter(self.stream_source.active_dests.iter().map(|d| (d.id, d.endpoint_pair))); }
+    fn set_dests_remaining(&mut self) { self.dests_remaining = FxHashMap::from_iter(self.stream_source.active_dests.iter().map(|d| (d.id, d.endpoint_pair))); }
 
     fn push_resource(&mut self, id: NumId) { self.stream_source.push_resource(id); }
 
@@ -243,12 +244,12 @@ impl StreamSourceDistribution {
 }
 
 enum StreamSink {
-    Retrieval(HashSet<Peer>),
+    Retrieval(FxHashSet<Peer>),
     Distribution(DistributionStreamSink)
 }
 
 impl StreamSink {
-    fn unwrap_retrieval(&mut self) -> &mut HashSet<Peer> { if let Self::Retrieval(ref mut dests) = self { dests } else { panic!() } }
+    fn unwrap_retrieval(&mut self) -> &mut FxHashSet<Peer> { if let Self::Retrieval(ref mut dests) = self { dests } else { panic!() } }
     fn unwrap_distribution(&mut self) -> &mut DistributionStreamSink { if let Self::Distribution(ref mut chunks) = self { chunks } else { panic!() } }
 }
 
