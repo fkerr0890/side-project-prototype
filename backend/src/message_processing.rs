@@ -59,13 +59,15 @@ pub fn send_error_response<T>(send_error: mpsc::error::SendError<T>, file: &str,
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
+    to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>,
     myself: Peer
 }
 
 impl OutboundGateway {
-    pub fn new(socket: Arc<UdpSocket>, myself: Peer) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>, myself: Peer) -> Self {
         Self {
             socket,
+            to_staging,
             myself
         }
     }
@@ -96,7 +98,7 @@ impl OutboundGateway {
             .map(|(i, chunk)| Self::generate_inbound_message_bytes(key_store, dest, chunk, separate_parts.clone(), (i, num_chunks)))
             .filter_map(|r| r.map_err(|e| error!(e)).ok());
         for chunk in chunks {
-            result_early_return!(self.socket.send_to(&chunk, dest.socket).await);
+            self.transport(dest.id, dest.socket, chunk).await;
         }
     }
 
@@ -106,7 +108,7 @@ impl OutboundGateway {
         //     result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
         // }
         if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.public_endpoint).await);
+            self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized).await;
         }
     }
 
@@ -118,6 +120,23 @@ impl OutboundGateway {
         bytes.extend(nonce);
         Ok(bytes)
     }
+
+    async fn transport(&self, dest_id: NumId, dest: SocketAddrV4, bytes: Vec<u8>) {
+        if dest_id == self.myself.id {
+            self.to_staging.send((self.myself.endpoint_pair.public_endpoint, chunk_to_array(bytes))).unwrap();
+        }
+        else {
+            result_early_return!(self.socket.send_to(&bytes, dest).await);
+        }
+    }
+}
+
+fn chunk_to_array(mut chunk: Vec<u8>) -> (usize, [u8; 1024]) {
+    let prev_len = chunk.len();
+    for _ in 0..(1024 - chunk.len()) {
+        chunk.push(0);
+    }
+    (prev_len, chunk.try_into().unwrap())
 }
 
 pub struct BreadcrumbService {

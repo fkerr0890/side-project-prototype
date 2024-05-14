@@ -37,7 +37,8 @@ impl Node {
         report_trigger: Option<mpsc::Receiver<()>>,
         introducer: Option<Peer>, id: NumId,
         initial_peers: Vec<(String, NumId)>,
-        endpoint_pair: EndpointPair, socket: Arc<UdpSocket>,
+        endpoint_pair: EndpointPair,
+        socket: Arc<UdpSocket>,
         server_context: ServerContext,
         http_handler_rx: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
         client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
@@ -60,7 +61,7 @@ impl Node {
             peers.push(peer);
         }
 
-        let mut message_staging = MessageStaging::new(from_gateway, OutboundGateway::new(socket.clone(), myself), DiscoverPeerProcessor::new(), client_api_tx, client_api_rx, http_handler_rx, local_hosts, peers);
+        let mut message_staging = MessageStaging::new(from_gateway, OutboundGateway::new(socket.clone(), to_staging.clone(), myself), DiscoverPeerProcessor::new(), client_api_tx, client_api_rx, http_handler_rx, local_hosts, peers);
 
         if let Some(introducer) = introducer {
             let message = Message::new_discover_peer_request(myself, introducer, peer::MAX_PEERS);

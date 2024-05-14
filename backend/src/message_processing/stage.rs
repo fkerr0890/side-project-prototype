@@ -223,8 +223,8 @@ impl MessageStaging {
         peers.extend(self.stream_session_manager.get_all_destinations_source_retrieval().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_source_distribution().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_sink().into_iter());
-        debug!(?self.unconfirmed_peers);
         peers.extend(self.unconfirmed_peers.values());
+        // TODO: This doesn't work in most cases
         peers.remove(&self.outbound_gateway.myself);
         // tracing::Span::current().record("peers", format!("{:?}", peers));
         self.send_checked(peers, Message::new_heartbeat(Peer::default()), true).await;
