@@ -326,7 +326,7 @@ impl MessageStaging {
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
     async fn initial_distribution_request(&mut self, id: NumId, metadata: DistributeMetadata) {
         if !self.stream_session_manager.host_installed(&metadata.host_name) {
-            warn!(myself = %self.outbound_gateway.myself.id, "Blocked distribution request, reason: I do not host this app");
+            warn!(myself = %self.outbound_gateway.myself.id, host_name = metadata.host_name, "Blocked distribution request, reason: I do not host this app");
             return;
         }
         if self.stream_session_manager.source_active_distribution(&metadata.host_name) {

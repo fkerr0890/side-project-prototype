@@ -1,7 +1,7 @@
 use std::{net::SocketAddrV4, panic, process, sync::Arc, time::Duration};
 use rustc_hash::FxHashSet;
 
-use crate::{http::ServerContext, message::{NumId, Peer}, message_processing::{stage::ClientApiRequest, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}, MAX_TIME};
+use crate::{http::ServerContext, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::{stage::ClientApiRequest, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS}, node::{EndpointPair, Node, NodeInfo}, MAX_TIME};
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
 use tracing::{debug, Level};
@@ -76,6 +76,14 @@ pub async fn load_nodes_from_file(directory: &str) -> (ServerContext, Vec<mpsc::
     sleep(Duration::from_secs(1)).await;
     debug!("Setup complete");
     (server_context.unwrap(), client_api_txs)
+}
+
+pub fn start_distribution(txs: Vec<mpsc::UnboundedSender<ClientApiRequest>>, host_name: String) {
+    let mut rng = rand::thread_rng();
+    let tx = txs.into_iter().choose(&mut rng).unwrap();
+    tx.send(ClientApiRequest::AddHost(host_name.clone())).unwrap();
+    let dmessage = Message::new(Peer::default(), NumId(Uuid::new_v4().as_u128()), None, MetadataKind::Distribute(DistributeMetadata::new(1, host_name)), MessageDirection::Request);
+    tx.send(ClientApiRequest::Message(dmessage)).unwrap();
 }
 
 pub fn measure_lock_time() {
