@@ -105,12 +105,12 @@ impl OutboundGateway {
 
     pub async fn send_agreement(&self, dest: Peer, public_key: Vec<u8>, direction: MessageDirectionAgreement) {
         let serialized = result_early_return!(bincode::serialize(&KeyAgreementMessage::new(public_key, self.myself.id, direction)));
-        // if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-        //     result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
-        // }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized).await;
+        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+            result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
         }
+        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+        //     self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized).await;
+        // }
     }
 
     fn generate_inbound_message_bytes(key_store: &mut KeyStore, dest: Sender, chunk: &[u8], separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
