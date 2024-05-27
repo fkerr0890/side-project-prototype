@@ -1,21 +1,12 @@
-use p2p::{http::ServerContext, message::NumId, node::Node};
-use tokio::{fs, sync::mpsc};
+use p2p::{http::ServerContext, message::NumId, node::Node, test_utils};
+use tokio::sync::mpsc;
+use tracing::Level;
 use uuid::Uuid;
-use std::{env, panic, process};
+use std::env;
 
 #[tokio::main]
 async fn main() {
-    let orig_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        // invoke the default handler and exit the process
-        orig_hook(panic_info);
-        println!("{}", panic_info);
-        process::exit(1);
-    }));
-
-    fs::remove_dir_all("../peer_info").await.unwrap();
-    fs::create_dir("../peer_info").await.unwrap();
-
+    test_utils::setup(Level::INFO);
     let args: Vec<String> = env::args().collect();
     let (private_ip, private_port, public_ip, peer_ip, peer_port, is_start) = (args[1].clone(), args[2].clone(), args[3].clone(), args[4].clone(), args[5].clone(), args[6].parse::<bool>().unwrap());
     let (endpoint_pair, socket) = Node::get_socket(private_ip, private_port, &public_ip).await;

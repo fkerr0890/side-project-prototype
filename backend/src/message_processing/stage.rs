@@ -3,7 +3,7 @@ use ring::aead;
 use tokio::{select, sync::mpsc};
 use tracing::{debug, field, info, instrument, trace, warn};
 use rustc_hash::{FxHashMap, FxHashSet};
-use crate::{crypto::{Direction, KeyStore}, event::{TimeboundAction, TimelineEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return};
+use crate::{crypto::{Direction, KeyStore}, event::{TimeboundAction, TimeboundEventManager}, http::SerdeHttpResponse, lock, message::{DiscoverMetadata, DistributeMetadata, DpMessageKind, InboundMessage, KeyAgreementMessage, Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer, SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind}, message_processing::HEARTBEAT_INTERVAL_SECONDS, option_early_return, peer::PeerOps, result_early_return};
 
 use super::{search, stream::{DistributionResponse, StreamSessionManager}, BreadcrumbService, DiscoverPeerProcessor, EmptyOption, OutboundGateway, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS};
 
@@ -25,7 +25,7 @@ pub struct MessageStaging {
     to_http_handlers: FxHashMap<NumId, mpsc::UnboundedSender<SerdeHttpResponse>>,
     from_http_handlers: mpsc::UnboundedReceiver<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
     cached_stream_messages: FxHashMap<NumId, Message>,
-    event_manager: TimelineEventManager
+    event_manager: TimeboundEventManager
 }
 
 impl MessageStaging {
@@ -59,7 +59,7 @@ impl MessageStaging {
             to_http_handlers: FxHashMap::default(),
             from_http_handlers,
             cached_stream_messages: FxHashMap::default(),
-            event_manager: TimelineEventManager::new(Duration::from_millis(500))
+            event_manager: TimeboundEventManager::new(Duration::from_millis(500))
         };
         ret.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
         ret

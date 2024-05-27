@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 
 use ring::{aead, agreement, digest, hkdf, rand::{SecureRandom, SystemRandom}};
 
-use crate::{event::{TimeboundAction, TimelineEventManager}, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, option_early_return};
+use crate::{event::{TimeboundAction, TimeboundEventManager}, message::NumId, message_processing::{ACTIVE_SESSION_TTL_SECONDS, SRP_TTL_SECONDS}, option_early_return};
 
 const INITIAL_SALT: [u8; 20] = [
     0xc3, 0xee, 0xf7, 0x12, 0xc7, 0x2e, 0xbb, 0x5a, 0x11, 0xa7, 0xd2, 0x43, 0x2b, 0xb4, 0x63, 0x65,
@@ -32,7 +32,7 @@ impl KeyStore {
         }
     }
 
-    pub fn public_key(&mut self, peer_id: NumId, event_manager: &mut TimelineEventManager) -> Option<Vec<u8>> {
+    pub fn public_key(&mut self, peer_id: NumId, event_manager: &mut TimeboundEventManager) -> Option<Vec<u8>> {
         if self.symmetric_keys.contains_key(&peer_id) {
             return None
         }
@@ -65,7 +65,7 @@ impl KeyStore {
         }
     }
 
-    pub fn agree(&mut self, peer_id: NumId, peer_public_key: Vec<u8>, event_manager: &mut TimelineEventManager) -> Result<(), Error> {
+    pub fn agree(&mut self, peer_id: NumId, peer_public_key: Vec<u8>, event_manager: &mut TimeboundEventManager) -> Result<(), Error> {
         if self.symmetric_keys.contains_key(&peer_id) {
             return Ok(())
         }

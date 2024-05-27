@@ -5,13 +5,13 @@ use tokio::time;
 
 use crate::message::{Message, NumId};
 
-pub struct TimelineEventManager {
+pub struct TimeboundEventManager {
     events: FxHashMap<u128, Vec<TimeboundAction>>,
     interval: time::Interval,
     now: u128
 }
 
-impl TimelineEventManager {
+impl TimeboundEventManager {
     pub fn new(tick_duration: Duration) -> Self {
         Self {
             interval: time::interval(tick_duration),
