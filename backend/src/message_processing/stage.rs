@@ -125,13 +125,13 @@ impl MessageStaging {
     fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> Message {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
         let mut message = bincode::deserialize::<Message>(&message_bytes).unwrap();
-        if let MetadataKind::Heartbeat = message.metadata() {
-            info!(?message, "Heartbeat");
-        }
         for sender in senders {
             message.set_sender(sender);
         }
         message.set_timestamp(timestamp);
+        if let MetadataKind::Heartbeat = message.metadata() {
+            info!(?message, "Heartbeat");
+        }
         message
     }
 
