@@ -75,12 +75,12 @@ impl OutboundGateway {
 
     pub async fn send(&self, message: &Message, to_be_chunked: bool, key_store: &mut KeyStore) {
         let dest = message.dest();
-        // if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-        //     self.send_individual(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
-        // }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.send_individual(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
+            self.send_individual(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
         }
+        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+        //     self.send_individual(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        // }
     }
 
     pub async fn send_individual(&self, dest: Sender, message: &Message, to_be_chunked: bool, key_store: &mut KeyStore) {
