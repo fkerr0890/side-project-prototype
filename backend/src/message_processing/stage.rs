@@ -125,6 +125,9 @@ impl MessageStaging {
     fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> Message {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
         let mut message = bincode::deserialize::<Message>(&message_bytes).unwrap();
+        if let MetadataKind::Heartbeat = message.metadata() {
+            info!(?message, "Heartbeat");
+        }
         for sender in senders {
             message.set_sender(sender);
         }
@@ -207,6 +210,7 @@ impl MessageStaging {
                     let metadata = self.discover_peer_processor.new_peers(&id);
                     for peer in metadata.peer_list {
                         self.add_new_peer(peer);
+                        info!("Discover finalized");
                     }
                 }
             }
@@ -441,7 +445,7 @@ impl MessageStaging {
                 if !self.stream_session_manager.sink_active_retrieval(&metadata.host_name) {
                     self.stream_session_manager.new_sink_retrieval(metadata.host_name.clone())
                 }
-                self.stream_session_manager.add_destination_sink(&metadata.host_name, sender);
+             /*    self.stream_session_manager.add_destination_sink(&metadata.host_name, sender); */
                 option_early_return!(self.stream_session_manager.retrieval_response_action(payload, metadata.host_name, id).await)
             },
             StreamPayloadKind::Response(payload) => {
@@ -519,7 +523,7 @@ impl MessageStaging {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
         let mut peers = lock!(self.peer_ops);
         peers.add_peer(peer, DiscoverPeerProcessor::get_score(self.outbound_gateway.myself.endpoint_pair.public_endpoint, peer_endpoint));
-        info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
+        /* info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>()); */
     }
 
     #[instrument(level = "trace", skip_all, fields(message.peer_id))]

@@ -9,7 +9,7 @@ use crate::{crypto::{Direction, KeyStore}, message::{InboundMessage, KeyAgreemen
 pub use self::discover::DiscoverPeerProcessor;
 
 pub const SEARCH_TIMEOUT_SECONDS: Duration = Duration::from_secs(30);
-pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(1000);
+pub const DPP_TTL_MILLIS: Duration = Duration::from_millis(2000);
 pub const SRP_TTL_SECONDS: Duration = Duration::from_secs(30);
 pub const ACTIVE_SESSION_TTL_SECONDS: Duration = Duration::from_secs(600);
 pub const HEARTBEAT_INTERVAL_SECONDS: Duration = Duration::from_secs(10);
