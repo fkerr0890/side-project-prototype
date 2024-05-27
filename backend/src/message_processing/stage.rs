@@ -130,7 +130,7 @@ impl MessageStaging {
         }
         message.set_timestamp(timestamp);
         if let MetadataKind::Heartbeat = message.metadata() {
-            info!(?message, "Heartbeat");
+            // info!(?message, "Heartbeat");
         }
         message
     }
@@ -210,7 +210,6 @@ impl MessageStaging {
                     let metadata = self.discover_peer_processor.new_peers(&id);
                     for peer in metadata.peer_list {
                         self.add_new_peer(peer);
-                        info!("Discover finalized");
                     }
                 }
             }
@@ -523,7 +522,7 @@ impl MessageStaging {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
         let mut peers = lock!(self.peer_ops);
         peers.add_peer(peer, DiscoverPeerProcessor::get_score(self.outbound_gateway.myself.endpoint_pair.public_endpoint, peer_endpoint));
-        /* info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>()); */
+        info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>()); 
     }
 
     #[instrument(level = "trace", skip_all, fields(message.peer_id))]

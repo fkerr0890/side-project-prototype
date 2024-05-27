@@ -2,6 +2,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Serialize, Deserialize};
 use rustc_hash::FxHashSet;
 use std::fmt::{Debug, Display};
+use std::net::Ipv4Addr;
 use std::{str, net::SocketAddrV4};
 use uuid::Uuid;
 
@@ -272,7 +273,7 @@ impl Default for Peer {
 
 impl From<Sender> for Peer {
     fn from(value: Sender) -> Self {
-        let endpoint_pair = if value.socket.ip().is_private() {
+        let endpoint_pair = if value.socket.ip().is_private() || *value.socket.ip() == Ipv4Addr::new(127, 0, 0, 1) {
             EndpointPair::new(EndpointPair::default_socket(), value.socket)
         }
         else {
