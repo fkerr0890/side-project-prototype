@@ -91,7 +91,7 @@ impl MessageStaging {
         let (peer_id_bytes, nonce) = suffix.split_at(suffix.len() - aead::NONCE_LEN);
         let peer_id = NumId(u128::from_be_bytes(peer_id_bytes.try_into().unwrap()));
         let mut message_bytes = message_bytes.to_vec();
-        message_bytes = self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)).expect(&format!("no key from {sender_addr} at {:?}", self.outbound_gateway.myself));
+        message_bytes = result_early_return!(self.key_store.transform(peer_id, &mut message_bytes, Direction::Decode(nonce)), None);
         let inbound_message: InboundMessage = result_early_return!(bincode::deserialize(&message_bytes), None);
         if inbound_message.separate_parts().sender().socket != sender_addr {
             warn!(sender = %inbound_message.separate_parts().sender().socket, actual_sender = %sender_addr, "Sender doesn't match actual sender");
@@ -130,7 +130,7 @@ impl MessageStaging {
         }
         message.set_timestamp(timestamp);
         if let MetadataKind::Heartbeat = message.metadata() {
-            // info!(?message, "Heartbeat");
+            info!(?message, "Heartbeat");
         }
         message
     }
