@@ -444,7 +444,7 @@ impl MessageStaging {
                 if !self.stream_session_manager.sink_active_retrieval(&metadata.host_name) {
                     self.stream_session_manager.new_sink_retrieval(metadata.host_name.clone())
                 }
-             /*    self.stream_session_manager.add_destination_sink(&metadata.host_name, sender); */
+                self.stream_session_manager.add_destination_sink(&metadata.host_name, sender);
                 option_early_return!(self.stream_session_manager.retrieval_response_action(payload, metadata.host_name, id).await)
             },
             StreamPayloadKind::Response(payload) => {

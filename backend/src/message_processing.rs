@@ -78,9 +78,9 @@ impl OutboundGateway {
         if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
             self.send_individual(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
         }
-        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-        //     self.send_individual(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
-        // }
+        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+            self.send_individual(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        }
     }
 
     pub async fn send_individual(&self, dest: Sender, message: &Message, to_be_chunked: bool, key_store: &mut KeyStore) {
@@ -108,9 +108,9 @@ impl OutboundGateway {
         if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
             result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
         }
-        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-        //     self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized).await;
-        // }
+        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+            self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized).await;
+        }
     }
 
     fn generate_inbound_message_bytes(key_store: &mut KeyStore, dest: Sender, chunk: &[u8], separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
