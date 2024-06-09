@@ -17,8 +17,7 @@ pub fn logic(id: NumId, myself: Peer, metadata: &mut SearchMetadata, local_hosts
         (metadata.origin, None, PropagationDirection::Forward)
     } else {
         debug!(%id, ?myself, "Stopped propagating search request");
-        let prev_origin = metadata.origin;
-        metadata.origin = myself;
-        (prev_origin, None, PropagationDirection::Reverse)
+        metadata.hairpin = Some(myself);
+        (metadata.origin, None, PropagationDirection::Reverse)
     }
 }

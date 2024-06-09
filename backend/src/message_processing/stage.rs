@@ -84,10 +84,12 @@ impl MessageStaging {
 
     #[instrument(level = "trace", skip_all, fields(%sender_addr))]
     fn stage_message(&mut self, message_bytes: (usize, [u8; 1024]), sender_addr: SocketAddrV4) -> Option<Message> {
-        // let (is_encrypted, sender) = (message_bytes.take_is_encrypted(), message_bytes.separate_parts().sender().socket);
         let (length, message_bytes) = message_bytes;
+        if length < aead::NONCE_LEN + 16 {
+            return None;
+        }
         let (message_bytes, _tail) = message_bytes.split_at(length);
-        let (message_bytes, suffix) = message_bytes.split_at(message_bytes.len() - aead::NONCE_LEN - 16);
+        let (message_bytes, suffix) = message_bytes.split_at(length - aead::NONCE_LEN - 16);
         let (peer_id_bytes, nonce) = suffix.split_at(suffix.len() - aead::NONCE_LEN);
         let peer_id = NumId(u128::from_be_bytes(peer_id_bytes.try_into().unwrap()));
         let mut message_bytes = message_bytes.to_vec();
@@ -129,9 +131,9 @@ impl MessageStaging {
             message.set_sender(sender);
         }
         message.set_timestamp(timestamp);
-        if let MetadataKind::Heartbeat = message.metadata() {
-            info!(?message, "Heartbeat");
-        }
+        // if let MetadataKind::Heartbeat = message.metadata() {
+        //     info!(?message, "Heartbeat");
+        // }
         message
     }
 
@@ -143,9 +145,8 @@ impl MessageStaging {
                 match message.metadata_mut() {
                     MetadataKind::Discover(metadata) => if let (true, introducer) = self.client_discover_logic(metadata, id) { return self.send_discover_peer_message(introducer, message).await; },
                     MetadataKind::Distribute(metadata) => return self.initial_distribution_request(id, metadata.clone()).await,
-                    _ => {}
+                    _ => unimplemented!()
                 }
-                self.send_response(message).await;
             },
             ClientApiRequest::ClearActiveSessions => {
                 self.stream_session_manager.clear_all_sources_sinks();
@@ -170,9 +171,7 @@ impl MessageStaging {
     }
 
     async fn send_discover_peer_message(&mut self, introducer: Option<Peer>, message: Message) { 
-        if let Some(introducer) = introducer {
-            self.send_checked(vec![introducer], message, false).await;
-        }
+        self.send_checked(vec![introducer.unwrap()], message, false).await;
     }
 
     async fn process_follow_up(&mut self, id: NumId) {
@@ -217,6 +216,7 @@ impl MessageStaging {
     }
 
     fn insert_cached_stream_message(&mut self, id: NumId, message: Message) {
+        assert!(!self.cached_stream_messages.contains_key(&id));
         self.event_manager.put_event(TimeboundAction::RemoveCachedStreamMessage(id), SRP_TTL_SECONDS);
         self.cached_stream_messages.insert(id, message);
     }
@@ -228,8 +228,6 @@ impl MessageStaging {
         peers.extend(self.stream_session_manager.get_all_destinations_source_distribution().into_iter());
         peers.extend(self.stream_session_manager.get_all_destinations_sink().into_iter());
         peers.extend(self.unconfirmed_peers.values());
-        // TODO: This doesn't work in most cases
-        peers.remove(&self.outbound_gateway.myself);
         // tracing::Span::current().record("peers", format!("{:?}", peers));
         self.send_checked(peers, Message::new_heartbeat(Peer::default()), true).await;
         self.event_manager.put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
@@ -257,13 +255,19 @@ impl MessageStaging {
 
     async fn send_response(&mut self, mut message: Message) {
         let dest = option_early_return!(self.breadcrumb_service.get_dest(&message.id()), warn!("Fuck"));
-        message.set_direction(MessageDirection::Response);
-        if let Some(dest) = dest {
-            self.send_checked(vec![Peer::from(dest)], message, false).await;
+        let mut dests = if let Some(dest) = dest {
+            vec![Peer::from(dest)]
         }
         else {
-            self.execute_final_action(message).await;
-        }
+            return self.execute_final_action(message).await;
+        };
+        match message.metadata() {
+            MetadataKind::Search(metadata) => { dests.push(metadata.origin) },
+            MetadataKind::Discover(metadata) => { dests.push(metadata.origin) },
+            _ => {}
+        };
+        message.set_direction(MessageDirection::Response);
+        self.send_checked(dests, message, false).await;
     }
 
     #[instrument(level = "trace", skip_all, fields(myself = %self.outbound_gateway.myself.id, ?message))]
@@ -311,6 +315,7 @@ impl MessageStaging {
     async fn initial_retrieval_request(&mut self, from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>)) {
         let (message, tx) = from_http_handler;
         let (id, host_name) = (message.id(), message.metadata().host_name().clone());
+        assert!(!self.to_http_handlers.contains_key(&id));
         self.event_manager.put_event(TimeboundAction::RemoveHttpHandlerTx(id), SRP_TTL_SECONDS);
         self.to_http_handlers.insert(id, tx);
         if self.stream_session_manager.source_active_retrieval(&host_name) {
@@ -338,7 +343,8 @@ impl MessageStaging {
         info!(myself = ?self.outbound_gateway.myself, "new source at");
         self.stream_session_manager.new_source_distribution(metadata.host_name.clone(), id, metadata.hop_count).await;
         let file = option_early_return!(self.stream_session_manager.file_mut(&metadata.host_name));
-        let (_, chunk) = result_early_return!(file.next_chunk_and_id(NumId(option_early_return!(u128::checked_sub(id.0, 1)))).await);
+        let (new_id, chunk) = result_early_return!(file.next_chunk_and_id(NumId(option_early_return!(u128::checked_sub(id.0, 1)))).await);
+        assert_eq!(new_id, id);
         self.stream_session_manager.push_resource_distribution(&metadata.host_name, id);
         let initial_message = Message::new(Peer::default(), id, None, MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::DistributionRequest(chunk), metadata.host_name.clone())), MessageDirection::OneHop);
         self.insert_cached_stream_message(id, initial_message);
@@ -406,7 +412,7 @@ impl MessageStaging {
         let (sender, id) = (message.only_sender(), message.id());
         let sender = if let Some(sender) = sender { Peer::from(sender) } else { self.outbound_gateway.myself };
         match message.into_metadata() {
-            MetadataKind::Search(metadata) => self.final_action_search(metadata, sender, id).await,
+            MetadataKind::Search(metadata) => self.final_action_search(metadata, id).await,
             MetadataKind::Discover(metadata) => self.final_action_discover(metadata, id),
             MetadataKind::Stream(metadata) => self.final_action_stream(metadata, sender, id).await,
             MetadataKind::Distribute(metadata) => self.initial_distribution_request(id, metadata).await,
@@ -414,14 +420,14 @@ impl MessageStaging {
         }
     }
 
-    async fn final_action_search(&mut self, metadata: SearchMetadata, sender: Peer, id: NumId) {
-        let SearchMetadata { origin, host_name, kind } = metadata;
-        let sender = if sender.endpoint_pair.private_endpoint == origin.endpoint_pair.private_endpoint && sender.id == origin.id { sender } else { origin };
+    async fn final_action_search(&mut self, metadata: SearchMetadata, id: NumId) {
+        let SearchMetadata { origin: _, hairpin, host_name, kind } = metadata;
+        let hairpin = hairpin.unwrap();
         match kind {
-            SearchMetadataKind::Retrieval => if !self.stream_session_manager.add_destination_source_retrieval(&host_name, sender) { return },
-            SearchMetadataKind::Distribution => if !self.stream_session_manager.add_destination_source_distribution(&host_name, sender) { return }
+            SearchMetadataKind::Retrieval => if !self.stream_session_manager.add_destination_source_retrieval(&host_name, hairpin) { return },
+            SearchMetadataKind::Distribution => if !self.stream_session_manager.add_destination_source_distribution(&host_name, hairpin) { return }
         };
-        self.send_initial_stream_message(id, sender).await;
+        self.send_initial_stream_message(id, hairpin).await;
     }
 
     fn final_action_discover(&mut self, metadata: DiscoverMetadata, id: NumId) {

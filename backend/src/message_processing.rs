@@ -48,9 +48,11 @@ impl InboundGateway {
     // #[instrument(level = "trace", skip(self, message_bytes))]
     fn handle_message(&self, message_bytes: (usize, [u8; 1024]), addr: SocketAddr) {
         if let SocketAddr::V4(socket) = addr {
-            result_early_return!(self.to_staging.send((socket, message_bytes))); return;
+            result_early_return!(self.to_staging.send((socket, message_bytes)));
         }
-        panic!("Not v4 oh no");
+        else {
+            panic!("Not v4 oh no");
+        }
     }
 }
 
@@ -78,9 +80,9 @@ impl OutboundGateway {
         if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
             self.send_individual(Sender::new(dest.endpoint_pair.private_endpoint, dest.id), message, to_be_chunked, key_store).await;
         }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.send_individual(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
-        }
+        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+        //     self.send_individual(Sender::new(dest.endpoint_pair.public_endpoint, dest.id), message, to_be_chunked, key_store).await;
+        // }
     }
 
     pub async fn send_individual(&self, dest: Sender, message: &Message, to_be_chunked: bool, key_store: &mut KeyStore) {
@@ -108,15 +110,15 @@ impl OutboundGateway {
         if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
             result_early_return!(self.socket.send_to(&serialized, dest.endpoint_pair.private_endpoint).await);
         }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized).await;
-        }
+        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+        //     self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized).await;
+        // }
     }
 
     fn generate_inbound_message_bytes(key_store: &mut KeyStore, dest: Sender, chunk: &[u8], separate_parts: SeparateParts, position: (usize, usize)) -> Result<Vec<u8>, String> {
         let my_peer_id = separate_parts.sender().id.0;
         let mut bytes = bincode::serialize(&InboundMessage::new(chunk.to_vec(), separate_parts.set_position(position))).map_err(|e| e.to_string())?;
-        let nonce = key_store.transform(dest.id, &mut bytes, Direction::Encode).map_err(|e| e.error_response(file!(), line!()))?;
+        let nonce = key_store.transform(dest.id, &mut bytes, Direction::Encode).map_err(|e| e.to_string())?;
         bytes.extend(my_peer_id.to_be_bytes());
         bytes.extend(nonce);
         Ok(bytes)

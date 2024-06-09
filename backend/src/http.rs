@@ -66,19 +66,13 @@ impl SerdeHttpResponse {
         })
     }
 
-    fn into_hyper_response(self) -> Response<Body> {
+    fn into_hyper_response(self) -> Result<Response<Body>, String> {
         let Self { body, status_code, version, headers } = self;
         let mut response = Response::new(Body::from(body));
-        *response.status_mut() = match StatusCode::from_u16(status_code) {
-            Ok(status_code) => status_code,
-            Err(e) => return construct_error_response(e.to_string(), version).into_hyper_response()
-        };
-        *response.headers_mut() = match reconstruct_header_map(headers) {
-            Ok(headers) => headers,
-            Err(e) => return construct_error_response(e.to_string(), version).into_hyper_response()
-        };
+        *response.status_mut() = StatusCode::from_u16(status_code).map_err(|e| e.to_string())?;
+        *response.headers_mut() = reconstruct_header_map(headers).map_err(|e| e.to_string())?;
         *response.version_mut() = string_to_version(version);
-        response
+        Ok(response)
     }
 
     fn builder(status_code: u16, version: String) -> Self {
@@ -129,6 +123,7 @@ fn drain_headers(mut header_map: HeaderMap) -> Result<FxHashMap<String, Vec<Stri
     for (header_name, header_value) in header_map.drain() {
         if let Some(header_name) = header_name {
             curr_header_name = header_name.to_string();
+            assert!(!headers.contains_key(&curr_header_name));
             headers.insert(curr_header_name.clone(), Vec::new());
         }
         headers.get_mut(&curr_header_name).unwrap().push(header_value.to_str().map_err(|e| { e.to_string() })?.to_owned());
@@ -188,7 +183,8 @@ pub async fn handle_request(context: ServerContext, request: Request<Body>, test
             return Ok(construct_hyper_error_response(String::from("Request timed out/p2p daemon terminated"), request_version, 500))
         }
     };
-    Ok(response.into_hyper_response())
+    let (response_version, response_status_code) = (string_to_version(response.version.clone()), response.status_code);
+    Ok(response.into_hyper_response().unwrap_or_else(|e| construct_hyper_error_response(e, response_version, response_status_code)))
     }, Some(Level::DEBUG))
 }
 

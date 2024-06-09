@@ -93,6 +93,7 @@ impl Message {
     }
 
     pub fn new_discover_peer_request(myself: Peer, introducer: Peer, target_num_peers: u16) -> Self {
+        assert_ne!(myself.id, introducer.id);
         Self::new(
             Peer::default(),
             NumId(Uuid::new_v4().as_u128()),
@@ -123,7 +124,7 @@ impl Message {
     pub fn replace_dest(&mut self, dest: Peer) { self.dest = dest; }
     pub fn set_sender(&mut self, sender: Sender) { self.senders.push(sender); }
     pub fn set_timestamp(&mut self, timestamp: String) { self.timestamp = timestamp }
-    pub fn set_direction(&mut self, direction: MessageDirection) { self.direction = direction}
+    pub fn set_direction(&mut self, direction: MessageDirection) { self.direction = direction }
 
     pub fn check_expiry(&self) -> bool {
         let expiry: DateTime<Utc> = DateTime::parse_from_rfc3339(option_early_return!(&self.expiry, false)).unwrap().into();
@@ -178,13 +179,14 @@ impl MetadataKind {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SearchMetadata {
     pub origin: Peer,
+    pub hairpin: Option<Peer>,
     pub host_name: String,
     pub kind: SearchMetadataKind
 }
 
 impl SearchMetadata {
     pub fn new(origin: Peer, host_name: String, kind: SearchMetadataKind) -> Self {
-        Self { origin, host_name, kind }
+        Self { origin, hairpin: None, host_name, kind }
     }
 }
 

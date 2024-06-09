@@ -272,7 +272,7 @@ impl DistributionStreamSink {
             self.chunks.push(payload);
             DistributionResponse::Continue
         }
-        else if fs::write("C:/Users/fredk/Downloads/p2p-dump.tar.gz", self.chunks.concat()).await.is_ok() {
+        else if fs::write("/home/fred/test/p2pdump.gz", self.chunks.concat()).await.is_ok() {
             DistributionResponse::InstallOk
         } else {
             DistributionResponse::InstallError

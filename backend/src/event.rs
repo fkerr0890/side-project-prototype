@@ -13,6 +13,7 @@ pub struct TimeboundEventManager {
 
 impl TimeboundEventManager {
     pub fn new(tick_duration: Duration) -> Self {
+        assert!(!tick_duration.is_zero());
         Self {
             interval: time::interval(tick_duration),
             events: FxHashMap::default(),
