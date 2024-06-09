@@ -28,7 +28,9 @@ impl TimeboundEventManager {
     }
 
     pub fn put_event(&mut self, action: TimeboundAction, wait_time: Duration) {
-        let num_ticks = wait_time.as_millis() / self.interval.period().as_millis();
+        let (wait_time, tick_time) = (wait_time.as_millis(), self.interval.period().as_millis());
+        assert!(wait_time >= tick_time);
+        let num_ticks = wait_time / tick_time;
         let actions = self.events.entry(self.now + num_ticks).or_default();
         actions.push(action);
     }
