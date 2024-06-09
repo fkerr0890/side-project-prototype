@@ -1,5 +1,5 @@
-use std::time::Duration;
 use rustc_hash::FxHashMap;
+use std::time::Duration;
 
 use tokio::time;
 
@@ -8,7 +8,7 @@ use crate::message::{Message, NumId};
 pub struct TimeboundEventManager {
     events: FxHashMap<u128, Vec<TimeboundAction>>,
     interval: time::Interval,
-    now: u128
+    now: u128,
 }
 
 impl TimeboundEventManager {
@@ -17,7 +17,7 @@ impl TimeboundEventManager {
         Self {
             interval: time::interval(tick_duration),
             events: FxHashMap::default(),
-            now: 0
+            now: 0,
         }
     }
 
@@ -49,5 +49,5 @@ pub enum TimeboundAction {
     RemovePrivateKey(NumId),
     RemoveUnconfirmedPeer(NumId),
     SendEarlyReturnMessage(Message),
-    FinalizeDiscover(NumId)
+    FinalizeDiscover(NumId),
 }

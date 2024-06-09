@@ -1,6 +1,6 @@
 use p2p::test_utils;
-use tracing::Level;
 use std::future;
+use tracing::Level;
 
 #[tokio::test]
 async fn basic() {

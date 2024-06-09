@@ -1,11 +1,11 @@
-use std::net::SocketAddrV4;
 use rustc_hash::FxHashMap;
+use std::net::SocketAddrV4;
 use tracing::{instrument, warn};
 
 use crate::message::{DiscoverMetadata, NumId, Peer};
 
 pub struct DiscoverPeerProcessor {
-    message_staging: FxHashMap<NumId, DiscoverMetadata>
+    message_staging: FxHashMap<NumId, DiscoverMetadata>,
 }
 
 impl DiscoverPeerProcessor {
@@ -29,14 +29,18 @@ impl DiscoverPeerProcessor {
     pub fn peer_len_curr_max(&self, id: &NumId) -> usize {
         if let Some(staged_metadata) = self.message_staging.get(id) {
             staged_metadata.peer_list.len()
-        }
-        else {
+        } else {
             0
         }
     }
 
     #[instrument(level = "trace", skip_all, fields(hop_count = ?metadata.hop_count))]
-    pub fn stage_message(&mut self, id: NumId, metadata: DiscoverMetadata, peer_len_curr_max: usize) {
+    pub fn stage_message(
+        &mut self,
+        id: NumId,
+        metadata: DiscoverMetadata,
+        peer_len_curr_max: usize,
+    ) {
         if metadata.peer_list.len() > peer_len_curr_max {
             self.message_staging.insert(id, metadata);
         }

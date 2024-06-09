@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use tokio::net::UdpSocket;
-use stun::{Error, client, message, agent, xoraddr};
 use stun::message::Getter;
+use stun::{agent, client, message, xoraddr, Error};
+use tokio::net::UdpSocket;
 
 pub async fn stun() -> Result<(), Error> {
     let server = String::from("stun.l.google.com:19302");
@@ -15,10 +15,15 @@ pub async fn stun() -> Result<(), Error> {
     println!("Connecting to: {server}");
     conn.connect(server).await?;
 
-    let mut client = client::ClientBuilder::new().with_conn(Arc::new(conn)).build()?;
+    let mut client = client::ClientBuilder::new()
+        .with_conn(Arc::new(conn))
+        .build()?;
 
     let mut msg = message::Message::new();
-    msg.build(&[Box::<agent::TransactionId>::default(), Box::new(message::BINDING_REQUEST)])?;
+    msg.build(&[
+        Box::<agent::TransactionId>::default(),
+        Box::new(message::BINDING_REQUEST),
+    ])?;
 
     client.send(&msg, Some(Arc::new(handler_tx))).await?;
 

@@ -1,13 +1,23 @@
-use std::{str::FromStr, convert::Infallible, net::SocketAddr};
 use rustc_hash::FxHashMap;
+use std::{convert::Infallible, net::SocketAddr, str::FromStr};
 
-use hyper::{Request, Response, Body, body, HeaderMap, Version, StatusCode, header::{HeaderName, HeaderValue}, service::{make_service_fn, service_fn}, Server, Client, Method, Uri};
-use serde::{Serialize, Deserialize};
+use hyper::{
+    body,
+    header::{HeaderName, HeaderValue},
+    service::{make_service_fn, service_fn},
+    Body, Client, HeaderMap, Method, Request, Response, Server, StatusCode, Uri, Version,
+};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, error, Level};
 use uuid::Uuid;
 
-use crate::{message::{Message, MessageDirection, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind}, time};
+use crate::{
+    message::{
+        Message, MessageDirection, MetadataKind, NumId, Peer, StreamMetadata, StreamPayloadKind,
+    },
+    time,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SerdeHttpRequest {
@@ -16,7 +26,7 @@ pub struct SerdeHttpRequest {
     version: String,
     headers: FxHashMap<String, Vec<String>>,
     body: Vec<u8>,
-    for_testing: bool
+    for_testing: bool,
 }
 
 impl SerdeHttpRequest {
@@ -27,8 +37,11 @@ impl SerdeHttpRequest {
             uri: parts.uri.to_string(),
             version: version_to_string(parts.version),
             headers: drain_headers(parts.headers)?,
-            body: body::to_bytes(body).await.map_err(|e| { e.to_string() })?.to_vec(),
-            for_testing
+            body: body::to_bytes(body)
+                .await
+                .map_err(|e| e.to_string())?
+                .to_vec(),
+            for_testing,
         })
     }
 
@@ -41,10 +54,18 @@ impl SerdeHttpRequest {
         Ok(request)
     }
 
-    pub fn method(&self) -> &str { &self.method }
-    pub fn uri(&self) -> &str { &self.uri }
-    pub fn body(&self) -> &[u8] { &self.body }
-    pub fn set_uri(&mut self, uri: String) { self.uri = uri; }
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+    pub fn set_uri(&mut self, uri: String) {
+        self.uri = uri;
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -62,12 +83,20 @@ impl SerdeHttpResponse {
             status_code: parts.status.as_u16(),
             version: version_to_string(parts.version),
             headers: drain_headers(parts.headers)?,
-            body: body::to_bytes(body).await.map_err(|e| { e.to_string() })?.to_vec()
+            body: body::to_bytes(body)
+                .await
+                .map_err(|e| e.to_string())?
+                .to_vec(),
         })
     }
 
     fn into_hyper_response(self) -> Result<Response<Body>, String> {
-        let Self { body, status_code, version, headers } = self;
+        let Self {
+            body,
+            status_code,
+            version,
+            headers,
+        } = self;
         let mut response = Response::new(Body::from(body));
         *response.status_mut() = StatusCode::from_u16(status_code).map_err(|e| e.to_string())?;
         *response.headers_mut() = reconstruct_header_map(headers).map_err(|e| e.to_string())?;
@@ -80,12 +109,13 @@ impl SerdeHttpResponse {
             body: Vec::with_capacity(0),
             status_code,
             version,
-            headers: FxHashMap::default()
+            headers: FxHashMap::default(),
         }
     }
 
     fn header(mut self, key: &str, value: &str) -> Self {
-        self.headers.insert(String::from(key), vec![String::from(value)]);
+        self.headers
+            .insert(String::from(key), vec![String::from(value)]);
         self
     }
 
@@ -102,7 +132,7 @@ fn version_to_string(version: Version) -> String {
         Version::HTTP_11 => String::from("HTTP/1.1"),
         Version::HTTP_2 => String::from("HTTP/2"),
         Version::HTTP_3 => String::from("HTTP/3.0"),
-        _ => panic!("Http version not supported")
+        _ => panic!("Http version not supported"),
     }
 }
 
@@ -113,7 +143,7 @@ fn string_to_version(version: String) -> Version {
         "HTTP/1.1" => Version::HTTP_11,
         "HTTP/2" => Version::HTTP_2,
         "HTTP/3.0" => Version::HTTP_3,
-        _ => panic!("Http version not supported")
+        _ => panic!("Http version not supported"),
     }
 }
 
@@ -126,7 +156,10 @@ fn drain_headers(mut header_map: HeaderMap) -> Result<FxHashMap<String, Vec<Stri
             assert!(!headers.contains_key(&curr_header_name));
             headers.insert(curr_header_name.clone(), Vec::new());
         }
-        headers.get_mut(&curr_header_name).unwrap().push(header_value.to_str().map_err(|e| { e.to_string() })?.to_owned());
+        headers
+            .get_mut(&curr_header_name)
+            .unwrap()
+            .push(header_value.to_str().map_err(|e| e.to_string())?.to_owned());
     }
     Ok(headers)
 }
@@ -135,7 +168,10 @@ fn reconstruct_header_map(headers: FxHashMap<String, Vec<String>>) -> Result<Hea
     let mut header_map = HeaderMap::new();
     for (header_name, header_values) in headers {
         for header_value in header_values {
-            header_map.append(HeaderName::from_str(&header_name).map_err(|e| { e.to_string() })?, HeaderValue::from_str(&header_value).map_err(|e| { e.to_string() })?);
+            header_map.append(
+                HeaderName::from_str(&header_name).map_err(|e| e.to_string())?,
+                HeaderValue::from_str(&header_value).map_err(|e| e.to_string())?,
+            );
         }
     }
     Ok(header_map)
@@ -143,58 +179,85 @@ fn reconstruct_header_map(headers: FxHashMap<String, Vec<String>>) -> Result<Hea
 
 #[derive(Clone)]
 pub struct ServerContext {
-    pub to_staging: mpsc::UnboundedSender<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>
+    pub to_staging: mpsc::UnboundedSender<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
 }
 
 impl ServerContext {
-    pub fn new(to_staging: mpsc::UnboundedSender<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>) -> Self {
+    pub fn new(
+        to_staging: mpsc::UnboundedSender<(Message, mpsc::UnboundedSender<SerdeHttpResponse>)>,
+    ) -> Self {
         Self { to_staging }
     }
 }
 
-pub async fn handle_request(context: ServerContext, request: Request<Body>, testing: bool) -> Result<Response<Body>, Infallible> {
+pub async fn handle_request(
+    context: ServerContext,
+    request: Request<Body>,
+    testing: bool,
+) -> Result<Response<Body>, Infallible> {
     // let epoch_now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
     // let timestamp = u128::from_str(request.headers().get("timestamp").unwrap().to_str().unwrap()).unwrap();
     // debug!(elapsed = epoch_now - timestamp, "Request latency millis");
-    time!({
-    let request_version = request.version();
-    let mut request = match time!( { SerdeHttpRequest::from_hyper_request(request, testing).await }, Some(Level::DEBUG)) {
-        Ok(request) => request,
-        Err(e) => return Ok(construct_hyper_error_response(e, request_version, 400))
-    };
-    debug!(uri = request.uri());
-    let (host_name, path) = get_host_name_and_path(request.uri());
-    if host_name.trim_end().is_empty() {
-        return Ok(construct_hyper_error_response(String::from("Invalid host name"), request_version, 400));
-    }
-    request.set_uri(path);
-    let sm = Message::new(
-        Peer::default(),
-        NumId(Uuid::new_v4().as_u128()),
-        None,
-        MetadataKind::Stream(StreamMetadata::new(StreamPayloadKind::Request(request), host_name.clone())),
-        MessageDirection::OneHop);
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    context.to_staging.send((sm, tx)).ok();
-    let response = match rx.recv().await {
-        Some(response) => response,
-        None => {
-            debug!("SMP to http channel closed");
-            return Ok(construct_hyper_error_response(String::from("Request timed out/p2p daemon terminated"), request_version, 500))
-        }
-    };
-    let (response_version, response_status_code) = (string_to_version(response.version.clone()), response.status_code);
-    Ok(response.into_hyper_response().unwrap_or_else(|e| construct_hyper_error_response(e, response_version, response_status_code)))
-    }, Some(Level::DEBUG))
+    time!(
+        {
+            let request_version = request.version();
+            let mut request = match time!(
+                { SerdeHttpRequest::from_hyper_request(request, testing).await },
+                Some(Level::DEBUG)
+            ) {
+                Ok(request) => request,
+                Err(e) => return Ok(construct_hyper_error_response(e, request_version, 400)),
+            };
+            debug!(uri = request.uri());
+            let (host_name, path) = get_host_name_and_path(request.uri());
+            if host_name.trim_end().is_empty() {
+                return Ok(construct_hyper_error_response(
+                    String::from("Invalid host name"),
+                    request_version,
+                    400,
+                ));
+            }
+            request.set_uri(path);
+            let sm = Message::new(
+                Peer::default(),
+                NumId(Uuid::new_v4().as_u128()),
+                None,
+                MetadataKind::Stream(StreamMetadata::new(
+                    StreamPayloadKind::Request(request),
+                    host_name.clone(),
+                )),
+                MessageDirection::OneHop,
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            context.to_staging.send((sm, tx)).ok();
+            let response = match rx.recv().await {
+                Some(response) => response,
+                None => {
+                    debug!("SMP to http channel closed");
+                    return Ok(construct_hyper_error_response(
+                        String::from("Request timed out/p2p daemon terminated"),
+                        request_version,
+                        500,
+                    ));
+                }
+            };
+            let (response_version, response_status_code) = (
+                string_to_version(response.version.clone()),
+                response.status_code,
+            );
+            Ok(response.into_hyper_response().unwrap_or_else(|e| {
+                construct_hyper_error_response(e, response_version, response_status_code)
+            }))
+        },
+        Some(Level::DEBUG)
+    )
 }
 
 pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
     let context = server_context.clone();
     let make_service = make_service_fn(move |_| {
         let context = context.clone();
-        let service = service_fn(move |req| {
-            handle_request(context.clone(), req, false)
-        });
+        let service = service_fn(move |req| handle_request(context.clone(), req, false));
         async move { Ok::<_, Infallible>(service) }
     });
     Server::bind(&socket).serve(make_service).await.unwrap();
@@ -203,17 +266,27 @@ pub async fn tcp_listen(socket: SocketAddr, server_context: ServerContext) {
 pub async fn make_request(request: SerdeHttpRequest, socket: &str) -> SerdeHttpResponse {
     let client = Client::new();
     let (request_version, for_testing) = (request.version.clone(), request.for_testing);
-    let hyper_request = match request.into_hyper_request(String::from("http://") + socket) { Ok(request) => request, Err(e) => return construct_error_response(e.to_string(), request_version) };
+    let hyper_request = match request.into_hyper_request(String::from("http://") + socket) {
+        Ok(request) => request,
+        Err(e) => return construct_error_response(e.to_string(), request_version),
+    };
     debug!("{:?}", hyper_request);
-    if for_testing { 
-        return SerdeHttpResponse::builder(200, request_version).body(vec![128u8; 1023])
+    if for_testing {
+        return SerdeHttpResponse::builder(200, request_version).body(vec![128u8; 1023]);
     }
-    time!({ let response = match client.request(hyper_request).await { Ok(response) => response, Err(e) => return construct_error_response(e.to_string(), request_version) };
-    match SerdeHttpResponse::from_hyper_response(response).await {
-        Ok(response) => response,
-        Err(e) => construct_error_response(e, request_version)
-    }
-    }, Some(Level::DEBUG))
+    time!(
+        {
+            let response = match client.request(hyper_request).await {
+                Ok(response) => response,
+                Err(e) => return construct_error_response(e.to_string(), request_version),
+            };
+            match SerdeHttpResponse::from_hyper_response(response).await {
+                Ok(response) => response,
+                Err(e) => construct_error_response(e, request_version),
+            }
+        },
+        Some(Level::DEBUG)
+    )
 }
 
 pub fn construct_error_response(error: String, request_version: String) -> SerdeHttpResponse {
@@ -225,7 +298,11 @@ pub fn construct_error_response(error: String, request_version: String) -> Serde
         .body(body.into_bytes())
 }
 
-pub fn construct_hyper_error_response(error: String, request_version: Version, status_code: u16) -> Response<Body> {
+pub fn construct_hyper_error_response(
+    error: String,
+    request_version: Version,
+    status_code: u16,
+) -> Response<Body> {
     Response::builder()
         .status(status_code)
         .version(request_version)

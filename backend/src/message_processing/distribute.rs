@@ -10,15 +10,24 @@ pub const CHUNK_SIZE_DISTRIBUTION: usize = 1024;
 pub struct ChunkedFileHandler {
     file: File,
     sent_id: Option<NumId>,
-    pub bytes_read: usize
+    pub bytes_read: usize,
 }
 impl ChunkedFileHandler {
     pub async fn new(host_name: &str) -> Self {
         println!("~/Downloads/{host_name}.gz");
-        Self { file: File::open(format!("/home/fred/Downloads/{host_name}.gz")).await.unwrap(), sent_id: None, bytes_read: 0 }
+        Self {
+            file: File::open(format!("/home/fred/Downloads/{host_name}.gz"))
+                .await
+                .unwrap(),
+            sent_id: None,
+            bytes_read: 0,
+        }
     }
 
-    pub async fn next_chunk_and_id(&mut self, received_id: NumId) -> Result<(NumId, Vec<u8>), Error> {
+    pub async fn next_chunk_and_id(
+        &mut self,
+        received_id: NumId,
+    ) -> Result<(NumId, Vec<u8>), Error> {
         if self.sent_id.is_some_and(|id| id != received_id) {
             return Err(Error::IdMismatch);
         }
@@ -27,12 +36,21 @@ impl ChunkedFileHandler {
         assert!(n <= CHUNK_SIZE_DISTRIBUTION);
         self.bytes_read += n;
         info!(bytes_read = self.bytes_read, "Distribution");
-        let id = NumId(u128::overflowing_add(received_id.0 , 1).0);
+        let id = NumId(u128::overflowing_add(received_id.0, 1).0);
         self.sent_id = Some(id);
-        Ok((id, if n == 0 { Vec::with_capacity(0) } else { buffer[..n].to_vec() }))
+        Ok((
+            id,
+            if n == 0 {
+                Vec::with_capacity(0)
+            } else {
+                buffer[..n].to_vec()
+            },
+        ))
     }
 
-    pub fn bytes_read(&self) -> usize { self.bytes_read }
+    pub fn bytes_read(&self) -> usize {
+        self.bytes_read
+    }
 }
 
 #[derive(Debug)]
