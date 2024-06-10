@@ -45,7 +45,7 @@ impl KeyStore {
         peer_id: NumId,
         event_manager: &mut TimeboundEventManager,
     ) -> Option<Vec<u8>> {
-        if self.symmetric_keys.contains_key(&peer_id) {
+        if self.agreement_exists(&peer_id) {
             return None;
         }
         if !self.private_keys.contains_key(&peer_id) {
