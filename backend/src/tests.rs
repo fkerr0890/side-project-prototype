@@ -68,7 +68,11 @@ fn key_store() -> (crypto::KeyStore, event::TimeboundEventManager) {
     (key_store, event_manager)
 }
 
-fn generate_public_key(peer_id: message::NumId, key_store: &mut crypto::KeyStore, event_manager: &mut event::TimeboundEventManager) -> Vec<u8> {
+fn generate_public_key(
+    peer_id: message::NumId,
+    key_store: &mut crypto::KeyStore,
+    event_manager: &mut event::TimeboundEventManager,
+) -> Vec<u8> {
     key_store
         .public_key(peer_id, event_manager)
         .expect("Some when no symmetric key exists")
