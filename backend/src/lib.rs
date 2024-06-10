@@ -12,6 +12,6 @@ pub mod nat_traversal;
 pub mod node;
 pub mod peer;
 pub mod test_utils;
-pub mod utils;
 #[cfg(test)]
 pub mod tests;
+pub mod utils;
