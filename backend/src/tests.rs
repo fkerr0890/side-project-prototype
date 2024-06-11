@@ -95,10 +95,10 @@ async fn crypto_public_key() {
 }
 
 #[tokio::test]
-async fn crypto_agree() {
+async fn crypto_agree_transform() {
     let peer_id = message::NumId(0);
     let (mut key_store, mut event_manager) = key_store();
-    let public_key = generate_public_key(peer_id, &mut key_store, &mut event_manager);
+    generate_public_key(peer_id, &mut key_store, &mut event_manager);
     key_store
         .agree(peer_id, vec![8u8; 16], &mut event_manager)
         .expect_err("Wrong public key should return Err");
@@ -112,4 +112,20 @@ async fn crypto_agree() {
         .agree(peer_id2, public_key, &mut event_manager)
         .expect("No private key should fail silently");
     assert!(!key_store.agreement_exists(&peer_id2));
+
+    let plaintext = b"Test message".to_vec();
+    let mut payload = plaintext.clone();
+    assert!(matches!(key_store.transform(peer_id2, &mut payload, crypto::Direction::Encode), Err(crypto::Error::NoKey)));
+    let nonce = key_store.transform(peer_id, &mut payload, crypto::Direction::Encode).expect("Encoding should succeed");
+    let mut payload_clone = payload.clone();
+    let mut payload_tampered = payload.clone();
+    payload_tampered[0] += 1;
+    let mut nonce_tampered = nonce.clone();
+    nonce_tampered[0] += 1;
+    let err_payload = key_store.transform(peer_id, &mut payload_tampered, crypto::Direction::Decode(&nonce));
+    assert!(matches!(err_payload, Err(crypto::Error::Unspecified)), "Actual was {:?}", err_payload);
+    let err_nonce = key_store.transform(peer_id, &mut payload_clone, crypto::Direction::Decode(&nonce_tampered));
+    assert!(matches!(err_nonce, Err(crypto::Error::Unspecified)), "Actual was {:?}", err_nonce);
+    payload = key_store.transform(peer_id, &mut payload, crypto::Direction::Decode(&nonce)).expect("Decoding should succeed");
+    assert_eq!(plaintext, payload);
 }
