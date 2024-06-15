@@ -27,14 +27,14 @@ use tracing::{debug, field, info, instrument, trace, warn};
 use super::{
     search,
     stream::{DistributionResponse, StreamSessionManager},
-    BreadcrumbService, DiscoverPeerProcessor, EmptyOption, OutboundGateway,
-    DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS,
+    BreadcrumbService, CipherReceiver, DiscoverPeerProcessor, EmptyOption, OutboundGateway,
+    Payload, DISTRIBUTION_TTL_SECONDS, DPP_TTL_MILLIS, SRP_TTL_SECONDS,
 };
 
 type CachedOutboundMessages = Vec<(Message, Vec<Peer>)>;
 
 pub struct MessageStaging {
-    from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
+    from_inbound_gateway: CipherReceiver,
     message_staging: FxHashMap<NumId, FxHashMap<usize, InboundMessage>>,
     cached_outbound_messages: FxHashMap<NumId, CachedOutboundMessages>,
     unconfirmed_peers: FxHashMap<NumId, Peer>,
@@ -55,7 +55,7 @@ pub struct MessageStaging {
 
 impl MessageStaging {
     pub fn new(
-        from_inbound_gateway: mpsc::UnboundedReceiver<(SocketAddrV4, (usize, [u8; 1024]))>,
+        from_inbound_gateway: CipherReceiver,
         outbound_gateway: OutboundGateway,
         discover_peer_processor: DiscoverPeerProcessor,
         client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
@@ -114,7 +114,7 @@ impl MessageStaging {
     #[instrument(level = "trace", skip_all, fields(%sender_addr))]
     fn stage_message(
         &mut self,
-        message_bytes: (usize, [u8; 1024]),
+        message_bytes: Payload,
         sender_addr: SocketAddrV4,
     ) -> Option<Message> {
         let (length, message_bytes) = message_bytes;

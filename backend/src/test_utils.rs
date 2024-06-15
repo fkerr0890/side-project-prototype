@@ -2,14 +2,22 @@ use rustc_hash::FxHashSet;
 use std::{net::SocketAddrV4, panic, process, sync::Arc, time::Duration};
 
 use crate::{
-    http::ServerContext,
+    http::{SerdeHttpResponse, ServerContext},
     message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer},
-    message_processing::{stage::ClientApiRequest, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS},
+    message_processing::{
+        stage::{ClientApiRequest, MessageStaging},
+        CipherSender, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS,
+    },
     node::{EndpointPair, Node, NodeInfo},
     MAX_TIME,
 };
 use rand::{seq::IteratorRandom, Rng};
-use tokio::{fs, net::UdpSocket, sync::mpsc, time::sleep};
+use tokio::{
+    fs,
+    net::UdpSocket,
+    sync::mpsc::{self, UnboundedSender},
+    time::sleep,
+};
 use tracing::{debug, Level};
 use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
@@ -63,23 +71,27 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
         introducers.push((Peer::new(endpoint_pair, id), tx));
         let is_end = host_indices.contains(&i);
         let is_start = start == i;
-        let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
-        let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
+        let (message_staging, to_staging, myself, _, http_handler_tx) = setup_staging(
+            is_end,
+            id,
+            Vec::with_capacity(0),
+            endpoint_pair,
+            socket.clone(),
+        );
         tokio::spawn(async move {
             Node::new()
                 .listen(
+                    message_staging,
+                    myself,
+                    to_staging,
+                    socket,
                     is_start,
                     is_end,
                     Some(rx),
                     introducer,
                     id,
-                    Vec::with_capacity(0),
                     endpoint_pair,
-                    socket,
                     ServerContext::new(http_handler_tx),
-                    http_handler_rx,
-                    client_api_tx,
-                    client_api_rx,
                 )
                 .await
         });
@@ -112,28 +124,27 @@ pub async fn load_nodes_from_file(
             SocketAddrV4::new("127.0.0.1".parse().unwrap(), port),
             SocketAddrV4::new("127.0.0.1".parse().unwrap(), port),
         );
-        let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
+        let (message_staging, to_staging, myself, client_api_tx, http_handler_tx) =
+            setup_staging(is_end, id, peers, endpoint_pair, socket.clone());
         let context = ServerContext::new(http_handler_tx);
-        let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
-        client_api_txs.push(client_api_tx.clone());
         if is_start {
             server_context = Some(context.clone());
         }
+        client_api_txs.push(client_api_tx.clone());
         tokio::spawn(async move {
             Node::new()
                 .listen(
+                    message_staging,
+                    myself,
+                    to_staging,
+                    socket,
                     is_start,
                     is_end,
                     None,
                     None,
                     id,
-                    peers,
                     endpoint_pair,
-                    socket,
                     context,
-                    http_handler_rx,
-                    client_api_tx,
-                    client_api_rx,
                 )
                 .await
         });
@@ -173,4 +184,38 @@ pub fn measure_lock_time() {
             at
         );
     });
+}
+
+pub fn setup_staging(
+    is_end: bool,
+    id: NumId,
+    peers: Vec<(String, NumId)>,
+    endpoint_pair: EndpointPair,
+    socket: Arc<UdpSocket>,
+) -> (
+    MessageStaging,
+    CipherSender,
+    Peer,
+    UnboundedSender<ClientApiRequest>,
+    UnboundedSender<(Message, UnboundedSender<SerdeHttpResponse>)>,
+) {
+    let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
+    let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
+    let (message_staging, to_staging, myself) = Node::setup_staging(
+        is_end,
+        id,
+        peers,
+        endpoint_pair,
+        socket,
+        http_handler_rx,
+        client_api_tx.clone(),
+        client_api_rx,
+    );
+    (
+        message_staging,
+        to_staging,
+        myself,
+        client_api_tx,
+        http_handler_tx,
+    )
 }

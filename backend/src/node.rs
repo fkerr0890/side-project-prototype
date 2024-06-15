@@ -17,7 +17,7 @@ use crate::{
     message::{Message, NumId, Peer},
     message_processing::{
         stage::{ClientApiRequest, MessageStaging},
-        DiscoverPeerProcessor, InboundGateway, OutboundGateway,
+        CipherSender, DiscoverPeerProcessor, InboundGateway, OutboundGateway,
     },
     option_early_return, peer,
 };
@@ -61,24 +61,19 @@ impl Node {
         (EndpointPair::new(public_endpoint, private_endpoint), socket)
     }
 
-    pub async fn listen(
-        &mut self,
-        is_start: bool,
+    pub fn setup_staging(
         is_end: bool,
-        report_trigger: Option<mpsc::Receiver<()>>,
-        introducer: Option<Peer>,
         id: NumId,
         initial_peers: Vec<(String, NumId)>,
         endpoint_pair: EndpointPair,
         socket: Arc<UdpSocket>,
-        server_context: ServerContext,
         http_handler_rx: mpsc::UnboundedReceiver<(
             Message,
             mpsc::UnboundedSender<SerdeHttpResponse>,
         )>,
         client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
         client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
-    ) {
+    ) -> (MessageStaging, CipherSender, Peer) {
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
 
         let mut local_hosts = FxHashMap::default();
@@ -99,17 +94,36 @@ impl Node {
             peers.push(peer);
         }
 
-        let mut message_staging = MessageStaging::new(
-            from_gateway,
-            OutboundGateway::new(socket.clone(), to_staging.clone(), myself),
-            DiscoverPeerProcessor::new(),
-            client_api_tx,
-            client_api_rx,
-            http_handler_rx,
-            local_hosts,
-            peers,
-        );
+        (
+            MessageStaging::new(
+                from_gateway,
+                OutboundGateway::new(socket.clone(), to_staging.clone(), myself),
+                DiscoverPeerProcessor::new(),
+                client_api_tx,
+                client_api_rx,
+                http_handler_rx,
+                local_hosts,
+                peers,
+            ),
+            to_staging,
+            myself,
+        )
+    }
 
+    pub async fn listen(
+        &mut self,
+        mut message_staging: MessageStaging,
+        myself: Peer,
+        to_staging: CipherSender,
+        socket: Arc<UdpSocket>,
+        is_start: bool,
+        is_end: bool,
+        report_trigger: Option<mpsc::Receiver<()>>,
+        introducer: Option<Peer>,
+        id: NumId,
+        endpoint_pair: EndpointPair,
+        server_context: ServerContext,
+    ) {
         if let Some(introducer) = introducer {
             let message = Message::new_discover_peer_request(myself, introducer, peer::MAX_PEERS);
             message_staging

@@ -34,17 +34,17 @@ pub mod stage;
 pub mod stream;
 
 pub type EmptyOption = Option<()>;
+pub type CipherSender = mpsc::UnboundedSender<(SocketAddrV4, Payload)>;
+pub type CipherReceiver = mpsc::UnboundedReceiver<(SocketAddrV4, Payload)>;
+pub type Payload = (usize, [u8; 1024]);
 
 pub struct InboundGateway {
     socket: Arc<UdpSocket>,
-    to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>,
+    to_staging: CipherSender,
 }
 
 impl InboundGateway {
-    pub fn new(
-        socket: &Arc<UdpSocket>,
-        to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>,
-    ) -> Self {
+    pub fn new(socket: &Arc<UdpSocket>, to_staging: CipherSender) -> Self {
         Self {
             socket: socket.clone(),
             to_staging,
@@ -58,7 +58,7 @@ impl InboundGateway {
     }
 
     // #[instrument(level = "trace", skip(self, message_bytes))]
-    fn handle_message(&self, message_bytes: (usize, [u8; 1024]), addr: SocketAddr) {
+    fn handle_message(&self, message_bytes: Payload, addr: SocketAddr) {
         if let SocketAddr::V4(socket) = addr {
             result_early_return!(self.to_staging.send((socket, message_bytes)));
         } else {
@@ -77,16 +77,12 @@ pub fn send_error_response<T>(
 
 pub struct OutboundGateway {
     socket: Arc<UdpSocket>,
-    to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>,
+    to_staging: CipherSender,
     myself: Peer,
 }
 
 impl OutboundGateway {
-    pub fn new(
-        socket: Arc<UdpSocket>,
-        to_staging: mpsc::UnboundedSender<(SocketAddrV4, (usize, [u8; 1024]))>,
-        myself: Peer,
-    ) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, to_staging: CipherSender, myself: Peer) -> Self {
         Self {
             socket,
             to_staging,
@@ -153,9 +149,14 @@ impl OutboundGateway {
                 )
             })
             .filter_map(|r| r.map_err(|e| error!(e)).ok());
+        // println!();
+        // println!();
         for chunk in chunks {
+            // println!("{:?}", chunk);
             self.transport(dest.id, dest.socket, chunk).await;
         }
+        // println!();
+        // println!();
     }
 
     pub async fn send_agreement(
@@ -217,7 +218,7 @@ impl OutboundGateway {
     }
 }
 
-fn chunk_to_array(mut chunk: Vec<u8>) -> (usize, [u8; 1024]) {
+fn chunk_to_array(mut chunk: Vec<u8>) -> Payload {
     let prev_len = chunk.len();
     for _ in 0..(1024 - chunk.len()) {
         chunk.push(0);
