@@ -149,14 +149,9 @@ impl OutboundGateway {
                 )
             })
             .filter_map(|r| r.map_err(|e| error!(e)).ok());
-        // println!();
-        // println!();
         for chunk in chunks {
-            // println!("{:?}", chunk);
-            self.transport(dest.id, dest.socket, chunk).await;
+            self.transport(dest.id, dest.socket, &chunk).await;
         }
-        // println!();
-        // println!();
     }
 
     pub async fn send_agreement(
@@ -171,14 +166,11 @@ impl OutboundGateway {
             direction
         )));
         if dest.endpoint_pair.private_endpoint != EndpointPair::default_socket() {
-            result_early_return!(
-                self.socket
-                    .send_to(&serialized, dest.endpoint_pair.private_endpoint)
-                    .await
-            );
+            self.transport(dest.id, dest.endpoint_pair.private_endpoint, &serialized)
+                .await;
         }
         if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.transport(dest.id, dest.endpoint_pair.public_endpoint, serialized)
+            self.transport(dest.id, dest.endpoint_pair.public_endpoint, &serialized)
                 .await;
         }
     }
@@ -204,16 +196,16 @@ impl OutboundGateway {
         Ok(bytes)
     }
 
-    async fn transport(&self, dest_id: NumId, dest: SocketAddrV4, bytes: Vec<u8>) {
+    async fn transport(&self, dest_id: NumId, dest: SocketAddrV4, bytes: &Vec<u8>) {
         if dest_id == self.myself.id {
             self.to_staging
                 .send((
                     self.myself.endpoint_pair.public_endpoint,
-                    chunk_to_array(bytes),
+                    chunk_to_array(bytes.clone()),
                 ))
                 .unwrap();
         } else {
-            result_early_return!(self.socket.send_to(&bytes, dest).await);
+            result_early_return!(self.socket.send_to(bytes, dest).await);
         }
     }
 }

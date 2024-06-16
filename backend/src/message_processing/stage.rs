@@ -32,6 +32,7 @@ use super::{
 };
 
 type CachedOutboundMessages = Vec<(Message, Vec<Peer>)>;
+type SendCheckedInput<T> = (T, Message, bool, Option<NumId>);
 
 pub struct MessageStaging {
     from_inbound_gateway: CipherReceiver,
@@ -95,20 +96,40 @@ impl MessageStaging {
     }
 
     pub async fn receive(&mut self) -> EmptyOption {
-        let (sender_addr, message_bytes) = select! {
-            message = self.from_inbound_gateway.recv() => message?,
+        let send_checked_input = select! {
+            message = self.from_inbound_gateway.recv() => return Some(self.process_inbound_message(message?).await),
             message = self.client_api_rx.recv() => return Some(self.process_client_request(message?).await),
-            message = self.from_http_handlers.recv() => return Some(self.initial_retrieval_request(message?).await),
-            id = self.stream_session_manager.follow_up_rx().recv() => return Some(self.process_follow_up(id?).await),
+            message = self.from_http_handlers.recv() => self.initial_retrieval_request(message?).await,
+            id = self.stream_session_manager.follow_up_rx().recv() => self.process_follow_up(id?).await,
             action = self.event_manager.tick() => return Some(self.process_timebound_action(action).await)
         };
+        self.pre_send_checked(send_checked_input).await;
+        Some(())
+    }
+
+    async fn pre_send_checked_multiple<T: IntoIterator<Item = Peer> + Debug>(&mut self, inputs: Vec<SendCheckedInput<T>>) {
+        for input in inputs {
+            self.pre_send_checked(Some(input)).await;
+        }
+    }
+
+    async fn pre_send_checked<T: IntoIterator<Item = Peer> + Debug>(&mut self, input: Option<SendCheckedInput<T>>) {
+        let (dests, message, to_be_chunked, cache_id) = option_early_return!(input);
+        let message = option_early_return!(self.send_checked(dests, message, to_be_chunked).await);
+        if let Some(id) = cache_id {
+            self.insert_cached_stream_message(id, message);
+        }
+    }
+
+    async fn process_inbound_message(&mut self, message: (SocketAddrV4, Payload)) {
+        let (sender_addr, message_bytes) = message;
         if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes.1) {
-            return Some(self.handle_key_agreement(message, sender_addr).await);
+            let result = self.handle_key_agreement(message, sender_addr);
+            return self.post_handle_key_agreement(result).await;
         }
         if let Some(message) = self.stage_message(message_bytes, sender_addr) {
             self.send_outbound_message(message).await;
         };
-        Some(())
     }
 
     #[instrument(level = "trace", skip_all, fields(%sender_addr))]
@@ -190,7 +211,9 @@ impl MessageStaging {
                 match message.metadata_mut() {
                     MetadataKind::Discover(metadata) => {
                         if let (true, introducer) = self.client_discover_logic(metadata, id) {
-                            return self.send_discover_peer_message(introducer, message).await;
+                            self.send_checked(vec![introducer.unwrap()], message, false)
+                                .await;
+                            return;
                         }
                     }
                     MetadataKind::Distribute(metadata) => {
@@ -230,41 +253,19 @@ impl MessageStaging {
         }
     }
 
-    async fn send_discover_peer_message(&mut self, introducer: Option<Peer>, message: Message) {
-        self.send_checked(vec![introducer.unwrap()], message, false)
-            .await;
-    }
-
-    async fn process_follow_up(&mut self, id: NumId) {
-        let message = option_early_return!(self.cached_stream_messages.remove(&id));
-        let message = match message.metadata() {
+    async fn process_follow_up(&mut self, id: NumId) -> Option<SendCheckedInput<FxHashSet<Peer>>> {
+        let message = self.cached_stream_messages.remove(&id)?;
+        match message.metadata() {
             MetadataKind::Stream(StreamMetadata {
                 payload: StreamPayloadKind::Request(_),
                 host_name,
-            }) => option_early_return!(
-                self.send_checked(
-                    self.stream_session_manager
-                        .get_destinations_source_retrieval(host_name),
-                    message,
-                    true
-                )
-                .await
-            ),
+            }) => Some((self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true, Some(id))),
             MetadataKind::Stream(StreamMetadata {
                 payload: StreamPayloadKind::DistributionRequest(_),
                 host_name,
-            }) => option_early_return!(
-                self.send_checked(
-                    self.stream_session_manager
-                        .get_destinations_source_distribution(host_name),
-                    message,
-                    true
-                )
-                .await
-            ),
+            }) => Some((self.stream_session_manager.get_destinations_source_distribution(host_name), message, true, Some(id))),
             _ => panic!(),
-        };
-        self.cached_stream_messages.insert(id, message);
+        }
     }
 
     async fn process_timebound_action(&mut self, actions: Option<Vec<TimeboundAction>>) {
@@ -280,7 +281,10 @@ impl MessageStaging {
                         .lock_dests_distribution(&host_name);
                     self.send_distribution_request(id, host_name).await;
                 }
-                TimeboundAction::SendHeartbeats => self.send_heartbeats().await,
+                TimeboundAction::SendHeartbeats => {
+                    let send_checked_input = Some(self.send_heartbeats());
+                    self.pre_send_checked(send_checked_input).await;
+                },
                 TimeboundAction::RemoveCachedStreamMessage(id) => {
                     self.cached_stream_messages.remove(&id);
                 }
@@ -328,7 +332,7 @@ impl MessageStaging {
     }
 
     #[instrument(level = "trace", skip_all, fields(peers = field::Empty))]
-    async fn send_heartbeats(&mut self) {
+    fn send_heartbeats(&mut self) -> SendCheckedInput<FxHashSet<Peer>> {
         let mut peers: FxHashSet<Peer> =
             FxHashSet::from_iter(lock!(self.peer_ops).peers().into_iter());
         peers.extend(
@@ -348,10 +352,9 @@ impl MessageStaging {
         );
         peers.extend(self.unconfirmed_peers.values());
         // tracing::Span::current().record("peers", format!("{:?}", peers));
-        self.send_checked(peers, Message::new_heartbeat(Peer::default()), true)
-            .await;
         self.event_manager
             .put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
+        (peers, Message::new_heartbeat(Peer::default()), true, None)
     }
 
     #[instrument(level = "trace", skip_all, fields(id = %message.id(), metadata = ?message.metadata(), direction = ?message.direction(), myself = %self.outbound_gateway.myself.id, new_direction = field::Empty))]
@@ -459,7 +462,7 @@ impl MessageStaging {
     async fn initial_retrieval_request(
         &mut self,
         from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>),
-    ) {
+    ) -> Option<SendCheckedInput<FxHashSet<Peer>>> {
         let (message, tx) = from_http_handler;
         let (id, host_name) = (message.id(), message.metadata().host_name().clone());
         assert!(!self.to_http_handlers.contains_key(&id));
@@ -472,16 +475,7 @@ impl MessageStaging {
         {
             self.stream_session_manager
                 .push_resource_retrieval(&host_name, id);
-            let message = option_early_return!(
-                self.send_checked(
-                    self.stream_session_manager
-                        .get_destinations_source_retrieval(&host_name),
-                    message,
-                    true
-                )
-                .await
-            );
-            self.insert_cached_stream_message(id, message);
+            Some((self.stream_session_manager.get_destinations_source_retrieval(&host_name), message, true, Some(id)))
         } else {
             self.stream_session_manager
                 .new_source_retrieval(host_name.clone());
@@ -497,7 +491,8 @@ impl MessageStaging {
                 ),
             );
             self.send_outbound_message(search_message).await;
-        };
+            None
+        }
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
@@ -688,7 +683,8 @@ impl MessageStaging {
                 }
             }
         };
-        self.send_initial_stream_message(id, hairpin).await;
+        let send_checked_input = self.send_initial_stream_message(id, hairpin);
+        self.pre_send_checked(send_checked_input).await;
     }
 
     fn final_action_discover(&mut self, metadata: DiscoverMetadata, id: NumId) {
@@ -802,18 +798,17 @@ impl MessageStaging {
         }
     }
 
-    async fn send_initial_stream_message(&mut self, id: NumId, sender: Peer) {
+    fn send_initial_stream_message(&mut self, id: NumId, sender: Peer) -> Option<SendCheckedInput<Vec<Peer>>> {
         let Some(request) = self.cached_stream_messages.remove(&id) else {
             debug!("Cached stream retrieval message unavailable, checking for pending outbound message");
             let outbound_messages =
-                option_early_return!(self.cached_outbound_messages.get_mut(&sender.id));
+                self.cached_outbound_messages.get_mut(&sender.id)?;
             let cached_message =
-                option_early_return!(outbound_messages.iter_mut().find(|m| m.0.id() == id));
+                outbound_messages.iter_mut().find(|m| m.0.id() == id)?;
             cached_message.1.push(sender);
-            return;
+            return None;
         };
-        let request = option_early_return!(self.send_checked(vec![sender], request, true).await);
-        self.cached_stream_messages.insert(id, request);
+        Some((vec![sender], request, true, Some(id)))
     }
 
     #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
@@ -846,39 +841,44 @@ impl MessageStaging {
         info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
     }
 
-    #[instrument(level = "trace", skip_all, fields(message.peer_id))]
-    async fn handle_key_agreement(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) {
+    #[instrument(level = "trace", skip_all, fields(message.peer_id, myself = ?self.outbound_gateway.myself))]
+    fn handle_key_agreement(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) -> HandleKeyAgreementResult {
         let KeyAgreementMessage {
             public_key,
             peer_id,
             direction,
         } = message;
         let cached_messages = match direction {
-            MessageDirectionAgreement::Request => {
-                self.send_agreement(
-                    Peer::from(Sender::new(sender, peer_id)),
-                    MessageDirectionAgreement::Response,
-                )
-                .await;
-                None
-            }
+            MessageDirectionAgreement::Request => return HandleKeyAgreementResult::SendResponse(Peer::from(Sender::new(sender, peer_id))),
             MessageDirectionAgreement::Response => self.cached_outbound_messages.remove(&peer_id),
         };
         result_early_return!(self
             .key_store
-            .agree(peer_id, public_key, &mut self.event_manager));
+            .agree(peer_id, public_key, &mut self.event_manager), HandleKeyAgreementResult::AgreementError);
+        let mut send_checked_inputs = Vec::new();
         if let Some(cached_messages) = cached_messages {
             trace!("Sending cached outbound messages");
             for (message, remaining_dests) in cached_messages {
                 let (to_be_chunked, is_stream_request) = message.to_be_chunked();
-                let message = option_early_return!(
-                    self.send_checked(remaining_dests, message, to_be_chunked)
-                        .await
-                );
-                if is_stream_request {
-                    self.cached_stream_messages.insert(message.id(), message);
-                }
+                let id = message.id();
+                send_checked_inputs.push((remaining_dests, message, to_be_chunked, if is_stream_request { Some(id) } else { None } ));
             }
+        }
+        HandleKeyAgreementResult::SendCachedOutboundMessages(send_checked_inputs)
+    }
+
+    async fn post_handle_key_agreement(&mut self, result: HandleKeyAgreementResult) {
+        match result {
+            HandleKeyAgreementResult::SendResponse(dest) => {
+                info!(myself = ?self.outbound_gateway.myself, ?dest, "Sending agreement from post_handle");
+                self.send_agreement(
+                    dest,
+                    MessageDirectionAgreement::Response,
+                )
+                .await;
+            }
+            HandleKeyAgreementResult::SendCachedOutboundMessages(messages) => self.pre_send_checked_multiple(messages).await,
+            HandleKeyAgreementResult::AgreementError => {}
         }
     }
 
@@ -903,4 +903,26 @@ pub enum ClientApiRequest {
     ClearActiveSessions,
     AddHost(String),
     Message(Message),
+}
+
+#[derive(Debug)]
+pub enum HandleKeyAgreementResult {
+    SendResponse(Peer),
+    SendCachedOutboundMessages(Vec<SendCheckedInput<Vec<Peer>>>),
+    AgreementError
+}
+
+#[cfg(test)]
+impl MessageStaging {
+    pub fn session_manager(&mut self) -> &mut StreamSessionManager {
+        &mut self.stream_session_manager
+    }
+
+    pub fn key_store(&mut self) -> &mut KeyStore {
+        &mut self.key_store
+    }
+
+    pub fn handle_key_agreement_pub(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) -> HandleKeyAgreementResult {
+        self.handle_key_agreement(message, sender)
+    }
 }

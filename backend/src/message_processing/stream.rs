@@ -71,10 +71,10 @@ impl StreamSessionManager {
             .collect()
     }
 
-    pub fn get_destinations_source_distribution(&self, host_name: &str) -> Vec<Peer> {
+    pub fn get_destinations_source_distribution(&self, host_name: &str) -> FxHashSet<Peer> {
         option_early_return!(
             self.sources_distribution.get(host_name),
-            Vec::with_capacity(0)
+            FxHashSet::default()
         )
         .dests_remaining
         .iter()
