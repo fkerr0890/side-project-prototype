@@ -132,7 +132,7 @@ impl MessageStaging {
         };
     }
 
-    #[instrument(level = "trace", skip_all, fields(%sender_addr))]
+    #[instrument(level = "trace", skip_all, fields(%sender_addr, myself = ?self.outbound_gateway.myself))]
     fn stage_message(
         &mut self,
         message_bytes: Payload,
@@ -841,20 +841,20 @@ impl MessageStaging {
         info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
     }
 
-    #[instrument(level = "trace", skip_all, fields(message.peer_id, myself = ?self.outbound_gateway.myself))]
+    #[instrument(level = "trace", skip_all, fields(peer_id = %message.peer_id, myself = ?self.outbound_gateway.myself))]
     fn handle_key_agreement(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) -> HandleKeyAgreementResult {
         let KeyAgreementMessage {
             public_key,
             peer_id,
             direction,
         } = message;
+        result_early_return!(self
+            .key_store
+            .agree(peer_id, public_key, &mut self.event_manager), HandleKeyAgreementResult::AgreementError);
         let cached_messages = match direction {
             MessageDirectionAgreement::Request => return HandleKeyAgreementResult::SendResponse(Peer::from(Sender::new(sender, peer_id))),
             MessageDirectionAgreement::Response => self.cached_outbound_messages.remove(&peer_id),
         };
-        result_early_return!(self
-            .key_store
-            .agree(peer_id, public_key, &mut self.event_manager), HandleKeyAgreementResult::AgreementError);
         let mut send_checked_inputs = Vec::new();
         if let Some(cached_messages) = cached_messages {
             trace!("Sending cached outbound messages");
@@ -870,7 +870,6 @@ impl MessageStaging {
     async fn post_handle_key_agreement(&mut self, result: HandleKeyAgreementResult) {
         match result {
             HandleKeyAgreementResult::SendResponse(dest) => {
-                info!(myself = ?self.outbound_gateway.myself, ?dest, "Sending agreement from post_handle");
                 self.send_agreement(
                     dest,
                     MessageDirectionAgreement::Response,
