@@ -190,7 +190,10 @@ async fn stage_handle_key_agreement() {
     let request_result = message_staging
         .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
     let stage::HandleKeyAgreementResult::SendResponse(dest, _) = request_result else {
-        panic!("Receiving a request should trigger a response. Actual was {:?}", request_result);
+        panic!(
+            "Receiving a request should trigger a response. Actual was {:?}",
+            request_result
+        );
     };
     assert_eq!(peer_id, dest.id);
     message_staging.key_store().remove_symmetric_key(&peer_id);
@@ -205,7 +208,14 @@ async fn stage_handle_key_agreement() {
     assert_eq!(0, send_checked_inputs.len());
     let duplicate_result = message_staging
         .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
-    assert!(matches!(duplicate_result, stage::HandleKeyAgreementResult::SymmetricKeyExists), "Actual was {:?}", duplicate_result);
+    assert!(
+        matches!(
+            duplicate_result,
+            stage::HandleKeyAgreementResult::SymmetricKeyExists
+        ),
+        "Actual was {:?}",
+        duplicate_result
+    );
     message_staging.key_store().remove_symmetric_key(&peer_id);
     let public_key = vec![8u8, 16];
     key_agreement_message.public_key = public_key;

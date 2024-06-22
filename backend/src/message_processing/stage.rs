@@ -449,10 +449,17 @@ impl MessageStaging {
         if self.key_store.agreement_exists(&message.dest().id) {
             return true;
         }
-        let public_key =
-            option_early_return!(self.key_store.public_key(message.dest().id, &mut self.event_manager), false);
-        self.send_agreement(message.dest(), MessageDirectionAgreement::Request, public_key)
-            .await;
+        let public_key = option_early_return!(
+            self.key_store
+                .public_key(message.dest().id, &mut self.event_manager),
+            false
+        );
+        self.send_agreement(
+            message.dest(),
+            MessageDirectionAgreement::Request,
+            public_key,
+        )
+        .await;
         false
     }
 
@@ -470,7 +477,12 @@ impl MessageStaging {
     }
 
     #[instrument(level = "trace", skip(self))]
-    async fn send_agreement(&mut self, dest: Peer, direction: MessageDirectionAgreement, public_key: Vec<u8>) {
+    async fn send_agreement(
+        &mut self,
+        dest: Peer,
+        direction: MessageDirectionAgreement,
+        public_key: Vec<u8>,
+    ) {
         self.outbound_gateway
             .send_agreement(dest, public_key, direction)
             .await;
@@ -878,19 +890,24 @@ impl MessageStaging {
             peer_id,
             direction,
         } = message;
-        let public_key =
-            option_early_return!(self.key_store.public_key(peer_id, &mut self.event_manager), HandleKeyAgreementResult::SymmetricKeyExists);
+        let public_key = option_early_return!(
+            self.key_store.public_key(peer_id, &mut self.event_manager),
+            HandleKeyAgreementResult::SymmetricKeyExists
+        );
         result_early_return!(
             self.key_store
                 .agree(peer_id, public_key_peer, &mut self.event_manager),
             HandleKeyAgreementResult::AgreementError
         );
         let cached_messages = match direction {
-            MessageDirectionAgreement::Request if peer_id == self.outbound_gateway.myself.id => self.cached_outbound_messages.remove(&peer_id),
+            MessageDirectionAgreement::Request if peer_id == self.outbound_gateway.myself.id => {
+                self.cached_outbound_messages.remove(&peer_id)
+            }
             MessageDirectionAgreement::Request => {
-                return HandleKeyAgreementResult::SendResponse(Peer::from(Sender::new(
-                    sender, peer_id,
-                )), public_key)
+                return HandleKeyAgreementResult::SendResponse(
+                    Peer::from(Sender::new(sender, peer_id)),
+                    public_key,
+                )
             }
             MessageDirectionAgreement::Response => self.cached_outbound_messages.remove(&peer_id),
         };
@@ -920,7 +937,7 @@ impl MessageStaging {
             }
             HandleKeyAgreementResult::SendCachedOutboundMessages(messages) => {
                 self.pre_send_checked_multiple(messages).await
-            },
+            }
             _ => {}
         }
     }
@@ -953,7 +970,7 @@ pub enum HandleKeyAgreementResult {
     SendResponse(Peer, Vec<u8>),
     SendCachedOutboundMessages(Vec<SendCheckedInput<Vec<Peer>>>),
     AgreementError,
-    SymmetricKeyExists
+    SymmetricKeyExists,
 }
 
 #[cfg(test)]
