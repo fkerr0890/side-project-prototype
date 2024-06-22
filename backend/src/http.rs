@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use std::{convert::Infallible, net::SocketAddr, str::FromStr};
+use std::{collections::HashMap, convert::Infallible, net::SocketAddr, str::FromStr};
 
 use hyper::{
     body,
@@ -65,6 +65,20 @@ impl SerdeHttpRequest {
     }
     pub fn set_uri(&mut self, uri: String) {
         self.uri = uri;
+    }
+}
+
+#[cfg(test)]
+impl SerdeHttpRequest {
+    pub fn new_test_request() -> Self {
+        Self {
+            method: String::from("GET"),
+            uri: String::from("example"),
+            version: String::from("HTTP/1.1"),
+            headers: FxHashMap::default(),
+            body: b"test".to_vec(),
+            for_testing: true
+        }
     }
 }
 

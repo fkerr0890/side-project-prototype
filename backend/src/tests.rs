@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use message::Peer;
 use message_processing::stage;
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, sync::mpsc};
 
 use super::*;
 
@@ -158,25 +159,31 @@ async fn crypto_agree_transform() {
     assert_eq!(plaintext, payload);
 }
 
-#[tokio::test]
-async fn stage_handle_key_agreement() {
-    let id = message::NumId(0);
-    let peer_id = message::NumId(1);
-    let endpoint_pair = node::EndpointPair::new(
-        node::EndpointPair::default_socket(),
-        node::EndpointPair::default_socket(),
-    );
-    let (mut message_staging, ..) = test_utils::setup_staging(
+async fn setup_staging(myself: Peer) -> (
+    stage::MessageStaging,
+    message_processing::CipherSender,
+    message::Peer,
+    mpsc::UnboundedSender<stage::ClientApiRequest>,
+    mpsc::UnboundedSender<(message::Message, mpsc::UnboundedSender<http::SerdeHttpResponse>)>,
+) {
+    test_utils::setup_staging(
         false,
-        id,
+        myself.id,
         Vec::with_capacity(0),
-        endpoint_pair,
+        myself.endpoint_pair,
         Arc::new(
-            UdpSocket::bind(endpoint_pair.private_endpoint)
+            UdpSocket::bind(myself.endpoint_pair.private_endpoint)
                 .await
                 .unwrap(),
         ),
-    );
+    )
+}
+
+#[tokio::test]
+async fn stage_handle_key_agreement() {
+    let myself = Peer::default();
+    let peer_id = message::NumId(1);
+    let (mut message_staging, ..) = setup_staging(myself).await;
     let (_, mut event_manager) = key_store();
     let public_key = message_staging
         .key_store()
@@ -188,7 +195,7 @@ async fn stage_handle_key_agreement() {
         message::MessageDirectionAgreement::Request,
     );
     let request_result = message_staging
-        .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
+        .handle_key_agreement_pub(key_agreement_message.clone(), myself.endpoint_pair.public_endpoint);
     let stage::HandleKeyAgreementResult::SendResponse(dest, _) = request_result else {
         panic!(
             "Receiving a request should trigger a response. Actual was {:?}",
@@ -199,7 +206,7 @@ async fn stage_handle_key_agreement() {
     message_staging.key_store().remove_symmetric_key(&peer_id);
     key_agreement_message.direction = message::MessageDirectionAgreement::Response;
     let response_result = message_staging
-        .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
+        .handle_key_agreement_pub(key_agreement_message.clone(), myself.endpoint_pair.public_endpoint);
     let stage::HandleKeyAgreementResult::SendCachedOutboundMessages(send_checked_inputs) =
         response_result
     else {
@@ -207,7 +214,7 @@ async fn stage_handle_key_agreement() {
     };
     assert_eq!(0, send_checked_inputs.len());
     let duplicate_result = message_staging
-        .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
+        .handle_key_agreement_pub(key_agreement_message.clone(), myself.endpoint_pair.public_endpoint);
     assert!(
         matches!(
             duplicate_result,
@@ -220,7 +227,7 @@ async fn stage_handle_key_agreement() {
     let public_key = vec![8u8, 16];
     key_agreement_message.public_key = public_key;
     let error_result = message_staging
-        .handle_key_agreement_pub(key_agreement_message, endpoint_pair.public_endpoint);
+        .handle_key_agreement_pub(key_agreement_message, myself.endpoint_pair.public_endpoint);
     assert!(
         matches!(
             error_result,
@@ -229,4 +236,69 @@ async fn stage_handle_key_agreement() {
         "Actual was {:?}",
         error_result
     );
+}
+
+#[test]
+fn stage_process_follow_up() {
+
+}
+
+#[tokio::test]
+async fn stage_send_heartbeats() {
+    let myself = message::Peer::default();
+    let (mut message_staging, ..) = setup_staging(myself).await;
+    let peer = message::Peer::new(node::EndpointPair::default(), message::NumId(1));
+    message_staging.session_manager().new_source_retrieval(String::from("example"));
+    message_staging.session_manager().add_destination_source_retrieval("example", peer);
+    message_staging.session_manager().new_sink_retrieval(String::from("example2"));
+    message_staging.session_manager().add_destination_sink("example2", message::Peer::new(node::EndpointPair::default(), message::NumId(2)));
+    message_staging.session_manager().new_sink_retrieval(String::from("example3"));
+    message_staging.session_manager().add_destination_sink("example3", peer);
+    let (dests, message, to_be_chunked, cache_id) = message_staging.send_heartbeats_pub();
+    let mut dests = dests.into_iter().collect::<Vec<message::Peer>>();
+    assert_eq!(2, dests.len());
+    dests.sort_by_key(|p| p.id.0);
+    assert_eq!(1, dests[0].id.0);
+    assert_eq!(2, dests[1].id.0);
+    assert!(matches!(message.metadata(), message::MetadataKind::Heartbeat), "Actual was {:?}", message.metadata());
+    assert_eq!(false, message.check_expiry());
+    assert_eq!(true, to_be_chunked);
+    assert!(cache_id.is_none());
+}
+
+#[tokio::test]
+async fn stage_initial_retrieval_request() {
+    let myself = message::Peer::default();
+    let (mut message_staging, ..) = setup_staging(myself).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let http_request = http::SerdeHttpRequest::new_test_request();
+    let request = message::Message::new(
+        Peer::default(),
+        message::NumId(0),
+        None,
+        message::MetadataKind::Stream(message::StreamMetadata::new(
+            message::StreamPayloadKind::Request(http_request),
+            String::from("example"),
+        )),
+        message::MessageDirection::OneHop,
+    );
+    let mut from_http_handler = (request, tx);
+    assert!(message_staging.initial_retrieval_request_pub(from_http_handler.clone()).await.is_none());
+    let host_name = String::from("example");
+    assert_eq!(true, message_staging.session_manager().source_active_retrieval(&host_name));
+    let peer = message::Peer::new(node::EndpointPair::default(), message::NumId(1));
+    message_staging.session_manager().add_destination_source_retrieval(&host_name, peer);
+    *from_http_handler.0.id_mut() = message::NumId(1);
+    let (dests, message, to_be_chunked, cache_id) = message_staging.initial_retrieval_request_pub(from_http_handler).await.expect("Should return Some when a retrieval source exists");
+    assert_eq!(1, dests.len());
+    assert_eq!(peer, dests.into_iter().last().unwrap());
+    match message.metadata() {
+        message::MetadataKind::Stream(message::StreamMetadata { host_name: host_name_actual, ..}) if &host_name == host_name_actual => {},
+        _ => panic!("Actual was {:?}", message.metadata())
+    }
+    assert_eq!(1, message.id().0);
+    assert_eq!(false, message.check_expiry());
+    assert!(matches!(message.direction(), message::MessageDirection::OneHop), "Actual was {:?}", message.direction());
+    assert_eq!(true, to_be_chunked);
+    assert!(cache_id.is_some());
 }

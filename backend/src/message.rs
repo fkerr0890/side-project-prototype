@@ -245,6 +245,11 @@ impl Message {
     }
 }
 
+#[cfg(test)]
+impl Message {
+    pub fn id_mut(&mut self) -> &mut NumId { &mut self.id }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum MessageDirection {
     Request,
@@ -305,8 +310,8 @@ pub enum SearchMetadataKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StreamMetadata {
-    pub payload: StreamPayloadKind,
     pub host_name: String,
+    pub payload: StreamPayloadKind,
 }
 
 impl StreamMetadata {

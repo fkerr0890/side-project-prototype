@@ -454,12 +454,9 @@ impl MessageStaging {
                 .public_key(message.dest().id, &mut self.event_manager),
             false
         );
-        self.send_agreement(
-            message.dest(),
-            MessageDirectionAgreement::Request,
-            public_key,
-        )
-        .await;
+        self.outbound_gateway
+            .send_agreement(message.dest(), public_key, MessageDirectionAgreement::Request)
+            .await;
         false
     }
 
@@ -474,18 +471,6 @@ impl MessageStaging {
         }
         let outbound_messages = self.cached_outbound_messages.entry(peer_id).or_default();
         outbound_messages.push((message, remaining_dests));
-    }
-
-    #[instrument(level = "trace", skip(self))]
-    async fn send_agreement(
-        &mut self,
-        dest: Peer,
-        direction: MessageDirectionAgreement,
-        public_key: Vec<u8>,
-    ) {
-        self.outbound_gateway
-            .send_agreement(dest, public_key, direction)
-            .await;
     }
 
     #[instrument(level = "trace", skip_all, fields(id = %from_http_handler.0.id(), host_name = from_http_handler.0.metadata().host_name(), myself = %self.outbound_gateway.myself.id))]
@@ -932,7 +917,8 @@ impl MessageStaging {
     async fn post_handle_key_agreement(&mut self, result: HandleKeyAgreementResult) {
         match result {
             HandleKeyAgreementResult::SendResponse(dest, public_key) => {
-                self.send_agreement(dest, MessageDirectionAgreement::Response, public_key)
+                self.outbound_gateway
+                    .send_agreement(dest, public_key, MessageDirectionAgreement::Response)
                     .await;
             }
             HandleKeyAgreementResult::SendCachedOutboundMessages(messages) => {
@@ -989,5 +975,16 @@ impl MessageStaging {
         sender: SocketAddrV4,
     ) -> HandleKeyAgreementResult {
         self.handle_key_agreement(message, sender)
+    }
+
+    pub fn send_heartbeats_pub(&mut self) -> SendCheckedInput<FxHashSet<Peer>> {
+        self.send_heartbeats()
+    }
+
+    pub async fn initial_retrieval_request_pub(
+        &mut self,
+        from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>),
+    ) -> Option<SendCheckedInput<FxHashSet<Peer>>> {
+        self.initial_retrieval_request(from_http_handler).await
     }
 }

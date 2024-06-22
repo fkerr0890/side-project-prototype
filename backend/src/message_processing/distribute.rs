@@ -14,7 +14,6 @@ pub struct ChunkedFileHandler {
 }
 impl ChunkedFileHandler {
     pub async fn new(host_name: &str) -> Self {
-        println!("~/Downloads/{host_name}.gz");
         Self {
             file: File::open(format!("/home/fred/Downloads/{host_name}.gz"))
                 .await

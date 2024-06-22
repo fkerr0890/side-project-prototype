@@ -225,6 +225,13 @@ impl Display for EndpointPair {
     }
 }
 
+impl Default for EndpointPair {
+    fn default() -> Self {
+        Self::new(Self::default_socket(), Self::default_socket())
+    }
+}
+
+
 #[derive(Serialize, Deserialize, Copy, Clone)]
 enum NatKind {
     Unknown,
