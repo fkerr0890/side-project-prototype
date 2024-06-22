@@ -161,23 +161,62 @@ async fn crypto_agree_transform() {
 #[tokio::test]
 async fn stage_handle_key_agreement() {
     let id = message::NumId(0);
-    let endpoint_pair = node::EndpointPair::new(node::EndpointPair::default_socket(), node::EndpointPair::default_socket());
-    let (mut message_staging, ..) = test_utils::setup_staging(false, id, Vec::with_capacity(0), endpoint_pair, Arc::new(UdpSocket::bind(endpoint_pair.private_endpoint).await.unwrap()));
+    let peer_id = message::NumId(1);
+    let endpoint_pair = node::EndpointPair::new(
+        node::EndpointPair::default_socket(),
+        node::EndpointPair::default_socket(),
+    );
+    let (mut message_staging, ..) = test_utils::setup_staging(
+        false,
+        id,
+        Vec::with_capacity(0),
+        endpoint_pair,
+        Arc::new(
+            UdpSocket::bind(endpoint_pair.private_endpoint)
+                .await
+                .unwrap(),
+        ),
+    );
     let (_, mut event_manager) = key_store();
-    let public_key = message_staging.key_store().public_key(id, &mut event_manager).unwrap();
-    message_staging.key_store().agree(id, public_key.clone(), &mut event_manager).unwrap();
-    let key_agreement_message = message::KeyAgreementMessage::new(public_key.clone(), id, message::MessageDirectionAgreement::Request);
-    let request_result = message_staging.handle_key_agreement_pub(key_agreement_message, endpoint_pair.public_endpoint);
-    let stage::HandleKeyAgreementResult::SendResponse(dest) = request_result else { panic!("Receiving a request should trigger a response") };
-    assert_eq!(message::Peer::default(), dest);
-    let mut key_agreement_message = message::KeyAgreementMessage::new(public_key.clone(), id, message::MessageDirectionAgreement::Response);
-    let response_result = message_staging.handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
-    let stage::HandleKeyAgreementResult::SendCachedOutboundMessages(send_checked_inputs) = response_result else { panic!("Receiving a response should trigger sending any cached outbound messages") };
+    let public_key = message_staging
+        .key_store()
+        .public_key(peer_id, &mut event_manager)
+        .unwrap();
+    let mut key_agreement_message = message::KeyAgreementMessage::new(
+        public_key.clone(),
+        peer_id,
+        message::MessageDirectionAgreement::Request,
+    );
+    let request_result = message_staging
+        .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
+    let stage::HandleKeyAgreementResult::SendResponse(dest, _) = request_result else {
+        panic!("Receiving a request should trigger a response. Actual was {:?}", request_result);
+    };
+    assert_eq!(peer_id, dest.id);
+    message_staging.key_store().remove_symmetric_key(&peer_id);
+    key_agreement_message.direction = message::MessageDirectionAgreement::Response;
+    let response_result = message_staging
+        .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
+    let stage::HandleKeyAgreementResult::SendCachedOutboundMessages(send_checked_inputs) =
+        response_result
+    else {
+        panic!("Receiving a response should trigger sending any cached outbound messages. Actual was {:?}", response_result);
+    };
     assert_eq!(0, send_checked_inputs.len());
-    message_staging.key_store().remove_symmetric_key(&id);
-    message_staging.key_store().public_key(id, &mut event_manager).unwrap();
+    let duplicate_result = message_staging
+        .handle_key_agreement_pub(key_agreement_message.clone(), endpoint_pair.public_endpoint);
+    assert!(matches!(duplicate_result, stage::HandleKeyAgreementResult::SymmetricKeyExists), "Actual was {:?}", duplicate_result);
+    message_staging.key_store().remove_symmetric_key(&peer_id);
     let public_key = vec![8u8, 16];
     key_agreement_message.public_key = public_key;
-    let error_result = message_staging.handle_key_agreement_pub(key_agreement_message, endpoint_pair.public_endpoint);
-    assert!(matches!(error_result, stage::HandleKeyAgreementResult::AgreementError), "Actual was {:?}", error_result);
+    let error_result = message_staging
+        .handle_key_agreement_pub(key_agreement_message, endpoint_pair.public_endpoint);
+    assert!(
+        matches!(
+            error_result,
+            stage::HandleKeyAgreementResult::AgreementError
+        ),
+        "Actual was {:?}",
+        error_result
+    );
 }

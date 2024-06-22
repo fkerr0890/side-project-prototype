@@ -107,13 +107,19 @@ impl MessageStaging {
         Some(())
     }
 
-    async fn pre_send_checked_multiple<T: IntoIterator<Item = Peer> + Debug>(&mut self, inputs: Vec<SendCheckedInput<T>>) {
+    async fn pre_send_checked_multiple<T: IntoIterator<Item = Peer> + Debug>(
+        &mut self,
+        inputs: Vec<SendCheckedInput<T>>,
+    ) {
         for input in inputs {
             self.pre_send_checked(Some(input)).await;
         }
     }
 
-    async fn pre_send_checked<T: IntoIterator<Item = Peer> + Debug>(&mut self, input: Option<SendCheckedInput<T>>) {
+    async fn pre_send_checked<T: IntoIterator<Item = Peer> + Debug>(
+        &mut self,
+        input: Option<SendCheckedInput<T>>,
+    ) {
         let (dests, message, to_be_chunked, cache_id) = option_early_return!(input);
         let message = option_early_return!(self.send_checked(dests, message, to_be_chunked).await);
         if let Some(id) = cache_id {
@@ -259,11 +265,23 @@ impl MessageStaging {
             MetadataKind::Stream(StreamMetadata {
                 payload: StreamPayloadKind::Request(_),
                 host_name,
-            }) => Some((self.stream_session_manager.get_destinations_source_retrieval(host_name), message, true, Some(id))),
+            }) => Some((
+                self.stream_session_manager
+                    .get_destinations_source_retrieval(host_name),
+                message,
+                true,
+                Some(id),
+            )),
             MetadataKind::Stream(StreamMetadata {
                 payload: StreamPayloadKind::DistributionRequest(_),
                 host_name,
-            }) => Some((self.stream_session_manager.get_destinations_source_distribution(host_name), message, true, Some(id))),
+            }) => Some((
+                self.stream_session_manager
+                    .get_destinations_source_distribution(host_name),
+                message,
+                true,
+                Some(id),
+            )),
             _ => panic!(),
         }
     }
@@ -284,7 +302,7 @@ impl MessageStaging {
                 TimeboundAction::SendHeartbeats => {
                     let send_checked_input = Some(self.send_heartbeats());
                     self.pre_send_checked(send_checked_input).await;
-                },
+                }
                 TimeboundAction::RemoveCachedStreamMessage(id) => {
                     self.cached_stream_messages.remove(&id);
                 }
@@ -351,7 +369,7 @@ impl MessageStaging {
                 .into_iter(),
         );
         peers.extend(self.unconfirmed_peers.values());
-        // tracing::Span::current().record("peers", format!("{:?}", peers));
+        // info!(?peers, myself = ?self.outbound_gateway.myself);
         self.event_manager
             .put_event(TimeboundAction::SendHeartbeats, HEARTBEAT_INTERVAL_SECONDS);
         (peers, Message::new_heartbeat(Peer::default()), true, None)
@@ -431,7 +449,9 @@ impl MessageStaging {
         if self.key_store.agreement_exists(&message.dest().id) {
             return true;
         }
-        self.send_agreement(message.dest(), MessageDirectionAgreement::Request)
+        let public_key =
+            option_early_return!(self.key_store.public_key(message.dest().id, &mut self.event_manager), false);
+        self.send_agreement(message.dest(), MessageDirectionAgreement::Request, public_key)
             .await;
         false
     }
@@ -450,9 +470,7 @@ impl MessageStaging {
     }
 
     #[instrument(level = "trace", skip(self))]
-    async fn send_agreement(&mut self, dest: Peer, direction: MessageDirectionAgreement) {
-        let public_key =
-            option_early_return!(self.key_store.public_key(dest.id, &mut self.event_manager));
+    async fn send_agreement(&mut self, dest: Peer, direction: MessageDirectionAgreement, public_key: Vec<u8>) {
         self.outbound_gateway
             .send_agreement(dest, public_key, direction)
             .await;
@@ -475,7 +493,13 @@ impl MessageStaging {
         {
             self.stream_session_manager
                 .push_resource_retrieval(&host_name, id);
-            Some((self.stream_session_manager.get_destinations_source_retrieval(&host_name), message, true, Some(id)))
+            Some((
+                self.stream_session_manager
+                    .get_destinations_source_retrieval(&host_name),
+                message,
+                true,
+                Some(id),
+            ))
         } else {
             self.stream_session_manager
                 .new_source_retrieval(host_name.clone());
@@ -798,13 +822,15 @@ impl MessageStaging {
         }
     }
 
-    fn send_initial_stream_message(&mut self, id: NumId, sender: Peer) -> Option<SendCheckedInput<Vec<Peer>>> {
+    fn send_initial_stream_message(
+        &mut self,
+        id: NumId,
+        sender: Peer,
+    ) -> Option<SendCheckedInput<Vec<Peer>>> {
         let Some(request) = self.cached_stream_messages.remove(&id) else {
             debug!("Cached stream retrieval message unavailable, checking for pending outbound message");
-            let outbound_messages =
-                self.cached_outbound_messages.get_mut(&sender.id)?;
-            let cached_message =
-                outbound_messages.iter_mut().find(|m| m.0.id() == id)?;
+            let outbound_messages = self.cached_outbound_messages.get_mut(&sender.id)?;
+            let cached_message = outbound_messages.iter_mut().find(|m| m.0.id() == id)?;
             cached_message.1.push(sender);
             return None;
         };
@@ -842,17 +868,30 @@ impl MessageStaging {
     }
 
     #[instrument(level = "trace", skip_all, fields(peer_id = %message.peer_id, myself = ?self.outbound_gateway.myself))]
-    fn handle_key_agreement(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) -> HandleKeyAgreementResult {
+    fn handle_key_agreement(
+        &mut self,
+        message: KeyAgreementMessage,
+        sender: SocketAddrV4,
+    ) -> HandleKeyAgreementResult {
         let KeyAgreementMessage {
-            public_key,
+            public_key: public_key_peer,
             peer_id,
             direction,
         } = message;
-        result_early_return!(self
-            .key_store
-            .agree(peer_id, public_key, &mut self.event_manager), HandleKeyAgreementResult::AgreementError);
+        let public_key =
+            option_early_return!(self.key_store.public_key(peer_id, &mut self.event_manager), HandleKeyAgreementResult::SymmetricKeyExists);
+        result_early_return!(
+            self.key_store
+                .agree(peer_id, public_key_peer, &mut self.event_manager),
+            HandleKeyAgreementResult::AgreementError
+        );
         let cached_messages = match direction {
-            MessageDirectionAgreement::Request => return HandleKeyAgreementResult::SendResponse(Peer::from(Sender::new(sender, peer_id))),
+            MessageDirectionAgreement::Request if peer_id == self.outbound_gateway.myself.id => self.cached_outbound_messages.remove(&peer_id),
+            MessageDirectionAgreement::Request => {
+                return HandleKeyAgreementResult::SendResponse(Peer::from(Sender::new(
+                    sender, peer_id,
+                )), public_key)
+            }
             MessageDirectionAgreement::Response => self.cached_outbound_messages.remove(&peer_id),
         };
         let mut send_checked_inputs = Vec::new();
@@ -861,23 +900,28 @@ impl MessageStaging {
             for (message, remaining_dests) in cached_messages {
                 let (to_be_chunked, is_stream_request) = message.to_be_chunked();
                 let id = message.id();
-                send_checked_inputs.push((remaining_dests, message, to_be_chunked, if is_stream_request { Some(id) } else { None } ));
+                send_checked_inputs.push((
+                    remaining_dests,
+                    message,
+                    to_be_chunked,
+                    if is_stream_request { Some(id) } else { None },
+                ));
             }
         }
         HandleKeyAgreementResult::SendCachedOutboundMessages(send_checked_inputs)
     }
 
+    #[instrument(level = "trace", skip(self))]
     async fn post_handle_key_agreement(&mut self, result: HandleKeyAgreementResult) {
         match result {
-            HandleKeyAgreementResult::SendResponse(dest) => {
-                self.send_agreement(
-                    dest,
-                    MessageDirectionAgreement::Response,
-                )
-                .await;
+            HandleKeyAgreementResult::SendResponse(dest, public_key) => {
+                self.send_agreement(dest, MessageDirectionAgreement::Response, public_key)
+                    .await;
             }
-            HandleKeyAgreementResult::SendCachedOutboundMessages(messages) => self.pre_send_checked_multiple(messages).await,
-            HandleKeyAgreementResult::AgreementError => {}
+            HandleKeyAgreementResult::SendCachedOutboundMessages(messages) => {
+                self.pre_send_checked_multiple(messages).await
+            },
+            _ => {}
         }
     }
 
@@ -906,9 +950,10 @@ pub enum ClientApiRequest {
 
 #[derive(Debug)]
 pub enum HandleKeyAgreementResult {
-    SendResponse(Peer),
+    SendResponse(Peer, Vec<u8>),
     SendCachedOutboundMessages(Vec<SendCheckedInput<Vec<Peer>>>),
-    AgreementError
+    AgreementError,
+    SymmetricKeyExists
 }
 
 #[cfg(test)]
@@ -921,7 +966,11 @@ impl MessageStaging {
         &mut self.key_store
     }
 
-    pub fn handle_key_agreement_pub(&mut self, message: KeyAgreementMessage, sender: SocketAddrV4) -> HandleKeyAgreementResult {
+    pub fn handle_key_agreement_pub(
+        &mut self,
+        message: KeyAgreementMessage,
+        sender: SocketAddrV4,
+    ) -> HandleKeyAgreementResult {
         self.handle_key_agreement(message, sender)
     }
 }

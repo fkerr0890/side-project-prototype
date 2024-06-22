@@ -101,15 +101,15 @@ impl OutboundGateway {
             )
             .await;
         }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.send_individual(
-                Sender::new(dest.endpoint_pair.public_endpoint, dest.id),
-                message,
-                to_be_chunked,
-                key_store,
-            )
-            .await;
-        }
+        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+        //     self.send_individual(
+        //         Sender::new(dest.endpoint_pair.public_endpoint, dest.id),
+        //         message,
+        //         to_be_chunked,
+        //         key_store,
+        //     )
+        //     .await;
+        // }
     }
 
     pub async fn send_individual(
@@ -169,10 +169,10 @@ impl OutboundGateway {
             self.transport(dest.id, dest.endpoint_pair.private_endpoint, &serialized)
                 .await;
         }
-        if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
-            self.transport(dest.id, dest.endpoint_pair.public_endpoint, &serialized)
-                .await;
-        }
+        // if dest.endpoint_pair.public_endpoint != EndpointPair::default_socket() {
+        //     self.transport(dest.id, dest.endpoint_pair.public_endpoint, &serialized)
+        //         .await;
+        // }
     }
 
     fn generate_inbound_message_bytes(
