@@ -247,7 +247,9 @@ impl Message {
 
 #[cfg(test)]
 impl Message {
-    pub fn id_mut(&mut self) -> &mut NumId { &mut self.id }
+    pub fn id_mut(&mut self) -> &mut NumId {
+        &mut self.id
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]

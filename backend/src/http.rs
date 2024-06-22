@@ -77,7 +77,7 @@ impl SerdeHttpRequest {
             version: String::from("HTTP/1.1"),
             headers: FxHashMap::default(),
             body: b"test".to_vec(),
-            for_testing: true
+            for_testing: true,
         }
     }
 }

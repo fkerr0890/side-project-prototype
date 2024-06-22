@@ -231,7 +231,6 @@ impl Default for EndpointPair {
     }
 }
 
-
 #[derive(Serialize, Deserialize, Copy, Clone)]
 enum NatKind {
     Unknown,

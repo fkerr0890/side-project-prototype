@@ -455,7 +455,11 @@ impl MessageStaging {
             false
         );
         self.outbound_gateway
-            .send_agreement(message.dest(), public_key, MessageDirectionAgreement::Request)
+            .send_agreement(
+                message.dest(),
+                public_key,
+                MessageDirectionAgreement::Request,
+            )
             .await;
         false
     }
