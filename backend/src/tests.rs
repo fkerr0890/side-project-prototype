@@ -320,9 +320,22 @@ async fn stage_initial_retrieval_request() {
             .session_manager()
             .source_active_retrieval(&host_name)
     );
-    let future = message_processing::SRP_TTL_SECONDS.as_millis() / message_staging.event_manager().interval().period().as_millis();
-    let event = &message_staging.event_manager().events().get(&future).expect("Should be an event here")[0];
-    assert!(matches!(event, event::TimeboundAction::RemoveHttpHandlerTx(_)), "Actual was {:?}", event);
+    let future = message_processing::SRP_TTL_SECONDS.as_millis()
+        / message_staging
+            .event_manager()
+            .interval()
+            .period()
+            .as_millis();
+    let event = &message_staging
+        .event_manager()
+        .events()
+        .get(&future)
+        .expect("Should be an event here")[0];
+    assert!(
+        matches!(event, event::TimeboundAction::RemoveHttpHandlerTx(_)),
+        "Actual was {:?}",
+        event
+    );
     let peer = message::Peer::new(node::EndpointPair::default(), message::NumId(1));
     message_staging
         .session_manager()
@@ -357,22 +370,59 @@ async fn stage_get_direction() {
     let myself = message::Peer::default();
     let (mut message_staging, ..) = setup_staging(myself).await;
     let host_name = String::from("example");
-    let mut search_message = message::Message::new_search_request(message::NumId(0), message::SearchMetadata::new(myself, host_name.clone(), message::SearchMetadataKind::Retrieval));
+    let mut search_message = message::Message::new_search_request(
+        message::NumId(0),
+        message::SearchMetadata::new(
+            myself,
+            host_name.clone(),
+            message::SearchMetadataKind::Retrieval,
+        ),
+    );
     let result_forward = message_staging.get_direction_pub(&mut search_message);
-    assert!(matches!(result_forward, stage::PropagationDirection::Forward), "Actual was {:?}", result_forward);
+    assert!(
+        matches!(result_forward, stage::PropagationDirection::Forward),
+        "Actual was {:?}",
+        result_forward
+    );
     let result_stop = message_staging.get_direction_pub(&mut search_message);
-    assert!(matches!(result_stop, stage::PropagationDirection::Stop), "Actual was {:?}", result_stop);
-    message_staging.session_manager().add_local_host(host_name, node::EndpointPair::default_socket());
+    assert!(
+        matches!(result_stop, stage::PropagationDirection::Stop),
+        "Actual was {:?}",
+        result_stop
+    );
+    message_staging
+        .session_manager()
+        .add_local_host(host_name, node::EndpointPair::default_socket());
     *search_message.id_mut() = message::NumId(1);
     let result_reverse = message_staging.get_direction_pub(&mut search_message);
-    assert!(matches!(result_reverse, stage::PropagationDirection::Reverse), "Actual was {:?}", result_reverse);
+    assert!(
+        matches!(result_reverse, stage::PropagationDirection::Reverse),
+        "Actual was {:?}",
+        result_reverse
+    );
     search_message.set_direction(message::MessageDirection::Response);
     let result_reverse = message_staging.get_direction_pub(&mut search_message);
-    assert!(matches!(result_reverse, stage::PropagationDirection::Reverse), "Actual was {:?}", result_reverse);
-    let mut discover_message = message::Message::new_discover_peer_request(myself, message::Peer::new(node::EndpointPair::default(), message::NumId(1)), 2);
+    assert!(
+        matches!(result_reverse, stage::PropagationDirection::Reverse),
+        "Actual was {:?}",
+        result_reverse
+    );
+    let mut discover_message = message::Message::new_discover_peer_request(
+        myself,
+        message::Peer::new(node::EndpointPair::default(), message::NumId(1)),
+        2,
+    );
     let result_forward = message_staging.get_direction_pub(&mut discover_message);
-    assert!(matches!(result_forward, stage::PropagationDirection::Forward), "Actual was {:?}", result_forward);
+    assert!(
+        matches!(result_forward, stage::PropagationDirection::Forward),
+        "Actual was {:?}",
+        result_forward
+    );
     *search_message.id_mut() = message::NumId(2);
     let result_reverse = message_staging.get_direction_pub(&mut search_message);
-    assert!(matches!(result_reverse, stage::PropagationDirection::Reverse), "Actual was {:?}", result_reverse);
+    assert!(
+        matches!(result_reverse, stage::PropagationDirection::Reverse),
+        "Actual was {:?}",
+        result_reverse
+    );
 }
