@@ -36,6 +36,17 @@ impl TimeboundEventManager {
     }
 }
 
+#[cfg(test)]
+impl TimeboundEventManager {
+    pub fn events(&self) -> &FxHashMap<u128, Vec<TimeboundAction>> {
+        &self.events
+    }
+
+    pub fn interval(&self) -> &time::Interval {
+        &self.interval
+    }
+}
+
 #[derive(Debug)]
 pub enum TimeboundAction {
     LockDestsDistribution(String, NumId),

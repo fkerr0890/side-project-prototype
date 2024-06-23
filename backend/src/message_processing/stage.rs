@@ -786,16 +786,15 @@ impl MessageStaging {
     ) {
         match response {
             DistributionResponse::Continue => {
-                if !self
+                if self
                     .stream_session_manager
                     .finalize_resource_distribution(&host_name, &id, sender_id)
-                    || !self
+                    && self
                         .stream_session_manager
                         .dests_locked_distribution(&host_name)
                 {
-                    return;
+                    self.send_distribution_request(id, host_name).await
                 }
-                self.send_distribution_request(id, host_name).await
             }
             DistributionResponse::InstallError => panic!(),
             DistributionResponse::InstallOk => {
@@ -969,6 +968,10 @@ impl MessageStaging {
         &mut self.stream_session_manager
     }
 
+    pub fn event_manager(&self) -> &TimeboundEventManager {
+        &self.event_manager
+    }
+
     pub fn key_store(&mut self) -> &mut KeyStore {
         &mut self.key_store
     }
@@ -990,5 +993,9 @@ impl MessageStaging {
         from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>),
     ) -> Option<SendCheckedInput<FxHashSet<Peer>>> {
         self.initial_retrieval_request(from_http_handler).await
+    }
+
+    pub fn get_direction_pub(&mut self, message: &mut Message) -> PropagationDirection {
+        self.get_direction(message)
     }
 }
