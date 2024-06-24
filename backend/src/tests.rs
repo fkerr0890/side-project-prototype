@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use message::Peer;
+use message::{Message, Peer};
 use message_processing::stage;
 use tokio::{net::UdpSocket, sync::mpsc};
 
@@ -184,6 +184,23 @@ async fn setup_staging(
     )
 }
 
+fn get_future_event(
+    duration: Duration,
+    message_staging: &stage::MessageStaging,
+) -> &event::TimeboundAction {
+    let future = duration.as_millis()
+        / message_staging
+            .event_manager()
+            .interval()
+            .period()
+            .as_millis();
+    &message_staging
+        .event_manager()
+        .events()
+        .get(&future)
+        .expect("Should be an event here")[0]
+}
+
 #[tokio::test]
 async fn stage_handle_key_agreement() {
     let myself = Peer::default();
@@ -249,9 +266,6 @@ async fn stage_handle_key_agreement() {
     );
 }
 
-#[test]
-fn stage_process_follow_up() {}
-
 #[tokio::test]
 async fn stage_send_heartbeats() {
     let myself = message::Peer::default();
@@ -290,6 +304,15 @@ async fn stage_send_heartbeats() {
     assert_eq!(false, message.check_expiry());
     assert_eq!(true, to_be_chunked);
     assert!(cache_id.is_none());
+    let event = get_future_event(
+        message_processing::HEARTBEAT_INTERVAL_SECONDS,
+        &message_staging,
+    );
+    assert!(
+        matches!(event, event::TimeboundAction::SendHeartbeats),
+        "Actual was {:?}",
+        event
+    );
 }
 
 #[tokio::test]
@@ -320,17 +343,7 @@ async fn stage_initial_retrieval_request() {
             .session_manager()
             .source_active_retrieval(&host_name)
     );
-    let future = message_processing::SRP_TTL_SECONDS.as_millis()
-        / message_staging
-            .event_manager()
-            .interval()
-            .period()
-            .as_millis();
-    let event = &message_staging
-        .event_manager()
-        .events()
-        .get(&future)
-        .expect("Should be an event here")[0];
+    let event = get_future_event(message_processing::SRP_TTL_SECONDS, &message_staging);
     assert!(
         matches!(event, event::TimeboundAction::RemoveHttpHandlerTx(_)),
         "Actual was {:?}",
@@ -340,7 +353,7 @@ async fn stage_initial_retrieval_request() {
     message_staging
         .session_manager()
         .add_destination_source_retrieval(&host_name, peer);
-    *from_http_handler.0.id_mut() = message::NumId(1);
+    from_http_handler.0.set_id(message::NumId(1));
     let (dests, message, to_be_chunked, cache_id) = message_staging
         .initial_retrieval_request_pub(from_http_handler)
         .await
@@ -390,17 +403,18 @@ async fn stage_get_direction() {
         "Actual was {:?}",
         result_stop
     );
-    message_staging
-        .session_manager()
-        .add_local_host(host_name, node::EndpointPair::default_socket());
-    *search_message.id_mut() = message::NumId(1);
+    search_message.set_direction(message::MessageDirection::Response);
     let result_reverse = message_staging.get_direction_pub(&mut search_message);
     assert!(
         matches!(result_reverse, stage::PropagationDirection::Reverse),
         "Actual was {:?}",
         result_reverse
     );
-    search_message.set_direction(message::MessageDirection::Response);
+    search_message.set_direction(message::MessageDirection::Request);
+    message_staging
+        .session_manager()
+        .add_local_host(host_name, node::EndpointPair::default_socket());
+    search_message.set_id(message::NumId(1));
     let result_reverse = message_staging.get_direction_pub(&mut search_message);
     assert!(
         matches!(result_reverse, stage::PropagationDirection::Reverse),
@@ -418,7 +432,51 @@ async fn stage_get_direction() {
         "Actual was {:?}",
         result_forward
     );
-    *search_message.id_mut() = message::NumId(2);
+    let event = get_future_event(message_processing::DPP_TTL_MILLIS / 2, &message_staging);
+    assert!(
+        matches!(event, event::TimeboundAction::SendEarlyReturnMessage(_)),
+        "Actual was {:?}",
+        event
+    );
+    let event = get_future_event(message_processing::SRP_TTL_SECONDS, &message_staging);
+    assert!(
+        matches!(event, event::TimeboundAction::RemoveBreadcrumb(_)),
+        "Actual was {:?}",
+        event
+    );
+    search_message.set_id(message::NumId(2));
+    let result_reverse = message_staging.get_direction_pub(&mut search_message);
+    assert!(
+        matches!(result_reverse, stage::PropagationDirection::Reverse),
+        "Actual was {:?}",
+        result_reverse
+    );
+    search_message.set_id(message::NumId(3));
+    let message::MetadataKind::Search(metadata) = search_message.metadata_mut() else {
+        panic!()
+    };
+    metadata.set_kind(message::SearchMetadataKind::Distribution);
+    let result_forward = message_staging.get_direction_pub(&mut search_message);
+    assert!(
+        matches!(result_forward, stage::PropagationDirection::Forward),
+        "Actual was {:?}",
+        result_forward
+    );
+    search_message.set_id(message::NumId(4));
+    let message::MetadataKind::Search(metadata) = search_message.metadata_mut() else {
+        panic!()
+    };
+    metadata.origin_mut().id = message::NumId(1);
+    let result_forward = message_staging.get_direction_pub(&mut search_message);
+    assert!(
+        matches!(result_forward, stage::PropagationDirection::Forward),
+        "Actual was {:?}",
+        result_forward
+    );
+    search_message.set_id(message::NumId(5));
+    message_staging
+        .session_manager()
+        .remove_local_host("example");
     let result_reverse = message_staging.get_direction_pub(&mut search_message);
     assert!(
         matches!(result_reverse, stage::PropagationDirection::Reverse),

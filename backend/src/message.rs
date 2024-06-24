@@ -247,8 +247,8 @@ impl Message {
 
 #[cfg(test)]
 impl Message {
-    pub fn id_mut(&mut self) -> &mut NumId {
-        &mut self.id
+    pub fn set_id(&mut self, id: NumId) {
+        self.id = id;
     }
 }
 
@@ -301,6 +301,17 @@ impl SearchMetadata {
             host_name,
             kind,
         }
+    }
+}
+
+#[cfg(test)]
+impl SearchMetadata {
+    pub fn set_kind(&mut self, kind: SearchMetadataKind) {
+        self.kind = kind;
+    }
+
+    pub fn origin_mut(&mut self) -> &mut Peer {
+        &mut self.origin
     }
 }
 

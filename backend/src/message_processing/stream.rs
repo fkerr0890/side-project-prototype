@@ -297,6 +297,14 @@ impl StreamSessionManager {
         &mut self.follow_up_rx
     }
 }
+
+#[cfg(test)]
+impl StreamSessionManager {
+    pub fn remove_local_host(&mut self, local_host: &str) {
+        self.local_hosts.remove(local_host);
+    }
+}
+
 struct StreamSource {
     active_dests: FxHashSet<Peer>,
     resource_queue: VecDeque<NumId>,
