@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use message::{Message, Peer};
 use message_processing::stage;
 use tokio::{net::UdpSocket, sync::mpsc};
 
@@ -160,7 +159,7 @@ async fn crypto_agree_transform() {
 }
 
 async fn setup_staging(
-    myself: Peer,
+    myself: message::Peer,
 ) -> (
     stage::MessageStaging,
     message_processing::CipherSender,
@@ -203,7 +202,7 @@ fn get_future_event(
 
 #[tokio::test]
 async fn stage_handle_key_agreement() {
-    let myself = Peer::default();
+    let myself = message::Peer::default();
     let peer_id = message::NumId(1);
     let (mut message_staging, ..) = setup_staging(myself).await;
     let (_, mut event_manager) = key_store();
@@ -322,7 +321,7 @@ async fn stage_initial_retrieval_request() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let http_request = http::SerdeHttpRequest::new_test_request();
     let request = message::Message::new(
-        Peer::default(),
+        message::Peer::default(),
         message::NumId(0),
         None,
         message::MetadataKind::Stream(message::StreamMetadata::new(
@@ -483,4 +482,33 @@ async fn stage_get_direction() {
         "Actual was {:?}",
         result_reverse
     );
+}
+
+#[test]
+fn peer_add_peer() {
+    let mut peer_ops = peer::PeerOps::new();
+    for i in 0..peer::MAX_PEERS {
+        let peer_id = message::NumId(i.into());
+        peer_ops.add_peer(message::Peer::new(node::EndpointPair::default(), peer_id), i.into());
+        assert!(peer_ops.has_peer(peer_id));
+        assert_eq!(usize::from(i + 1), peer_ops.peers().len());
+    }
+    let peer_duplicate = message::Peer::new(node::EndpointPair::default(), message::NumId(0));
+    peer_ops.add_peer(peer_duplicate, 99);
+    assert_eq!(usize::from(peer::MAX_PEERS), peer_ops.peers().len());
+    assert!(peer_ops.has_peer(message::NumId(0)));
+    assert_eq!(99, *peer_ops.get_peer_score(peer_duplicate).unwrap());
+    let next_index= peer::MAX_PEERS;
+    let next_id = message::NumId(next_index.into());
+    peer_ops.add_peer(message::Peer::new(node::EndpointPair::default(), next_id), -1);
+    assert_eq!(usize::from(peer::MAX_PEERS), peer_ops.peers().len());
+    assert!(peer_ops.has_peer(message::NumId(0)));
+    assert!(!peer_ops.has_peer(next_id));
+    peer_ops.add_peer(message::Peer::new(node::EndpointPair::default(), next_id), next_index.into());
+    let curr_peers = peer_ops.peers_and_scores();
+    assert_eq!(usize::from(peer::MAX_PEERS), curr_peers.len());
+    assert!(!peer_ops.has_peer(message::NumId(1)));
+    assert!(peer_ops.has_peer(next_id));
+    assert_eq!(99, curr_peers.iter().max_by_key(|p| p.1).unwrap().1);
+    assert_eq!(2, curr_peers.iter().min_by_key(|p| p.1).unwrap().1);
 }

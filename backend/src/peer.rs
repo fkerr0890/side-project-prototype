@@ -54,24 +54,31 @@ impl PeerOps {
     }
 
     pub fn add_peer(&mut self, peer: Peer, score: i32) {
-        self.peer_ids.insert(peer.id);
         let None = self.peer_queue.change_priority(&peer, score) else {
             return;
         };
         let peer_limit_reached = self.peer_queue.len() >= MAX_PEERS as usize;
         let mut should_push = !peer_limit_reached;
         if let Some(worst_peer) = self.peer_queue.peek_min() {
-            should_push = should_push || worst_peer.1 > &score;
+            should_push = should_push || worst_peer.1 < &score;
         }
         if should_push {
             if peer_limit_reached {
-                self.peer_queue.pop_min();
+                self.peer_ids.remove(&self.peer_queue.pop_min().unwrap().0.id);
             }
+            self.peer_ids.insert(peer.id);
             self.peer_queue.push(peer, score);
         }
     }
 
     pub fn has_peer(&self, peer_id: NumId) -> bool {
         self.peer_ids.contains(&peer_id)
+    }
+}
+
+#[cfg(test)]
+impl PeerOps {
+    pub fn get_peer_score(&self, peer: Peer) -> Option<&i32> {
+        self.peer_queue.get_priority(&peer)
     }
 }

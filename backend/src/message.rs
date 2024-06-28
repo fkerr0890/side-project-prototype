@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
+use std::cmp::min;
 use std::fmt::{Debug, Display};
 use std::net::Ipv4Addr;
 use std::{net::SocketAddrV4, str};
@@ -37,28 +38,26 @@ impl InboundMessage {
     }
 
     pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, FxHashSet<Sender>, String) {
-        let timestamp = messages
-            .iter()
-            .map(|m| DateTime::parse_from_rfc3339(&m.separate_parts.timestamp).unwrap())
-            .min()
-            .unwrap();
+        let mut bytes = Vec::new();
+        let mut senders = Vec::new();
+        let mut timestamp = None;
         messages.sort_by(|a, b| {
             a.separate_parts
                 .position
                 .0
                 .cmp(&b.separate_parts.position.0)
         });
-        let (bytes, senders): (Vec<Vec<u8>>, Vec<Sender>) = messages
-            .into_iter()
-            .map(|m| {
-                let parts = m.into_parts();
-                (parts.0, parts.1.sender)
-            })
-            .unzip();
+        for message in messages {
+            let (mut payload, separate_parts) = message.into_parts();
+            bytes.append(&mut payload);
+            senders.push(separate_parts.sender);
+            let datetime = DateTime::parse_from_rfc3339(&separate_parts.timestamp).unwrap();
+            timestamp = Some(timestamp.map_or(datetime, |t| min(t, datetime)));
+        }
         (
-            bytes.concat(),
+            bytes,
             FxHashSet::from_iter(senders),
-            datetime_to_timestamp(timestamp.into()),
+            datetime_to_timestamp(timestamp.unwrap().into()),
         )
     }
 }
