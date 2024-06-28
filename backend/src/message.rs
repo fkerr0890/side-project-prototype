@@ -39,7 +39,7 @@ impl InboundMessage {
 
     pub fn reassemble_message(mut messages: Vec<Self>) -> (Vec<u8>, FxHashSet<Sender>, String) {
         let mut bytes = Vec::new();
-        let mut senders = Vec::new();
+        let mut senders = FxHashSet::default();
         let mut timestamp = None;
         messages.sort_by(|a, b| {
             a.separate_parts
@@ -50,13 +50,13 @@ impl InboundMessage {
         for message in messages {
             let (mut payload, separate_parts) = message.into_parts();
             bytes.append(&mut payload);
-            senders.push(separate_parts.sender);
+            senders.insert(separate_parts.sender);
             let datetime = DateTime::parse_from_rfc3339(&separate_parts.timestamp).unwrap();
             timestamp = Some(timestamp.map_or(datetime, |t| min(t, datetime)));
         }
         (
             bytes,
-            FxHashSet::from_iter(senders),
+            senders,
             datetime_to_timestamp(timestamp.unwrap().into()),
         )
     }

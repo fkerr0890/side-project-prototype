@@ -1,5 +1,5 @@
 use rustc_hash::FxHashMap;
-use std::{collections::HashMap, convert::Infallible, net::SocketAddr, str::FromStr};
+use std::{convert::Infallible, net::SocketAddr, str::FromStr};
 
 use hyper::{
     body,
