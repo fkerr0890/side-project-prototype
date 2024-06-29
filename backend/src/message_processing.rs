@@ -26,6 +26,7 @@ pub const SRP_TTL_SECONDS: Duration = Duration::from_secs(30);
 pub const ACTIVE_SESSION_TTL_SECONDS: Duration = Duration::from_secs(600);
 pub const HEARTBEAT_INTERVAL_SECONDS: Duration = Duration::from_secs(10);
 pub const DISTRIBUTION_TTL_SECONDS: Duration = Duration::from_secs(43200);
+pub const DISTRIBUTION_SEARCH_TTL_SECONDS: Duration = Duration::from_secs(5);
 
 pub mod discover;
 pub mod distribute;

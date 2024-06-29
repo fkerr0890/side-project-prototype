@@ -8,7 +8,7 @@ use crate::{
         Message, MessageDirection, MessageDirectionAgreement, MetadataKind, NumId, Peer,
         SearchMetadata, SearchMetadataKind, Sender, StreamMetadata, StreamPayloadKind,
     },
-    message_processing::HEARTBEAT_INTERVAL_SECONDS,
+    message_processing::{DISTRIBUTION_SEARCH_TTL_SECONDS, HEARTBEAT_INTERVAL_SECONDS},
     option_early_return,
     peer::PeerOps,
     result_early_return,
@@ -571,7 +571,7 @@ impl MessageStaging {
         self.send_request(search_message).await;
         self.event_manager.put_event(
             TimeboundAction::LockDestsDistribution(metadata.host_name, id),
-            Duration::from_secs(5),
+            DISTRIBUTION_SEARCH_TTL_SECONDS,
         );
     }
 
