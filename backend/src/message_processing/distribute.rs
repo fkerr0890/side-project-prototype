@@ -15,9 +15,7 @@ pub struct ChunkedFileHandler {
 impl ChunkedFileHandler {
     pub async fn new(host_name: &str) -> Self {
         Self {
-            file: File::open(format!("/home/fred/Downloads/{host_name}.gz"))
-                .await
-                .unwrap(),
+            file: File::open(host_name).await.unwrap(),
             sent_id: None,
             bytes_read: 0,
         }

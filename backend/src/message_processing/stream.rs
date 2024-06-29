@@ -7,7 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::{fs, sync::mpsc, task::AbortHandle, time::sleep};
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{
     http::{self, SerdeHttpRequest},
@@ -183,18 +183,19 @@ impl StreamSessionManager {
         option_early_return!(self.sources_distribution.get_mut(host_name)).set_dests_remaining()
     }
 
+    pub fn remove_dest_remaining_distribution(&mut self, host_name: &str, sender_id: &NumId) {
+        option_early_return!(self.sources_distribution.get_mut(host_name))
+            .dests_remaining
+            .remove(sender_id);
+    }
+
     pub fn finalize_resource_retrieval(&mut self, host_name: &str, id: &NumId) {
         option_early_return!(self.sources_retrieval.get_mut(host_name)).finalize_resource(id);
     }
 
-    pub fn finalize_resource_distribution(
-        &mut self,
-        host_name: &str,
-        id: &NumId,
-        sender_id: NumId,
-    ) -> bool {
+    pub fn finalize_resource_distribution(&mut self, host_name: &str, id: &NumId) -> bool {
         option_early_return!(self.sources_distribution.get_mut(host_name), false)
-            .finalize_resource(id, sender_id)
+            .finalize_resource(id)
     }
 
     pub fn finalize_all_resources_retrieval(&mut self, host_name: &str) {
@@ -208,7 +209,20 @@ impl StreamSessionManager {
     }
 
     pub fn lock_dests_distribution(&mut self, host_name: &str) {
-        option_early_return!(self.sources_distribution.get_mut(host_name)).dests_locked = true
+        let stream_source_distribution =
+            option_early_return!(self.sources_distribution.get_mut(host_name));
+        stream_source_distribution.dests_locked = true;
+        stream_source_distribution.stream_source.active_dests = stream_source_distribution
+            .stream_source
+            .active_dests
+            .iter()
+            .filter(|d| {
+                !stream_source_distribution
+                    .dests_remaining
+                    .contains_key(&d.id)
+            })
+            .map(|d| *d)
+            .collect();
     }
 
     pub fn dests_locked_distribution(&self, host_name: &str) -> bool {
@@ -245,7 +259,7 @@ impl StreamSessionManager {
             .sinks
             .get_mut(&host_name)?
             .unwrap_distribution()
-            .stage_message(bytes, id)
+            .stage_message(bytes, id, &host_name)
             .await?;
         if let DistributionResponse::InstallOk = result {
             self.local_hosts.insert(
@@ -403,6 +417,7 @@ impl StreamSourceDistribution {
         if self.dests_locked {
             return false;
         }
+        self.dests_remaining.insert(dest.id, dest.endpoint_pair);
         self.stream_source.active_dests.insert(dest)
     }
 
@@ -419,8 +434,7 @@ impl StreamSourceDistribution {
         self.stream_source.push_resource(id);
     }
 
-    fn finalize_resource(&mut self, id: &NumId, sender_id: NumId) -> bool {
-        self.dests_remaining.remove(&sender_id);
+    fn finalize_resource(&mut self, id: &NumId) -> bool {
         debug!(dests_remaining = ?self.dests_remaining);
         if !self.dests_remaining.is_empty() {
             return false;
@@ -465,7 +479,12 @@ impl DistributionStreamSink {
         }
     }
 
-    async fn stage_message(&mut self, payload: Vec<u8>, id: NumId) -> Option<DistributionResponse> {
+    async fn stage_message(
+        &mut self,
+        payload: Vec<u8>,
+        id: NumId,
+        host_name: &str,
+    ) -> Option<DistributionResponse> {
         if self
             .prev_id
             .is_some_and(|prev_id| id.0 <= prev_id.0 && id.0 != 0)
@@ -476,13 +495,19 @@ impl DistributionStreamSink {
         Some(if !payload.is_empty() {
             self.chunks.push(payload);
             DistributionResponse::Continue
-        } else if fs::write("/home/fred/test/p2pdump.gz", self.chunks.concat())
-            .await
-            .is_ok()
-        {
-            DistributionResponse::InstallOk
         } else {
-            DistributionResponse::InstallError
+            let last_slash = host_name.rfind('/').unwrap();
+            let path = host_name
+                .chars()
+                .take(host_name.len() - last_slash - 1)
+                .collect::<String>()
+                + "p2pdump.gz";
+            if let Err(e) = fs::write(path, self.chunks.concat()).await {
+                error!(%e);
+                DistributionResponse::InstallError
+            } else {
+                DistributionResponse::InstallOk
+            }
         })
     }
 }

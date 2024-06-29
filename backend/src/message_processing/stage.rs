@@ -786,12 +786,14 @@ impl MessageStaging {
     ) {
         match response {
             DistributionResponse::Continue => {
+                self.stream_session_manager
+                    .remove_dest_remaining_distribution(&host_name, &sender_id);
                 if self
                     .stream_session_manager
-                    .finalize_resource_distribution(&host_name, &id, sender_id)
+                    .dests_locked_distribution(&host_name)
                     && self
                         .stream_session_manager
-                        .dests_locked_distribution(&host_name)
+                        .finalize_resource_distribution(&host_name, &id)
                 {
                     self.send_distribution_request(id, host_name).await
                 }
@@ -799,7 +801,9 @@ impl MessageStaging {
             DistributionResponse::InstallError => panic!(),
             DistributionResponse::InstallOk => {
                 self.stream_session_manager
-                    .finalize_resource_distribution(&host_name, &id, sender_id);
+                    .remove_dest_remaining_distribution(&host_name, &sender_id);
+                self.stream_session_manager
+                    .finalize_resource_distribution(&host_name, &id);
                 self.cached_stream_messages.remove(&id);
                 let (mut hop_count, distribution_id) = option_early_return!(self
                     .stream_session_manager
