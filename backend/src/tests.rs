@@ -489,7 +489,10 @@ fn peer_add_peer() {
     let mut peer_ops = peer::PeerOps::new();
     for i in 0..peer::MAX_PEERS {
         let peer_id = message::NumId(i.into());
-        peer_ops.add_peer(message::Peer::new(node::EndpointPair::default(), peer_id), i.into());
+        peer_ops.add_peer(
+            message::Peer::new(node::EndpointPair::default(), peer_id),
+            i.into(),
+        );
         assert!(peer_ops.has_peer(peer_id));
         assert_eq!(usize::from(i + 1), peer_ops.peers().len());
     }
@@ -498,13 +501,19 @@ fn peer_add_peer() {
     assert_eq!(usize::from(peer::MAX_PEERS), peer_ops.peers().len());
     assert!(peer_ops.has_peer(message::NumId(0)));
     assert_eq!(99, *peer_ops.get_peer_score(peer_duplicate).unwrap());
-    let next_index= peer::MAX_PEERS;
+    let next_index = peer::MAX_PEERS;
     let next_id = message::NumId(next_index.into());
-    peer_ops.add_peer(message::Peer::new(node::EndpointPair::default(), next_id), -1);
+    peer_ops.add_peer(
+        message::Peer::new(node::EndpointPair::default(), next_id),
+        -1,
+    );
     assert_eq!(usize::from(peer::MAX_PEERS), peer_ops.peers().len());
     assert!(peer_ops.has_peer(message::NumId(0)));
     assert!(!peer_ops.has_peer(next_id));
-    peer_ops.add_peer(message::Peer::new(node::EndpointPair::default(), next_id), next_index.into());
+    peer_ops.add_peer(
+        message::Peer::new(node::EndpointPair::default(), next_id),
+        next_index.into(),
+    );
     let curr_peers = peer_ops.peers_and_scores();
     assert_eq!(usize::from(peer::MAX_PEERS), curr_peers.len());
     assert!(!peer_ops.has_peer(message::NumId(1)));

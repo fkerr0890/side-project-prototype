@@ -64,7 +64,8 @@ impl PeerOps {
         }
         if should_push {
             if peer_limit_reached {
-                self.peer_ids.remove(&self.peer_queue.pop_min().unwrap().0.id);
+                self.peer_ids
+                    .remove(&self.peer_queue.pop_min().unwrap().0.id);
             }
             self.peer_ids.insert(peer.id);
             self.peer_queue.push(peer, score);
