@@ -163,7 +163,6 @@ async fn setup_staging(
 ) -> (
     stage::MessageStaging,
     message_processing::CipherSender,
-    message::Peer,
     mpsc::UnboundedSender<stage::ClientApiRequest>,
     mpsc::UnboundedSender<(
         message::Message,
@@ -172,9 +171,8 @@ async fn setup_staging(
 ) {
     test_utils::setup_staging(
         false,
-        myself.id,
         Vec::with_capacity(0),
-        myself.endpoint_pair,
+        myself,
         Arc::new(
             UdpSocket::bind(myself.endpoint_pair.private_endpoint)
                 .await

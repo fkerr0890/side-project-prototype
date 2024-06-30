@@ -886,6 +886,7 @@ impl MessageStaging {
                 .agree(peer_id, public_key_peer, &mut self.event_manager),
             HandleKeyAgreementResult::AgreementError
         );
+        // TODO: Simplify
         let cached_messages = match direction {
             MessageDirectionAgreement::Request if peer_id == self.outbound_gateway.myself.id => {
                 self.cached_outbound_messages.remove(&peer_id)

@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     message::{NumId, Peer},
-    node::EndpointPair,
 };
 
 use priority_queue::DoublePriorityQueue;
@@ -39,10 +38,10 @@ impl PeerOps {
     pub fn peers(&self) -> Vec<Peer> {
         self.peer_queue.iter().map(|(peer, _)| *peer).collect()
     }
-    pub fn peers_and_scores(&self) -> Vec<(EndpointPair, i32, NumId)> {
+    pub fn peers_and_scores(&self) -> Vec<(Peer, i32)> {
         self.peer_queue
             .iter()
-            .map(|(peer, score)| (peer.endpoint_pair, *score, peer.id))
+            .map(|(p, s)| (*p, *s))
             .collect()
     }
     pub fn peers_len(&self) -> usize {

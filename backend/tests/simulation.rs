@@ -6,7 +6,7 @@ use tracing::Level;
 async fn basic() {
     test_utils::setup(Level::INFO);
     // test_utils::regenerate_nodes(1, 5).await;
-    let (_, txs) = test_utils::load_nodes_from_file("peer_info").await;
+    let (_, txs) = test_utils::load_nodes_from_file("../peer_info.json").await;
     // test_utils::start_distribution(txs, String::from("/home/fred/test/screenshot.png.gz"));
     future::pending::<()>().await;
 }

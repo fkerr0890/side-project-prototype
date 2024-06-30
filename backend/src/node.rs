@@ -8,7 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::{fs, net::UdpSocket, sync::mpsc};
+use tokio::{net::UdpSocket, sync::mpsc};
 use tracing::{debug, error};
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
         stage::{ClientApiRequest, MessageStaging},
         CipherSender, DiscoverPeerProcessor, InboundGateway, OutboundGateway,
     },
-    option_early_return, peer,
+    option_early_return, peer, utils::BidirectionalMpsc,
 };
 
 pub struct Node {
@@ -63,9 +63,8 @@ impl Node {
 
     pub fn setup_staging(
         is_end: bool,
-        id: NumId,
         initial_peers: Vec<(String, NumId)>,
-        endpoint_pair: EndpointPair,
+        myself: Peer,
         socket: Arc<UdpSocket>,
         http_handler_rx: mpsc::UnboundedReceiver<(
             Message,
@@ -73,7 +72,7 @@ impl Node {
         )>,
         client_api_tx: mpsc::UnboundedSender<ClientApiRequest>,
         client_api_rx: mpsc::UnboundedReceiver<ClientApiRequest>,
-    ) -> (MessageStaging, CipherSender, Peer) {
+    ) -> (MessageStaging, CipherSender) {
         let (to_staging, from_gateway) = mpsc::unbounded_channel();
 
         let mut local_hosts = FxHashMap::default();
@@ -83,8 +82,6 @@ impl Node {
                 SocketAddrV4::new("127.0.0.1".parse().unwrap(), 3000),
             );
         }
-
-        let myself = Peer::new(endpoint_pair, id);
 
         let mut peers = Vec::new();
         for (peer, id) in initial_peers {
@@ -106,7 +103,6 @@ impl Node {
                 peers,
             ),
             to_staging,
-            myself,
         )
     }
 
@@ -118,10 +114,8 @@ impl Node {
         socket: Arc<UdpSocket>,
         is_start: bool,
         is_end: bool,
-        report_trigger: Option<mpsc::Receiver<()>>,
+        report_trigger: Option<BidirectionalMpsc<NodeInfo, ()>>,
         introducer: Option<Peer>,
-        id: NumId,
-        endpoint_pair: EndpointPair,
         server_context: ServerContext,
     ) {
         if let Some(introducer) = introducer {
@@ -136,22 +130,15 @@ impl Node {
 
         let peer_ops = message_staging.peer_ops().clone();
         if let Some(mut report_trigger) = report_trigger {
-            let (port, id) = (endpoint_pair.public_endpoint.port(), id);
             tokio::spawn(async move {
                 report_trigger.recv().await;
                 let node_info = NodeInfo::new(
                     lock!(peer_ops).peers_and_scores(),
                     is_start,
                     is_end,
-                    port,
-                    id.0,
+                    myself,
                 );
-                fs::write(
-                    format!("../peer_info/{}.json", node_info.name),
-                    serde_json::to_vec(&node_info).unwrap(),
-                )
-                .await
-                .unwrap();
+                report_trigger.send(node_info).unwrap();
             });
         }
 
@@ -180,19 +167,18 @@ impl Node {
         }
     }
 
-    pub fn read_node_info(value: NodeInfo) -> (u16, NumId, Vec<(String, NumId)>, bool, bool) {
-        let port = value.port;
+    pub fn read_node_info(value: NodeInfo) -> (Peer, Vec<(String, NumId)>, bool, bool) {
         let peers = value
-            .peers
+            .peers_and_scores
             .into_iter()
-            .map(|(peer_port, _, id)| {
+            .map(|(peer, _)| {
                 (
-                    String::from("127.0.0.1:") + &peer_port.to_string(),
-                    NumId(id),
+                    peer.endpoint_pair.private_endpoint.to_string(),
+                    peer.id,
                 )
             })
             .collect();
-        (port, NumId(value.id), peers, value.is_start, value.is_end)
+        (value.myself, peers, value.is_start, value.is_end)
     }
 }
 
@@ -241,39 +227,21 @@ enum NatKind {
 
 #[derive(Serialize, Deserialize)]
 pub struct NodeInfo {
-    pub name: String,
-    port: u16,
-    id: u128,
-    peers: Vec<(u16, i32, u128)>,
+    pub myself: Peer,
+    peers_and_scores: Vec<(Peer, i32)>,
     is_start: bool,
     is_end: bool,
 }
 impl NodeInfo {
     pub fn new(
-        peers_and_scores: Vec<(EndpointPair, i32, NumId)>,
+        peers_and_scores: Vec<(Peer, i32)>,
         is_start: bool,
         is_end: bool,
-        port: u16,
-        id: u128,
+        myself: Peer,
     ) -> NodeInfo {
-        let port_str = port.to_string();
-        let name = if is_start {
-            String::from("START")
-        } else if is_end {
-            String::from("END") + &port_str
-        } else {
-            port_str
-        };
         NodeInfo {
-            name,
-            port,
-            id,
-            peers: peers_and_scores
-                .into_iter()
-                .map(|(endpoint_pair, score, id)| {
-                    (endpoint_pair.public_endpoint.port(), score, id.0)
-                })
-                .collect(),
+            myself,
+            peers_and_scores,
             is_start,
             is_end,
         }

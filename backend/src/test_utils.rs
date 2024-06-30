@@ -1,15 +1,11 @@
 use rustc_hash::FxHashSet;
-use std::{net::SocketAddrV4, panic, process, sync::Arc, time::Duration};
+use std::{collections::HashMap, panic, process, sync::Arc, time::Duration};
 
 use crate::{
-    http::{SerdeHttpResponse, ServerContext},
-    message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer},
-    message_processing::{
+    http::{SerdeHttpResponse, ServerContext}, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::{
         stage::{ClientApiRequest, MessageStaging},
         CipherSender, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS,
-    },
-    node::{EndpointPair, Node, NodeInfo},
-    MAX_TIME,
+    }, node::{Node, NodeInfo}, utils::BidirectionalMpsc, MAX_TIME
 };
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{
@@ -44,7 +40,7 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
     fs::remove_dir_all("../peer_info").await.unwrap();
     fs::create_dir("../peer_info").await.unwrap();
 
-    let mut introducers: Vec<(Peer, mpsc::Sender<()>)> = Vec::new();
+    let mut introducers: Vec<(Peer, BidirectionalMpsc<(), NodeInfo>)> = Vec::new();
     let mut rng = rand::thread_rng();
     let start = (0..num_nodes).choose(&mut rng).unwrap();
     let host_indices = FxHashSet::<u16>::from_iter(
@@ -58,24 +54,23 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
                 introducers
                     .get(rand::thread_rng().gen_range(0..introducers.len()))
                     .unwrap()
-                    .clone()
                     .0,
             )
         } else {
             None
         };
-        let (tx, rx) = mpsc::channel(1);
+        let (my_end, your_end) = BidirectionalMpsc::channel();
         let (endpoint_pair, socket) =
             Node::get_socket(String::from("127.0.0.1"), String::from("0"), "127.0.0.1").await;
         let id = NumId(Uuid::new_v4().as_u128());
-        introducers.push((Peer::new(endpoint_pair, id), tx));
+        introducers.push((Peer::new(endpoint_pair, id), my_end));
         let is_end = host_indices.contains(&i);
         let is_start = start == i;
-        let (message_staging, to_staging, myself, _, http_handler_tx) = setup_staging(
+        let myself = Peer::new(endpoint_pair, id);
+        let (message_staging, to_staging, _, http_handler_tx) = setup_staging(
             is_end,
-            id,
             Vec::with_capacity(0),
-            endpoint_pair,
+            myself,
             socket.clone(),
         );
         tokio::spawn(async move {
@@ -87,10 +82,8 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
                     socket,
                     is_start,
                     is_end,
-                    Some(rx),
+                    Some(your_end),
                     introducer,
-                    id,
-                    endpoint_pair,
                     ServerContext::new(http_handler_tx),
                 )
                 .await
@@ -100,32 +93,30 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
     }
     sleep(HEARTBEAT_INTERVAL_SECONDS * 2).await;
     println!("****************************************************************************");
-    for (_, tx) in introducers {
-        tx.send(()).await.unwrap();
+    let mut node_info_map = HashMap::new();
+    for (_, mut my_end) in introducers {
+        my_end.send(()).unwrap();
+        let node_info = my_end.recv().await.unwrap();
+        node_info_map.insert(node_info.myself.id, node_info);
     }
+    fs::write("../peer_info.json", serde_json::to_vec(&node_info_map).unwrap()).await.unwrap();
 }
 
 pub async fn load_nodes_from_file(
-    directory: &str,
+    node_info_file_path: &str
 ) -> (ServerContext, Vec<mpsc::UnboundedSender<ClientApiRequest>>) {
-    let mut paths = fs::read_dir(format!("../{directory}")).await.unwrap();
+    let nodes = serde_json::from_slice::<HashMap<NumId, NodeInfo>>(&fs::read(node_info_file_path).await.unwrap()).unwrap();
     let mut server_context = None;
     let mut client_api_txs = Vec::new();
-    while let Some(path) = paths.next_entry().await.unwrap() {
-        let node_info: NodeInfo =
-            serde_json::from_slice(&fs::read(path.path()).await.unwrap()).unwrap();
-        let (port, id, peers, is_start, is_end) = Node::read_node_info(node_info);
+    for node_info in nodes.into_values() {
+        let (myself, peers, is_start, is_end) = Node::read_node_info(node_info);
         let socket = Arc::new(
-            UdpSocket::bind(String::from("127.0.0.1:") + &port.to_string())
+            UdpSocket::bind(myself.endpoint_pair.private_endpoint)
                 .await
                 .unwrap(),
         );
-        let endpoint_pair = EndpointPair::new(
-            SocketAddrV4::new("127.0.0.1".parse().unwrap(), port),
-            SocketAddrV4::new("127.0.0.1".parse().unwrap(), port),
-        );
-        let (message_staging, to_staging, myself, client_api_tx, http_handler_tx) =
-            setup_staging(is_end, id, peers, endpoint_pair, socket.clone());
+        let (message_staging, to_staging, client_api_tx, http_handler_tx) =
+            setup_staging(is_end, peers, myself, socket.clone());
         let context = ServerContext::new(http_handler_tx);
         if is_start {
             server_context = Some(context.clone());
@@ -142,8 +133,6 @@ pub async fn load_nodes_from_file(
                     is_end,
                     None,
                     None,
-                    id,
-                    endpoint_pair,
                     context,
                 )
                 .await
@@ -188,24 +177,21 @@ pub fn measure_lock_time() {
 
 pub fn setup_staging(
     is_end: bool,
-    id: NumId,
     peers: Vec<(String, NumId)>,
-    endpoint_pair: EndpointPair,
+    myself: Peer,
     socket: Arc<UdpSocket>,
 ) -> (
     MessageStaging,
     CipherSender,
-    Peer,
     UnboundedSender<ClientApiRequest>,
     UnboundedSender<(Message, UnboundedSender<SerdeHttpResponse>)>,
 ) {
     let (http_handler_tx, http_handler_rx) = mpsc::unbounded_channel();
     let (client_api_tx, client_api_rx) = mpsc::unbounded_channel();
-    let (message_staging, to_staging, myself) = Node::setup_staging(
+    let (message_staging, to_staging) = Node::setup_staging(
         is_end,
-        id,
         peers,
-        endpoint_pair,
+        myself,
         socket,
         http_handler_rx,
         client_api_tx.clone(),
@@ -214,7 +200,6 @@ pub fn setup_staging(
     (
         message_staging,
         to_staging,
-        myself,
         client_api_tx,
         http_handler_tx,
     )

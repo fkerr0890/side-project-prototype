@@ -166,7 +166,7 @@ impl StreamSessionManager {
             .sinks
             .insert(
                 host_name,
-                StreamSink::Distribution(DistributionStreamSink::new())
+                StreamSink::Distribution(StreamSinkDistribution::new())
             )
             .is_none());
     }
@@ -446,7 +446,7 @@ impl StreamSourceDistribution {
 
 enum StreamSink {
     Retrieval(FxHashSet<Peer>),
-    Distribution(DistributionStreamSink),
+    Distribution(StreamSinkDistribution),
 }
 
 impl StreamSink {
@@ -457,7 +457,7 @@ impl StreamSink {
             panic!()
         }
     }
-    fn unwrap_distribution(&mut self) -> &mut DistributionStreamSink {
+    fn unwrap_distribution(&mut self) -> &mut StreamSinkDistribution {
         if let Self::Distribution(ref mut chunks) = self {
             chunks
         } else {
@@ -466,12 +466,12 @@ impl StreamSink {
     }
 }
 
-struct DistributionStreamSink {
+struct StreamSinkDistribution {
     chunks: Vec<Vec<u8>>,
     prev_id: Option<NumId>,
 }
 
-impl DistributionStreamSink {
+impl StreamSinkDistribution {
     fn new() -> Self {
         Self {
             chunks: Vec::new(),

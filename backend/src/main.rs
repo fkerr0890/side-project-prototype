@@ -1,4 +1,4 @@
-use p2p::{http::ServerContext, message::NumId, node::Node, test_utils};
+use p2p::{http::ServerContext, message::{NumId, Peer}, node::Node, test_utils};
 use std::env;
 use tracing::Level;
 
@@ -20,11 +20,11 @@ async fn main() {
     } else {
         (NumId(1), NumId(0))
     };
-    let (message_staging, to_staging, myself, _, http_handler_tx) = test_utils::setup_staging(
+    let myself = Peer::new(endpoint_pair, my_id);
+    let (message_staging, to_staging, _, http_handler_tx) = test_utils::setup_staging(
         !is_start,
-        my_id,
         vec![(peer_ip + ":" + &peer_port, peer_id)],
-        endpoint_pair,
+        myself,
         socket.clone(),
     );
     Node::new()
@@ -37,8 +37,6 @@ async fn main() {
             !is_start,
             None,
             None,
-            my_id,
-            endpoint_pair,
             ServerContext::new(http_handler_tx),
         )
         .await;
