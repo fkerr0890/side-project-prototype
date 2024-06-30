@@ -2,9 +2,7 @@ use rustc_hash::FxHashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    message::{NumId, Peer},
-};
+use crate::message::{NumId, Peer};
 
 use priority_queue::DoublePriorityQueue;
 
@@ -39,10 +37,7 @@ impl PeerOps {
         self.peer_queue.iter().map(|(peer, _)| *peer).collect()
     }
     pub fn peers_and_scores(&self) -> Vec<(Peer, i32)> {
-        self.peer_queue
-            .iter()
-            .map(|(p, s)| (*p, *s))
-            .collect()
+        self.peer_queue.iter().map(|(p, s)| (*p, *s)).collect()
     }
     pub fn peers_len(&self) -> usize {
         self.peer_queue.len()

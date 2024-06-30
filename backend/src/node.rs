@@ -19,7 +19,8 @@ use crate::{
         stage::{ClientApiRequest, MessageStaging},
         CipherSender, DiscoverPeerProcessor, InboundGateway, OutboundGateway,
     },
-    option_early_return, peer, utils::BidirectionalMpsc,
+    option_early_return, peer,
+    utils::BidirectionalMpsc,
 };
 
 pub struct Node {
@@ -132,12 +133,8 @@ impl Node {
         if let Some(mut report_trigger) = report_trigger {
             tokio::spawn(async move {
                 report_trigger.recv().await;
-                let node_info = NodeInfo::new(
-                    lock!(peer_ops).peers_and_scores(),
-                    is_start,
-                    is_end,
-                    myself,
-                );
+                let node_info =
+                    NodeInfo::new(lock!(peer_ops).peers_and_scores(), is_start, is_end, myself);
                 report_trigger.send(node_info).unwrap();
             });
         }
@@ -171,12 +168,7 @@ impl Node {
         let peers = value
             .peers_and_scores
             .into_iter()
-            .map(|(peer, _)| {
-                (
-                    peer.endpoint_pair.private_endpoint.to_string(),
-                    peer.id,
-                )
-            })
+            .map(|(peer, _)| (peer.endpoint_pair.private_endpoint.to_string(), peer.id))
             .collect();
         (value.myself, peers, value.is_start, value.is_end)
     }

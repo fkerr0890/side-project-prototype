@@ -2,10 +2,15 @@ use rustc_hash::FxHashSet;
 use std::{collections::HashMap, panic, process, sync::Arc, time::Duration};
 
 use crate::{
-    http::{SerdeHttpResponse, ServerContext}, message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer}, message_processing::{
+    http::{SerdeHttpResponse, ServerContext},
+    message::{DistributeMetadata, Message, MessageDirection, MetadataKind, NumId, Peer},
+    message_processing::{
         stage::{ClientApiRequest, MessageStaging},
         CipherSender, DPP_TTL_MILLIS, HEARTBEAT_INTERVAL_SECONDS,
-    }, node::{Node, NodeInfo}, utils::BidirectionalMpsc, MAX_TIME
+    },
+    node::{Node, NodeInfo},
+    utils::BidirectionalMpsc,
+    MAX_TIME,
 };
 use rand::{seq::IteratorRandom, Rng};
 use tokio::{
@@ -67,12 +72,8 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
         let is_end = host_indices.contains(&i);
         let is_start = start == i;
         let myself = Peer::new(endpoint_pair, id);
-        let (message_staging, to_staging, _, http_handler_tx) = setup_staging(
-            is_end,
-            Vec::with_capacity(0),
-            myself,
-            socket.clone(),
-        );
+        let (message_staging, to_staging, _, http_handler_tx) =
+            setup_staging(is_end, Vec::with_capacity(0), myself, socket.clone());
         tokio::spawn(async move {
             Node::new()
                 .listen(
@@ -99,13 +100,21 @@ pub async fn regenerate_nodes(num_hosts: usize, num_nodes: u16) {
         let node_info = my_end.recv().await.unwrap();
         node_info_map.insert(node_info.myself.id, node_info);
     }
-    fs::write("../peer_info.json", serde_json::to_vec(&node_info_map).unwrap()).await.unwrap();
+    fs::write(
+        "../peer_info.json",
+        serde_json::to_vec(&node_info_map).unwrap(),
+    )
+    .await
+    .unwrap();
 }
 
 pub async fn load_nodes_from_file(
-    node_info_file_path: &str
+    node_info_file_path: &str,
 ) -> (ServerContext, Vec<mpsc::UnboundedSender<ClientApiRequest>>) {
-    let nodes = serde_json::from_slice::<HashMap<NumId, NodeInfo>>(&fs::read(node_info_file_path).await.unwrap()).unwrap();
+    let nodes = serde_json::from_slice::<HashMap<NumId, NodeInfo>>(
+        &fs::read(node_info_file_path).await.unwrap(),
+    )
+    .unwrap();
     let mut server_context = None;
     let mut client_api_txs = Vec::new();
     for node_info in nodes.into_values() {
@@ -197,10 +206,5 @@ pub fn setup_staging(
         client_api_tx.clone(),
         client_api_rx,
     );
-    (
-        message_staging,
-        to_staging,
-        client_api_tx,
-        http_handler_tx,
-    )
+    (message_staging, to_staging, client_api_tx, http_handler_tx)
 }

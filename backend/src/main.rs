@@ -1,4 +1,9 @@
-use p2p::{http::ServerContext, message::{NumId, Peer}, node::Node, test_utils};
+use p2p::{
+    http::ServerContext,
+    message::{NumId, Peer},
+    node::Node,
+    test_utils,
+};
 use std::env;
 use tracing::Level;
 

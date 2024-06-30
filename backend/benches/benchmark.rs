@@ -11,8 +11,9 @@ use tracing::Level;
 fn bench_retrieval(c: &mut Criterion) {
     test_utils::setup(Level::INFO);
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let (server_context, _) =
-        runtime.block_on(test_utils::load_nodes_from_file("../peer_info_benchmarking.json"));
+    let (server_context, _) = runtime.block_on(test_utils::load_nodes_from_file(
+        "../peer_info_benchmarking.json",
+    ));
     time!(
         { runtime.block_on(send_request(&server_context)) },
         Some(Level::INFO)
