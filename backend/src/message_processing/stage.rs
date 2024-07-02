@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 use tokio::{select, sync::mpsc};
-use tracing::{debug, field, info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 use super::{
     search,
@@ -95,6 +95,7 @@ impl MessageStaging {
         ret
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     pub async fn receive(&mut self) -> EmptyOption {
         let send_checked_input = select! {
             message = self.from_inbound_gateway.recv() => return Some(self.process_inbound_message(message?).await),
@@ -107,6 +108,7 @@ impl MessageStaging {
         Some(())
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn pre_send_checked_multiple<T: IntoIterator<Item = Peer> + Debug>(
         &mut self,
         inputs: Vec<SendCheckedInput<T>>,
@@ -116,6 +118,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn pre_send_checked<T: IntoIterator<Item = Peer> + Debug>(
         &mut self,
         input: Option<SendCheckedInput<T>>,
@@ -127,6 +130,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn process_inbound_message(&mut self, message: (SocketAddrV4, Payload)) {
         let (sender_addr, message_bytes) = message;
         if let Ok(message) = bincode::deserialize::<KeyAgreementMessage>(&message_bytes.1) {
@@ -138,7 +142,7 @@ impl MessageStaging {
         };
     }
 
-    #[instrument(level = "trace", skip_all, fields(%sender_addr, myself = ?self.outbound_gateway.myself))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn stage_message(
         &mut self,
         message_bytes: Payload,
@@ -196,6 +200,7 @@ impl MessageStaging {
         None
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn reassemble_message(&mut self, message_parts: Vec<InboundMessage>) -> Message {
         let (message_bytes, senders, timestamp) = InboundMessage::reassemble_message(message_parts);
         let mut message = bincode::deserialize::<Message>(&message_bytes).unwrap();
@@ -243,6 +248,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn client_discover_logic(
         &mut self,
         metadata: &mut DiscoverMetadata,
@@ -259,6 +265,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn process_follow_up(&mut self, id: NumId) -> Option<SendCheckedInput<FxHashSet<Peer>>> {
         let message = self.cached_stream_messages.remove(&id)?;
         match message.metadata() {
@@ -286,6 +293,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn process_timebound_action(&mut self, actions: Option<Vec<TimeboundAction>>) {
         let actions = option_early_return!(actions);
         trace!(?actions, "process_timebound_action");
@@ -340,6 +348,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn insert_cached_stream_message(&mut self, id: NumId, message: Message) {
         assert!(!self.cached_stream_messages.contains_key(&id));
         self.event_manager.put_event(
@@ -349,7 +358,7 @@ impl MessageStaging {
         self.cached_stream_messages.insert(id, message);
     }
 
-    #[instrument(level = "trace", skip_all, fields(peers = field::Empty))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn send_heartbeats(&mut self) -> SendCheckedInput<FxHashSet<Peer>> {
         let mut peers: FxHashSet<Peer> =
             FxHashSet::from_iter(lock!(self.peer_ops).peers().into_iter());
@@ -375,10 +384,9 @@ impl MessageStaging {
         (peers, Message::new_heartbeat(Peer::default()), true, None)
     }
 
-    #[instrument(level = "trace", skip_all, fields(id = %message.id(), metadata = ?message.metadata(), direction = ?message.direction(), myself = %self.outbound_gateway.myself.id, new_direction = field::Empty))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn send_outbound_message(&mut self, mut message: Message) {
         let new_direction = self.get_direction(&mut message);
-        // tracing::Span::current().record("new_direction", format!("{:?}", new_direction));
         match new_direction {
             PropagationDirection::Forward => {
                 self.send_request(message).await;
@@ -391,6 +399,7 @@ impl MessageStaging {
         };
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn send_request(&mut self, mut message: Message) -> Option<Message> {
         let prev_sender = message.only_sender();
         message.set_direction(MessageDirection::Request);
@@ -402,6 +411,7 @@ impl MessageStaging {
         Some(message)
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn send_response(&mut self, mut message: Message) {
         let dest = option_early_return!(
             self.breadcrumb_service.get_dest(&message.id()),
@@ -421,7 +431,7 @@ impl MessageStaging {
         self.send_checked(dests, message, false).await;
     }
 
-    #[instrument(level = "trace", skip_all, fields(myself = %self.outbound_gateway.myself.id, ?message))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn send_checked(
         &mut self,
         dests: impl IntoIterator<Item = Peer> + Debug,
@@ -445,6 +455,7 @@ impl MessageStaging {
         Some(message)
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn check_key_agreement(&mut self, message: &Message) -> bool {
         if self.key_store.agreement_exists(&message.dest().id) {
             return true;
@@ -464,7 +475,7 @@ impl MessageStaging {
         false
     }
 
-    #[instrument(level = "trace", skip_all, fields(id = %message.id(), ?remaining_dests))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn insert_cached_outbound_message(&mut self, message: Message, remaining_dests: Vec<Peer>) {
         let peer_id = message.dest().id;
         if !self.cached_outbound_messages.contains_key(&peer_id) {
@@ -477,7 +488,7 @@ impl MessageStaging {
         outbound_messages.push((message, remaining_dests));
     }
 
-    #[instrument(level = "trace", skip_all, fields(id = %from_http_handler.0.id(), host_name = from_http_handler.0.metadata().host_name(), myself = %self.outbound_gateway.myself.id))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn initial_retrieval_request(
         &mut self,
         from_http_handler: (Message, mpsc::UnboundedSender<SerdeHttpResponse>),
@@ -520,7 +531,7 @@ impl MessageStaging {
         }
     }
 
-    #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn initial_distribution_request(&mut self, id: NumId, metadata: DistributeMetadata) {
         if !self
             .stream_session_manager
@@ -575,7 +586,7 @@ impl MessageStaging {
         );
     }
 
-    #[instrument(level = "trace", skip_all, fields(%received_id))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn send_distribution_request(&mut self, received_id: NumId, host_name: String) {
         self.cached_stream_messages.remove(&received_id);
         self.stream_session_manager
@@ -604,6 +615,7 @@ impl MessageStaging {
         self.insert_cached_stream_message(new_id, message);
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn get_direction(&mut self, message: &mut Message) -> PropagationDirection {
         if let MessageDirection::Response = message.direction() {
             return PropagationDirection::Reverse;
@@ -647,6 +659,7 @@ impl MessageStaging {
         direction
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn try_add_breadcrumb(
         &mut self,
         id: NumId,
@@ -663,7 +676,7 @@ impl MessageStaging {
         true
     }
 
-    #[instrument(level = "trace", skip_all, fields(id = %message.id()))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn execute_final_action(&mut self, message: Message) {
         let (sender, id) = (message.only_sender(), message.id());
         let sender = if let Some(sender) = sender {
@@ -682,6 +695,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn final_action_search(&mut self, metadata: SearchMetadata, id: NumId) {
         let SearchMetadata {
             origin: _,
@@ -712,6 +726,7 @@ impl MessageStaging {
         self.pre_send_checked(send_checked_input).await;
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn final_action_discover(&mut self, metadata: DiscoverMetadata, id: NumId) {
         if metadata.peer_list.len() == metadata.hop_count.1 as usize {
             for peer in metadata.peer_list {
@@ -728,6 +743,7 @@ impl MessageStaging {
             .stage_message(id, metadata, peer_len_curr_max);
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn final_action_stream(&mut self, metadata: StreamMetadata, sender: Peer, id: NumId) {
         let response = match metadata.payload {
             StreamPayloadKind::Request(payload) => {
@@ -777,6 +793,7 @@ impl MessageStaging {
         self.send_checked(vec![sender], response, true).await;
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn handle_distribution_response(
         &mut self,
         response: DistributionResponse,
@@ -821,6 +838,7 @@ impl MessageStaging {
         }
     }
 
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn send_initial_stream_message(
         &mut self,
         id: NumId,
@@ -836,7 +854,7 @@ impl MessageStaging {
         Some((vec![sender], request, true, Some(id)))
     }
 
-    #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn send_nat_heartbeats(&mut self, peer: Peer) {
         if peer.id == self.outbound_gateway.myself.id
             || self.unconfirmed_peers.contains_key(&peer.id)
@@ -852,7 +870,7 @@ impl MessageStaging {
         self.unconfirmed_peers.insert(peer.id, peer);
     }
 
-    #[instrument(level = "trace", skip(self), fields(myself = %self.outbound_gateway.myself.id))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn add_new_peer(&mut self, peer: Peer) {
         let peer_endpoint = peer.endpoint_pair.public_endpoint;
         let mut peers = lock!(self.peer_ops);
@@ -866,7 +884,7 @@ impl MessageStaging {
         info!(peers = ?peers.peers().into_iter().map(|p| p.id).collect::<Vec<NumId>>());
     }
 
-    #[instrument(level = "trace", skip_all, fields(peer_id = %message.peer_id, myself = ?self.outbound_gateway.myself))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     fn handle_key_agreement(
         &mut self,
         message: KeyAgreementMessage,
@@ -916,7 +934,7 @@ impl MessageStaging {
         HandleKeyAgreementResult::SendCachedOutboundMessages(send_checked_inputs)
     }
 
-    #[instrument(level = "trace", skip(self))]
+    #[instrument(level = "trace", skip(self), fields(myself = ?self.outbound_gateway.myself))]
     async fn post_handle_key_agreement(&mut self, result: HandleKeyAgreementResult) {
         match result {
             HandleKeyAgreementResult::SendResponse(dest, public_key) => {
@@ -934,6 +952,7 @@ impl MessageStaging {
     pub fn client_api_tx(&self) -> &mpsc::UnboundedSender<ClientApiRequest> {
         &self.client_api_tx
     }
+
     pub fn peer_ops(&self) -> &Arc<Mutex<PeerOps>> {
         &self.peer_ops
     }
