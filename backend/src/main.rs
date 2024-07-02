@@ -9,7 +9,7 @@ use tracing::Level;
 
 #[tokio::main]
 async fn main() {
-    test_utils::setup(Level::INFO);
+    test_utils::setup(Some(Level::INFO));
     let args: Vec<String> = env::args().collect();
     let (private_ip, private_port, public_ip, peer_ip, peer_port, is_start) = (
         args[1].clone(),

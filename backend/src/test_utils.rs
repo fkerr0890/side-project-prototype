@@ -23,7 +23,7 @@ use tracing::{debug, Level};
 use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
 
-pub fn setup(tracing_level: Level) {
+pub fn setup(tracing_level: Option<Level>) {
     let orig_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         // invoke the default handler and exit the process
@@ -32,12 +32,14 @@ pub fn setup(tracing_level: Level) {
         process::exit(1);
     }));
 
-    tracing_subscriber::fmt()
-        .with_file(true)
-        .with_line_number(true)
-        .with_span_events(FmtSpan::NEW)
-        .with_max_level(tracing_level)
-        .init();
+    if let Some(level) = tracing_level {
+        tracing_subscriber::fmt()
+            .with_file(true)
+            .with_line_number(true)
+            .with_span_events(FmtSpan::NEW)
+            .with_max_level(level)
+            .init();
+    }
     // console_subscriber::init();
 }
 

@@ -9,7 +9,7 @@ use p2p::{
 use tracing::Level;
 
 fn bench_retrieval(c: &mut Criterion) {
-    test_utils::setup(Level::INFO);
+    test_utils::setup(Some(Level::INFO));
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let (server_context, _) = runtime.block_on(test_utils::load_nodes_from_file(
         "../peer_info_benchmarking.json",
