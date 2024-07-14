@@ -36,5 +36,5 @@ Fred Kerr [Linkedin](https://www.linkedin.com/in/frederick-kerr-4bb9a6183/)
 ## Acknowledgments
 
 * [Peer-to-Peer Communication Across Network Address Translators](https://pdos.csail.mit.edu/papers/p2pnat.pdf)
-* [Tailscale- How NAT Traversal Works](https://gist.github.com/PurpleBooth/109311bb0361f32d87a2](https://tailscale.com/blog/how-nat-traversal-works/)
+* [Tailscale- How NAT Traversal Works](https://tailscale.com/blog/how-nat-traversal-works/)
 * All the authors of and contributors to the Rust crates I use
