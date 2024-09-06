@@ -122,6 +122,7 @@ impl OutboundGateway {
     ) {
         if message.check_expiry() {
             info!("Message expired: {}", message.id());
+            return;
         }
         let serialized = result_early_return!(bincode::serialize(&message));
         let sender = if dest.socket.ip().is_private() {
